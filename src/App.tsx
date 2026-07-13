@@ -22,7 +22,7 @@ export function App() {
         {activeView === "home" && <AgentHomeView dispatch={dispatch} state={state} onNavigate={setActiveView} />}
         {activeView === "clarification" && <ClarificationView dispatch={dispatch} state={state} onNavigate={setActiveView} />}
         {activeView === "plan" && <ResourcePlanView dispatch={dispatch} state={state} onNavigate={setActiveView} />}
-        {activeView === "execution" && <ExecutionView dispatch={dispatch} state={state} />}
+        {activeView === "execution" && <ExecutionView dispatch={dispatch} state={state} onNavigate={setActiveView} />}
         {activeView === "workspace" && <WorkspaceView state={state} />}
       </main>
     </div>

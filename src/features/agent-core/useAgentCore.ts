@@ -1,24 +1,42 @@
-import { useCallback, useEffect, useState } from "react";
-import { getNextMockEvent } from "./mockRunner";
-import { createInitialAgentState, transition } from "./machine";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { LocalRuleModelRuntime } from "./localRuleModel";
+import { FallbackModelRuntime, RemoteLlmModelRuntime } from "./remoteModel";
+import { createMockAgentRuntime } from "./runtime";
 import type { AgentEvent } from "./types";
 
-const mockStepDelayMs = 420;
+function createRendererAgentRuntime() {
+  const localModel = new LocalRuleModelRuntime();
+  const requestModelDecision = window.xunleiAgent?.requestModelDecision;
+  if (!requestModelDecision) return createMockAgentRuntime(localModel);
+
+  const remoteModel = new RemoteLlmModelRuntime({
+    async requestDecision(context) {
+      const result = await requestModelDecision(context);
+      if (!result.ok) throw new Error(result.error);
+      return result.decision;
+    }
+  });
+  return createMockAgentRuntime(new FallbackModelRuntime(remoteModel, localModel));
+}
 
 export function useAgentCore() {
-  const [state, setState] = useState(createInitialAgentState);
+  const runtimeRef = useRef<ReturnType<typeof createRendererAgentRuntime>>();
+  if (!runtimeRef.current) runtimeRef.current = createRendererAgentRuntime();
+  const runtime = runtimeRef.current;
+  const [state, setState] = useState(() => runtime.getState());
 
   const dispatch = useCallback((event: AgentEvent) => {
-    setState((current) => transition(current, event));
-  }, []);
+    runtime.dispatch(event);
+  }, [runtime]);
 
   useEffect(() => {
-    const nextEvent = getNextMockEvent(state);
-    if (!nextEvent) return undefined;
-
-    const timer = window.setTimeout(() => dispatch(nextEvent), mockStepDelayMs);
-    return () => window.clearTimeout(timer);
-  }, [dispatch, state]);
+    const unsubscribe = runtime.subscribe(setState);
+    runtime.start();
+    return () => {
+      unsubscribe();
+      runtime.stop();
+    };
+  }, [runtime]);
 
   return { state, dispatch };
 }

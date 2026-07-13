@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import {
   AlertTriangle,
   Bot,
+  BrainCircuit,
   CheckCircle2,
   ChevronRight,
   CircleDot,
@@ -17,12 +18,15 @@ import {
   Loader2,
   PackageCheck,
   Play,
+  RefreshCw,
   Route,
   ShieldCheck,
   Sparkles,
   TerminalSquare,
+  Wrench,
   XCircle
 } from "lucide-react";
+import { catalogById } from "../features/agent-core/catalog";
 import { createResourceManifest } from "../features/agent-core/manifest";
 import {
   estimatedMinutes,
@@ -43,7 +47,7 @@ const statusMeta: Record<ResourceStatus, { label: string; className: string }> =
   downloading: { label: "下载中", className: "status-active" },
   downloaded: { label: "待验证", className: "status-info" },
   verified: { label: "已验证", className: "status-success" },
-  failed: { label: "需重规划", className: "status-danger" },
+  failed: { label: "需处理", className: "status-danger" },
   skipped: { label: "已跳过", className: "status-warning" },
   replaced: { label: "已替代", className: "status-queued" }
 };
@@ -59,17 +63,21 @@ function ResourceStatusBadge({ status }: { status: ResourceStatus }) {
 
 export function AgentTopBar({ state }: { state: AgentState }) {
   const active = state.phase === "routing" || state.phase === "planning" || state.phase === "replanning";
+  const latestDecision = state.agentRun.decisions[state.agentRun.decisions.length - 1];
+  const statusClass = state.phase === "handoff"
+    ? state.workspace.ready ? "status-success" : "status-warning"
+    : active ? "status-active" : "status-info";
   return (
     <header className="topbar">
       <div className="title-block">
         <div className="app-title-row">
           <span className="app-title">迅雷 AI Task Agent</span>
-          <span className={`status-pill ${state.phase === "handoff" ? "status-success" : active ? "status-active" : "status-info"}`}>
+          <span className={`status-pill ${statusClass}`}>
             {active ? <Loader2 className="spin" size={14} /> : <Bot size={14} />}
             {phaseLabel(state.phase)}
           </span>
         </div>
-        <span className="app-subtitle">Agent Core r{state.revision} · Windows 11 x64 · 前端内存模拟</span>
+        <span className="app-subtitle">Agent Core r{state.revision} · Windows 11 x64 · {latestDecision?.provider === "remote-llm" ? "远程模型" : "本地规则模型"}</span>
       </div>
       <div className="topbar-meta">
         <span className="meta-chip"><ShieldCheck size={15} />可信目录</span>
@@ -135,7 +143,21 @@ export function AgentHomeView({ state, dispatch, onNavigate }: { state: AgentSta
 export function ClarificationView({ state, dispatch, onNavigate }: { state: AgentState; dispatch: Dispatch; onNavigate: Navigate }) {
   const question = getActiveClarification(state);
   if (!question) {
-    return <WaitingPanel title="正在路由任务" copy="Agent 将根据系统画像加载下一项澄清。" />;
+    if (state.phase === "waiting_approval") {
+      return (
+        <section className="agent-view">
+          <div className="agent-waiting">
+            <CheckCircle2 size={25} />
+            <strong>澄清完成，资源计划已生成</strong>
+            <span>模型已完成可信目录查询，计划仍需用户确认。</span>
+            <button className="btn btn-primary" type="button" onClick={() => onNavigate("plan")}>
+              <ListChecks size={16} />查看资源计划
+            </button>
+          </div>
+        </section>
+      );
+    }
+    return <WaitingPanel title={state.phase === "planning" ? "正在生成资源计划" : "正在路由任务"} copy="Agent 正在读取系统画像并决定下一项动作。" />;
   }
   return (
     <section className="agent-view clarification-view">
@@ -148,7 +170,6 @@ export function ClarificationView({ state, dispatch, onNavigate }: { state: Agen
         </div>
         {!question.required && <button className="btn btn-ghost" type="button" onClick={() => dispatch({ type: "SKIP_CLARIFICATION", questionId: question.id })}>跳过此非必填问题</button>}
       </section>
-      {state.phase === "planning" && <button className="btn btn-primary" type="button" onClick={() => onNavigate("plan")}><ListChecks size={16} />查看资源计划</button>}
     </section>
   );
 }
@@ -160,6 +181,7 @@ export function ResourcePlanView({ state, dispatch, onNavigate }: { state: Agent
   return (
     <section className="agent-view plan-view">
       <div className="agent-page-heading"><div><span>资源计划 r{state.revision}</span><h1>{state.replanReason ? "替代计划等待再次确认" : "可信资源准备计划"}</h1></div><p>总量 {formatMb(totalDownloadSizeMb(state))} · 预计 {estimatedMinutes(state)} 分钟</p></div>
+      {state.planExplanation && !state.replanReason && <div className="agent-plan-rationale"><BrainCircuit size={17} /><span><strong>模型建议</strong>{state.planExplanation}</span></div>}
       {state.replanReason && <div className="agent-alert"><AlertTriangle size={17} />{state.replanReason === "download_failed" ? "下载失败后已生成备用来源。" : state.replanReason === "version_mismatch" ? "版本验证不匹配，已生成替代版本。" : "必需资源被取消，已生成替代交付方案。"}</div>}
       <div className="agent-resource-list">
         {state.resources.map((resource) => (
@@ -177,13 +199,55 @@ export function ResourcePlanView({ state, dispatch, onNavigate }: { state: Agent
   );
 }
 
-export function ExecutionView({ state, dispatch }: { state: AgentState; dispatch: Dispatch }) {
-  const isWorking = ["downloading", "verifying", "replanning"].includes(state.phase);
+export function ExecutionView({ state, dispatch, onNavigate }: { state: AgentState; dispatch: Dispatch; onNavigate: Navigate }) {
+  const isWorking = ["downloading", "awaiting_failure_action", "verifying", "replanning"].includes(state.phase);
+  const latestDecision = state.agentRun.decisions[state.agentRun.decisions.length - 1];
+  const failedResource = state.resources.find((resource) => resource.status === "failed");
+  const fallbackResource = failedResource?.fallbackId ? catalogById.get(failedResource.fallbackId) : undefined;
+  const failedToolResult = [...state.agentRun.toolResults]
+    .reverse()
+    .find((result) => result.tool === "simulate_download" && result.status === "error");
   return (
     <section className="agent-view execution-view">
       <div className="agent-page-heading"><div><span>执行监控</span><h1>Agent 正在{phaseLabel(state.phase)}</h1></div><button className="btn btn-ghost" disabled={!isWorking} type="button" onClick={() => dispatch({ type: "CANCEL_TASK" })}><XCircle size={16} />取消任务</button></div>
-      <div className="execution-summary"><div><span>总体进度</span><strong>{overallProgress(state)}%</strong></div><div><span>活动资源</span><strong>{state.activeResourceId ?? "等待"}</strong></div><div><span>计划修订</span><strong>r{state.revision}</strong></div></div>
-      <div className="execution-grid"><section className="agent-panel"><div className="agent-panel-heading"><PackageCheck size={17} /><h2>下载任务</h2></div>{state.resources.map((resource) => <div className="execution-resource" key={resource.id}><div><strong>{resource.name}</strong><ResourceStatusBadge status={resource.status} /></div><div className="progress-track"><span style={{ width: `${resource.progress}%` }} /></div><small>{resource.progress}% {resource.failureReason ? `· ${resource.failureReason}` : ""}</small></div>)}</section><section className="agent-panel agent-log-panel"><div className="agent-panel-heading"><FileText size={17} /><h2>操作日志</h2></div>{state.logs.length ? <div className="agent-log-list">{state.logs.map((log) => <span className={`agent-log-${log.level}`} key={log.id}><small>{log.at}</small>{log.message}</span>)}</div> : <span className="agent-empty-copy">等待 Agent 事件。</span>}</section></div>
+      <div className="execution-summary"><div><span>总体进度</span><strong>{overallProgress(state)}%</strong></div><div><span>本轮模型步骤</span><strong>{state.agentRun.step}/{state.agentRun.maxSteps}</strong></div><div><span>模型来源</span><strong>{latestDecision?.provider === "remote-llm" ? "远程 LLM" : "本地规则"}</strong></div><div><span>计划修订</span><strong>r{state.revision}</strong></div></div>
+      {state.phase === "awaiting_failure_action" && failedResource ? (
+        <section className="failure-resolution-panel" role="alert" aria-live="assertive">
+          <div className="failure-resolution-heading"><span><AlertTriangle size={19} /></span><div><small>受控工具执行失败</small><h2>{failedResource.name} 需要人工决策</h2></div></div>
+          <p>{failedResource.failureReason ?? "资源下载失败，请选择恢复方式。"}</p>
+          <div className="failure-resolution-meta"><span>错误码<strong>{failedToolResult?.error?.code ?? "DOWNLOAD_FAILED"}</strong></span><span>来源<strong>{failedResource.source}</strong></span><span>已尝试<strong>{failedResource.attempts} 次</strong></span></div>
+          <div className="failure-actions">
+            <button className="btn btn-secondary" type="button" onClick={() => dispatch({ type: "RESOLVE_DOWNLOAD_FAILURE", action: "primary-retry" })}><RefreshCw size={16} />重试原来源</button>
+            <button className="btn btn-primary" disabled={!fallbackResource} type="button" title={fallbackResource ? `切换到 ${fallbackResource.source}` : "可信目录中没有可用替代来源"} onClick={() => dispatch({ type: "RESOLVE_DOWNLOAD_FAILURE", action: "trusted-mirror" })}><GitBranch size={16} />使用可信替代来源</button>
+            <button className="btn btn-ghost" type="button" onClick={() => { dispatch({ type: "RESOLVE_DOWNLOAD_FAILURE", action: "delegate-agent-b" }); onNavigate("workspace"); }}><Bot size={16} />交给 Agent B</button>
+          </div>
+          <small className="failure-resolution-note">重试或替代来源都会生成新的资源计划，并等待再次确认后执行。</small>
+        </section>
+      ) : null}
+      {state.phase === "replanning" && state.replanReason ? <section className="replan-status-band"><Loader2 className="spin" size={17} /><div><strong>Agent 正在分析失败上下文</strong><span>模型将按用户选择生成新的可信资源计划。</span></div></section> : null}
+      {state.phase === "waiting_approval" && state.replanReason ? <section className="replan-status-band replan-ready"><ClipboardCheck size={17} /><div><strong>替代计划 r{state.revision} 已生成</strong><span>该 revision 尚未获得执行权限。</span></div><button className="btn btn-primary" type="button" onClick={() => onNavigate("plan")}><ShieldCheck size={16} />查看并确认</button></section> : null}
+      <div className="execution-grid">
+        <section className="agent-panel">
+          <div className="agent-panel-heading"><PackageCheck size={17} /><h2>下载任务</h2></div>
+          {state.resources.length ? state.resources.map((resource) => <div className="execution-resource" key={resource.id}><div><strong>{resource.name}</strong><ResourceStatusBadge status={resource.status} /></div><div className="progress-track"><span style={{ width: `${resource.progress}%` }} /></div><small>{resource.progress}% {resource.failureReason ? `· ${resource.failureReason}` : ""}</small></div>) : <span className="agent-empty-copy">等待模型生成资源计划。</span>}
+        </section>
+        <section className="agent-panel agent-trace-panel">
+          <div className="agent-panel-heading"><BrainCircuit size={17} /><h2>Agent 决策轨迹</h2></div>
+          <div className="agent-trace-group">
+            <h3>模型决策</h3>
+            {state.agentRun.decisions.length ? state.agentRun.decisions.map((decision, index) => <div className="agent-trace-row" key={decision.decisionId}><span className="agent-trace-icon"><Bot size={14} /></span><div><strong>步骤 {index + 1} · {decision.action.type}</strong><small>{decision.explanation}</small></div><em>{decision.provider === "remote-llm" ? "LLM" : "本地"}</em></div>) : <span className="agent-empty-copy">等待模型决策。</span>}
+          </div>
+          <div className="agent-trace-group">
+            <h3>工具结果</h3>
+            {state.agentRun.toolResults.length ? state.agentRun.toolResults.map((result) => <div className="agent-trace-row" key={result.callId}><span className="agent-trace-icon"><Wrench size={14} /></span><div><strong>{result.tool}</strong><small>{result.status === "success" ? "受控工具执行成功" : result.error?.message ?? "工具已取消"}</small></div><em className={`trace-${result.status}`}>{result.status}</em></div>) : <span className="agent-empty-copy">尚未调用工具。</span>}
+          </div>
+          <div className="agent-trace-group">
+            <h3>权限与审批</h3>
+            {state.agentRun.policyAudit.length ? state.agentRun.policyAudit.map((entry) => <div className="agent-trace-row" key={entry.actionId}><span className="agent-trace-icon"><ShieldCheck size={14} /></span><div><strong>{entry.decision.risk.toUpperCase()} 风险</strong><small>{entry.decision.reason}</small></div><em className={`trace-${entry.decision.outcome}`}>{entry.decision.outcome}</em></div>) : <span className="agent-empty-copy">尚无策略判定。</span>}
+          </div>
+        </section>
+        <section className="agent-panel agent-log-panel"><div className="agent-panel-heading"><FileText size={17} /><h2>操作日志</h2></div>{state.logs.length ? <div className="agent-log-list">{state.logs.map((log) => <span className={`agent-log-${log.level}`} key={log.id}><small>{log.at}</small>{log.message}</span>)}</div> : <span className="agent-empty-copy">等待 Agent 事件。</span>}</section>
+      </div>
     </section>
   );
 }
@@ -196,6 +260,7 @@ export function WorkspaceView({ state }: { state: AgentState }) {
   return (
     <section className="agent-view workspace-view">
       <div className="agent-page-heading"><div><span>工作区交接</span><h1>{state.workspace.ready ? "交接包已就绪" : "等待资源准备完成"}</h1></div><p>{state.systemProfile.workspaceRoot}</p></div>
+      {state.agentRun.status === "delegated" ? <section className="agent-b-handoff-notice"><Bot size={19} /><div><strong>已交给 Agent B 处理未完成资源</strong><span>当前 Agent 已保留任务目标、失败原因、资源状态和计划 revision；工作区尚未标记为可用。</span></div></section> : null}
       <div className="workspace-agent-grid"><section className="agent-panel"><div className="agent-panel-heading"><FileCode2 size={17} /><h2>文件清单</h2></div><div className="workspace-file-buttons">{state.workspace.files.map((file) => <button className={previewFile === file ? "file-selected" : ""} key={file} type="button" onClick={() => setPreviewFile(file)}>{file === "resource-manifest.json" ? <FileJson2 size={15} /> : <FileText size={15} />}{file}</button>)}</div></section><section className="agent-panel"><div className="agent-panel-heading"><FileText size={17} /><h2>{previewFile} 预览</h2></div><pre className="workspace-code-preview">{preview}</pre></section><section className="agent-panel"><div className="agent-panel-heading"><Bot size={17} /><h2>Agent 交接面板</h2></div><div className="handoff-list"><span><strong>目标</strong>{state.task || "尚未输入任务"}</span><span><strong>资源状态</strong>{state.workspace.ready ? "已验证，可交接" : "仍有资源未验证"}</span><span><strong>缺失项</strong>{missing.length ? missing.map((resource) => resource.name).join("、") : "无"}</span><span><strong>下一步</strong>{state.workspace.nextAction}</span></div><button className="btn btn-ghost" disabled type="button" title="纯前端内存模拟不会创建本地目录"><FolderOpen size={16} />打开本地工作目录</button></section></div>
     </section>
   );
