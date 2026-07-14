@@ -206,9 +206,12 @@ function enterReplanning(
   reason: ReplanReason,
   message: string
 ): AgentState {
+  const failedResource = state.resources.find((resource) => resource.id === resourceId);
   const requestedReplanStrategy =
     state.requestedReplanStrategy ??
-    (state.answers["mirror-policy"] === "允许备用镜像" ? "trusted-mirror" : "primary-retry");
+    (state.answers["mirror-policy"] === "允许备用镜像" && failedResource?.fallbackId
+      ? "trusted-mirror"
+      : "primary-retry");
   const resources = state.resources.map((resource) =>
     resource.id === resourceId
       ? { ...resource, status: "failed" as ResourceStatus, failureReason: message }

@@ -1921,6 +1921,105 @@ textarea:focus-visible {
   padding: 12px 14px;
 }
 
+.model-fallback-notice {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin-top: 16px;
+  border: 1px solid rgb(241 180 76 / 26%);
+  border-left: 3px solid var(--amber);
+  border-radius: 6px;
+  background: rgb(63 49 27 / 52%);
+  color: #ffdca3;
+  padding: 12px 14px;
+}
+
+.model-fallback-notice > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.model-fallback-notice strong,
+.model-fallback-notice span {
+  display: block;
+}
+
+.model-fallback-notice strong {
+  color: #fff0cf;
+  font-size: 13px;
+}
+
+.model-fallback-notice span {
+  margin-top: 3px;
+  color: #d4c19b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.model-connection-state-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 22px;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 3%);
+  padding: 14px;
+}
+
+.model-connection-state-card strong {
+  color: #e5eef8;
+  font-size: 14px;
+}
+
+.model-connection-state-card small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.model-connection-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-top: 14px;
+  border: 1px solid rgb(243 109 116 / 28%);
+  border-radius: 8px;
+  background: rgb(243 109 116 / 10%);
+  color: #ffbec2;
+  padding: 11px;
+}
+
+.model-connection-error strong,
+.model-connection-error span {
+  display: block;
+}
+
+.model-connection-error strong {
+  font-size: 11px;
+}
+
+.model-connection-error span {
+  margin-top: 3px;
+  color: #e5b7bb;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settings-row code {
+  max-width: 48%;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #111a27;
+  color: #cfe4f8;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  padding: 8px 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .replan-status-band div,
 .agent-b-handoff-notice div {
   min-width: 0;

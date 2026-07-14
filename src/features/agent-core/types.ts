@@ -155,12 +155,6 @@ export type AgentAction =
     }
   | {
       actionId: string;
-      type: "request_approval";
-      subjectActionId: string;
-      reason: string;
-    }
-  | {
-      actionId: string;
       type: "finish";
       summary: string;
     };

@@ -4,11 +4,12 @@ import {
   DownloadCloud,
   Home,
   ListChecks,
+  Settings,
   Zap
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
-export type AppView = "home" | "clarification" | "plan" | "execution" | "workspace";
+export type AppView = "home" | "clarification" | "plan" | "execution" | "workspace" | "settings";
 
 type AvailableNavItem = {
   key: AppView;
@@ -17,14 +18,7 @@ type AvailableNavItem = {
   available: true;
 };
 
-type UnavailableNavItem = {
-  key: AppView | "workspace" | "settings";
-  label: string;
-  icon: LucideIcon;
-  available: false;
-};
-
-type NavItem = AvailableNavItem | UnavailableNavItem;
+type NavItem = AvailableNavItem;
 
 const navItems: NavItem[] = [
   { key: "home", label: "首页", icon: Home, available: true },
@@ -32,6 +26,7 @@ const navItems: NavItem[] = [
   { key: "plan", label: "计划", icon: ListChecks, available: true },
   { key: "execution", label: "执行", icon: DownloadCloud, available: true },
   { key: "workspace", label: "工作区", icon: FolderKanban, available: true },
+  { key: "settings", label: "设置", icon: Settings, available: true }
 ];
 
 type SidebarProps = {

@@ -9,6 +9,9 @@
     "build": "tsc -p tsconfig.app.json && tsc -p tsconfig.node.json && tsc -p electron/tsconfig.json && vite build",
     "typecheck": "tsc -p tsconfig.app.json && tsc -p tsconfig.node.json && tsc -p electron/tsconfig.json",
     "verify:agent-core": "node scripts/verify-agent-core.mjs",
+    "verify:electron-renderer": "npm run build && electron scripts/verify-electron-renderer.cjs",
+    "verify:model-client": "node scripts/verify-model-client.mjs",
+    "verify:production-build": "npm run build && node scripts/verify-production-build.mjs",
     "preview": "npm run build && electron ."
   },
   "dependencies": {

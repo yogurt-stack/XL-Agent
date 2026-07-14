@@ -158,22 +158,6 @@ export class DefaultAgentPolicy implements AgentPolicy {
       };
     }
 
-    if (action.type === "request_approval") {
-      if (state.resources.length === 0) {
-        return {
-          outcome: "deny",
-          risk: "high",
-          reason: "没有可展示的资源计划，不能发起空审批。"
-        };
-      }
-      return {
-        outcome: "require_approval",
-        risk: "medium",
-        reason: action.reason,
-        approvalId: action.subjectActionId
-      };
-    }
-
     return {
       outcome: "allow",
       risk: "low",

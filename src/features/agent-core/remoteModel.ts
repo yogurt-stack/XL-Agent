@@ -1,4 +1,5 @@
 import type { ModelRuntime, RemoteModelTransport } from "./interfaces";
+import { ModelConnectionRequestError } from "./modelConnection";
 import type { AgentAction, ModelContext, ModelDecision } from "./types";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -48,13 +49,10 @@ function isAgentAction(value: unknown): value is AgentAction {
     }
     return value.call.name === "simulate_download" && typeof value.call.input.resourceId === "string";
   }
-  if (value.type === "request_approval") {
-    return typeof value.subjectActionId === "string" && typeof value.reason === "string";
-  }
   return value.type === "finish" && typeof value.summary === "string";
 }
 
-function parseRemoteDecision(value: unknown): ModelDecision {
+export function parseRemoteDecision(value: unknown): ModelDecision {
   if (
     !isRecord(value) ||
     typeof value.decisionId !== "string" ||
@@ -62,7 +60,11 @@ function parseRemoteDecision(value: unknown): ModelDecision {
     typeof value.explanation !== "string" ||
     !isAgentAction(value.action)
   ) {
-    throw new Error("远程模型没有返回合法的 ModelDecision。");
+    throw new ModelConnectionRequestError({
+      code: "MODEL_INVALID_DECISION",
+      message: "远程模型没有返回合法的 ModelDecision。",
+      retriable: true
+    });
   }
 
   return {
@@ -84,16 +86,30 @@ export class RemoteLlmModelRuntime implements ModelRuntime {
 }
 
 /** 主模型不可用或输出非法时，自动使用本地确定性模型继续任务。 */
+export type FallbackModelObserver = {
+  shouldAttemptPrimary?: () => boolean;
+  onPrimarySuccess?: (decision: ModelDecision) => void;
+  onPrimaryFailure?: (error: unknown) => void;
+};
+
 export class FallbackModelRuntime implements ModelRuntime {
   constructor(
     private readonly primary: ModelRuntime,
-    private readonly fallback: ModelRuntime
+    private readonly fallback: ModelRuntime,
+    private readonly observer: FallbackModelObserver = {}
   ) {}
 
   async decide(context: ModelContext): Promise<ModelDecision> {
+    if (this.observer.shouldAttemptPrimary && !this.observer.shouldAttemptPrimary()) {
+      return this.fallback.decide(context);
+    }
+
     try {
-      return await this.primary.decide(context);
-    } catch {
+      const decision = await this.primary.decide(context);
+      this.observer.onPrimarySuccess?.(decision);
+      return decision;
+    } catch (error) {
+      this.observer.onPrimaryFailure?.(error);
       return this.fallback.decide(context);
     }
   }

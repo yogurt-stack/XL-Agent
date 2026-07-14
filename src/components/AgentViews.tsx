@@ -20,14 +20,18 @@ import {
   Play,
   RefreshCw,
   Route,
+  Server,
   ShieldCheck,
   Sparkles,
   TerminalSquare,
+  Wifi,
+  WifiOff,
   Wrench,
   XCircle
 } from "lucide-react";
 import { catalogById } from "../features/agent-core/catalog";
 import { createResourceManifest } from "../features/agent-core/manifest";
+import type { ModelConnectionState } from "../features/agent-core/modelConnection";
 import {
   estimatedMinutes,
   overallProgress,
@@ -39,7 +43,7 @@ import { getActiveClarification } from "../features/agent-core/machine";
 import type { AgentEvent, AgentState, ResourceStatus } from "../features/agent-core/types";
 
 type Dispatch = (event: AgentEvent) => void;
-type Navigate = (view: "home" | "clarification" | "plan" | "execution" | "workspace") => void;
+type Navigate = (view: "home" | "clarification" | "plan" | "execution" | "workspace" | "settings") => void;
 
 const statusMeta: Record<ResourceStatus, { label: string; className: string }> = {
   pending: { label: "待确认", className: "status-muted" },
@@ -61,9 +65,27 @@ function ResourceStatusBadge({ status }: { status: ResourceStatus }) {
   return <span className={`resource-status ${meta.className}`}>{meta.label}</span>;
 }
 
-export function AgentTopBar({ state }: { state: AgentState }) {
+const modelConnectionMeta: Record<
+  ModelConnectionState["status"],
+  { label: string; className: string }
+> = {
+  unconfigured: { label: "本地模式", className: "status-muted" },
+  configured: { label: "远程已配置", className: "status-info" },
+  checking: { label: "检测模型", className: "status-active" },
+  remote_available: { label: "远程可用", className: "status-success" },
+  fallback_local: { label: "已回退本地", className: "status-warning" },
+  connection_failed: { label: "连接失败", className: "status-danger" }
+};
+
+export function AgentTopBar({
+  state,
+  modelConnection
+}: {
+  state: AgentState;
+  modelConnection: ModelConnectionState;
+}) {
   const active = state.phase === "routing" || state.phase === "planning" || state.phase === "replanning";
-  const latestDecision = state.agentRun.decisions[state.agentRun.decisions.length - 1];
+  const connectionMeta = modelConnectionMeta[modelConnection.status];
   const statusClass = state.phase === "handoff"
     ? state.workspace.ready ? "status-success" : "status-warning"
     : active ? "status-active" : "status-info";
@@ -77,11 +99,15 @@ export function AgentTopBar({ state }: { state: AgentState }) {
             {phaseLabel(state.phase)}
           </span>
         </div>
-        <span className="app-subtitle">Agent Core r{state.revision} · Windows 11 x64 · {latestDecision?.provider === "remote-llm" ? "远程模型" : "本地规则模型"}</span>
+        <span className="app-subtitle">Agent Core r{state.revision} · Windows 11 x64 · {modelConnection.activeProvider === "remote-llm" ? "远程模型" : "本地规则模型"}</span>
       </div>
       <div className="topbar-meta">
         <span className="meta-chip"><ShieldCheck size={15} />可信目录</span>
         <span className="meta-chip"><TerminalSquare size={15} />{state.systemProfile.shell}</span>
+        <span className={`meta-chip ${connectionMeta.className}`} title={modelConnection.error?.message}>
+          {modelConnection.status === "checking" ? <Loader2 className="spin" size={15} /> : modelConnection.activeProvider === "remote-llm" ? <Wifi size={15} /> : <WifiOff size={15} />}
+          {connectionMeta.label}
+        </span>
         <span className="meta-chip meta-chip-ok"><CircleDot size={15} />状态机已启用</span>
       </div>
     </header>
@@ -199,9 +225,8 @@ export function ResourcePlanView({ state, dispatch, onNavigate }: { state: Agent
   );
 }
 
-export function ExecutionView({ state, dispatch, onNavigate }: { state: AgentState; dispatch: Dispatch; onNavigate: Navigate }) {
+export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: { state: AgentState; dispatch: Dispatch; onNavigate: Navigate; modelConnection: ModelConnectionState }) {
   const isWorking = ["downloading", "awaiting_failure_action", "verifying", "replanning"].includes(state.phase);
-  const latestDecision = state.agentRun.decisions[state.agentRun.decisions.length - 1];
   const failedResource = state.resources.find((resource) => resource.status === "failed");
   const fallbackResource = failedResource?.fallbackId ? catalogById.get(failedResource.fallbackId) : undefined;
   const failedToolResult = [...state.agentRun.toolResults]
@@ -210,7 +235,8 @@ export function ExecutionView({ state, dispatch, onNavigate }: { state: AgentSta
   return (
     <section className="agent-view execution-view">
       <div className="agent-page-heading"><div><span>执行监控</span><h1>Agent 正在{phaseLabel(state.phase)}</h1></div><button className="btn btn-ghost" disabled={!isWorking} type="button" onClick={() => dispatch({ type: "CANCEL_TASK" })}><XCircle size={16} />取消任务</button></div>
-      <div className="execution-summary"><div><span>总体进度</span><strong>{overallProgress(state)}%</strong></div><div><span>本轮模型步骤</span><strong>{state.agentRun.step}/{state.agentRun.maxSteps}</strong></div><div><span>模型来源</span><strong>{latestDecision?.provider === "remote-llm" ? "远程 LLM" : "本地规则"}</strong></div><div><span>计划修订</span><strong>r{state.revision}</strong></div></div>
+      <div className="execution-summary"><div><span>总体进度</span><strong>{overallProgress(state)}%</strong></div><div><span>本轮模型步骤</span><strong>{state.agentRun.step}/{state.agentRun.maxSteps}</strong></div><div><span>模型来源</span><strong>{modelConnection.activeProvider === "remote-llm" ? "远程 LLM" : "本地规则"}</strong></div><div><span>计划修订</span><strong>r{state.revision}</strong></div></div>
+      {modelConnection.status === "fallback_local" && modelConnection.error ? <section className="model-fallback-notice" role="status" aria-live="polite"><WifiOff size={17} /><div><strong>远程模型不可用，任务已切换到本地规则模型</strong><span>{modelConnection.error.message}</span></div><button className="btn btn-ghost" type="button" onClick={() => onNavigate("settings")}>查看连接</button></section> : null}
       {state.phase === "awaiting_failure_action" && failedResource ? (
         <section className="failure-resolution-panel" role="alert" aria-live="assertive">
           <div className="failure-resolution-heading"><span><AlertTriangle size={19} /></span><div><small>受控工具执行失败</small><h2>{failedResource.name} 需要人工决策</h2></div></div>
@@ -247,6 +273,47 @@ export function ExecutionView({ state, dispatch, onNavigate }: { state: AgentSta
           </div>
         </section>
         <section className="agent-panel agent-log-panel"><div className="agent-panel-heading"><FileText size={17} /><h2>操作日志</h2></div>{state.logs.length ? <div className="agent-log-list">{state.logs.map((log) => <span className={`agent-log-${log.level}`} key={log.id}><small>{log.at}</small>{log.message}</span>)}</div> : <span className="agent-empty-copy">等待 Agent 事件。</span>}</section>
+      </div>
+    </section>
+  );
+}
+
+export function SettingsView({
+  modelConnection,
+  onTestConnection
+}: {
+  modelConnection: ModelConnectionState;
+  onTestConnection: () => Promise<ModelConnectionState>;
+}) {
+  const meta = modelConnectionMeta[modelConnection.status];
+  const testing = modelConnection.status === "checking";
+  const canTest = modelConnection.configured && !testing;
+
+  return (
+    <section className="agent-view settings-center">
+      <div className="settings-header">
+        <div><span className="eyebrow"><Server size={15} />模型设置</span><h1>远程模型连接</h1><p>配置保存在 Electron 主进程环境中；renderer 只接收端点主机、模型 ID 和脱敏错误。</p></div>
+        <button className="btn btn-primary" disabled={!canTest} type="button" onClick={() => void onTestConnection()}>
+          {testing ? <Loader2 className="spin" size={16} /> : <Wifi size={16} />}
+          {testing ? "正在测试" : "测试连接"}
+        </button>
+      </div>
+      <div className="settings-grid">
+        <section className="settings-section settings-session-section" aria-live="polite">
+          <div className="settings-section-heading"><Wifi size={17} /><div><h2>连接状态</h2><span>状态由模型连接控制器维护，不根据 UI 或最后一条日志推断。</span></div></div>
+          <div className="model-connection-state-card">
+            <span className={`status-pill ${meta.className}`}>{testing ? <Loader2 className="spin" size={14} /> : modelConnection.activeProvider === "remote-llm" ? <Wifi size={14} /> : <WifiOff size={14} />}{meta.label}</span>
+            <strong>{modelConnection.activeProvider === "remote-llm" ? "当前任务将优先使用远程 LLM" : "当前任务使用本地规则模型"}</strong>
+            <small>{modelConnection.lastCheckedAt ? `最近检测：${new Date(modelConnection.lastCheckedAt).toLocaleString("zh-CN")}` : "尚未执行远程连接测试"}</small>
+          </div>
+          {modelConnection.error ? <div className="model-connection-error"><AlertTriangle size={16} /><div><strong>{modelConnection.error.code}</strong><span>{modelConnection.error.message}</span></div></div> : null}
+        </section>
+        <section className="settings-section">
+          <div className="settings-section-heading"><ShieldCheck size={17} /><div><h2>安全配置摘要</h2><span>API Key 不会通过 contextBridge 暴露给 renderer。</span></div></div>
+          <div className="settings-row"><div><strong>端点主机</strong><span>仅显示 hostname，不展示完整请求路径。</span></div><code>{modelConnection.endpointHost ?? "未配置"}</code></div>
+          <div className="settings-row"><div><strong>模型 ID</strong><span>由 XL_AGENT_LLM_MODEL 提供。</span></div><code>{modelConnection.model ?? "未配置"}</code></div>
+          <div className="settings-row"><div><strong>配置方式</strong><span>修改项目根目录 .env 后需要重启 Electron 主进程。</span></div><code>主进程环境变量</code></div>
+        </section>
       </div>
     </section>
   );
