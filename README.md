@@ -15,6 +15,7 @@
 - 纯 TypeScript Agent Core 状态机
 - 每轮最多 6 步的异步模型决策循环（用户批准新 revision 后重新计数）
 - 本地规则模型与可选远程 LLM 自动回退
+- 应用级模型连接状态、测试连接、结构化错误和失败熔断
 - 受控工具、权限策略和内存审计轨迹
 
 ## 启动
@@ -31,6 +32,12 @@ npm run build
 ```
 
 构建会依次执行 renderer 类型检查、Electron 主进程编译和 Vite production build。
+
+验证 Electron `loadFile` 使用的 production renderer 资源路径：
+
+```bash
+npm run verify:production-build
+```
 
 ## Agent Core 验证
 
@@ -51,6 +58,15 @@ XL_AGENT_LLM_API_KEY=your-secret
 ```
 
 可参考 `.env.example`。保存后需要重新运行 `npm run dev`，因为 Electron 主进程只在启动时加载 `.env`。这些变量只由 Electron 主进程读取，不使用 `VITE_` 前缀，也不会进入 renderer bundle。远程请求失败、未配置或返回结构不合法时，`FallbackModelRuntime` 会自动使用本地规则模型继续演示。
+
+应用顶部和“设置”页面会显示当前 provider、脱敏端点主机、模型 ID 和回退原因。“测试连接”会通过 Electron 主进程验证 HTTPS、鉴权、Chat Completions 响应和 `ModelDecision` 结构，API Key 不会返回 renderer。远程失败后当前任务会使用本地规则模型，避免每个模型步骤重复等待失败端点；重新测试成功后恢复远程优先。
+
+模型连接和 Electron renderer 验证：
+
+```bash
+npm run verify:model-client
+npm run verify:electron-renderer
+```
 
 ## Agent Runtime 接口
 

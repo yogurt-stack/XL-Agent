@@ -148,19 +148,6 @@ export class LocalRuleModelRuntime implements ModelRuntime {
       );
     }
 
-    if (state.phase === "waiting_approval") {
-      return createDecision(
-        context,
-        {
-          actionId: createActionId(context, "approval"),
-          type: "request_approval",
-          subjectActionId: `resource-plan-r${state.revision}`,
-          reason: `资源计划 r${state.revision} 必须由用户确认后才能执行。`
-        },
-        "当前计划受审批策略保护。"
-      );
-    }
-
     if (state.phase === "replanning") {
       const failedResource = state.resources.find((resource) => resource.status === "failed");
       const strategy =

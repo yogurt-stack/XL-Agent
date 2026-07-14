@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputDir = path.join(tmpdir(), "xunlei-agent-core-verify");
 const tscBin = path.join(root, "node_modules", ".bin", process.platform === "win32" ? "tsc.cmd" : "tsc");
-const coreFiles = ["types.ts", "catalog.ts", "machine.ts", "interfaces.ts", "agentServices.ts", "mockServices.ts", "localRuleModel.ts", "remoteModel.ts", "runtime.ts", "manifest.ts"].map((file) =>
+const coreFiles = ["types.ts", "catalog.ts", "machine.ts", "interfaces.ts", "agentServices.ts", "mockServices.ts", "localRuleModel.ts", "modelConnection.ts", "remoteModel.ts", "runtime.ts", "manifest.ts"].map((file) =>
   path.join("src", "features", "agent-core", file)
 );
 
@@ -39,7 +39,8 @@ const { AgentRuntime } = require(path.join(outputDir, "runtime.js"));
 const { FixedWindowsPlanner, FixedWindowsRouter, MockVerifier } = require(path.join(outputDir, "mockServices.js"));
 const { DefaultAgentPolicy, InMemoryAgentToolExecutor } = require(path.join(outputDir, "agentServices.js"));
 const { LocalRuleModelRuntime, inferLocalTaskIntent } = require(path.join(outputDir, "localRuleModel.js"));
-const { FallbackModelRuntime } = require(path.join(outputDir, "remoteModel.js"));
+const { ModelConnectionController, ModelConnectionRequestError } = require(path.join(outputDir, "modelConnection.js"));
+const { FallbackModelRuntime, RemoteLlmModelRuntime } = require(path.join(outputDir, "remoteModel.js"));
 const { createResourceManifest } = require(path.join(outputDir, "manifest.js"));
 
 const assert = (condition, message) => {
@@ -107,6 +108,10 @@ send({ type: "APPROVE_PLAN" });
 await runUntil("verifying");
 send({ type: "VERIFY_RESOURCES", versionMismatchResourceId: "sample-project-mirror" });
 assert(state.phase === "replanning", "Version mismatch must trigger replanning");
+assert(
+  state.requestedReplanStrategy === "primary-retry",
+  "A failed fallback without its own fallback must retry the current primary source"
+);
 await runUntil("waiting_approval");
 assert(state.phase === "waiting_approval" && state.revision === 4, "Version replacement must await approval");
 
@@ -205,6 +210,117 @@ const fallbackModel = new FallbackModelRuntime(
 );
 const fallbackDecision = await fallbackModel.decide(modelContextFor("准备 Python AI 环境", {}, []));
 assert(fallbackDecision.provider === "local-rule", "Remote failure must fall back to the local model");
+
+const removedApprovalActionModel = new RemoteLlmModelRuntime({
+  requestDecision: async () => ({
+    decisionId: "removed-approval-action",
+    model: "remote-test",
+    explanation: "Attempt to use the removed approval action.",
+    action: {
+      actionId: "removed-approval-action",
+      type: "request_approval",
+      subjectActionId: "resource-plan-r1",
+      reason: "This action is no longer part of the runtime protocol."
+    }
+  })
+});
+let removedApprovalActionRejected = false;
+try {
+  await removedApprovalActionModel.decide(modelContextFor("准备 Python AI 环境"));
+} catch {
+  removedApprovalActionRejected = true;
+}
+assert(removedApprovalActionRejected, "Remote request_approval actions must be rejected by protocol validation");
+
+const browserOnlyConnection = new ModelConnectionController();
+assert(
+  browserOnlyConnection.getState().status === "unconfigured" &&
+    browserOnlyConnection.getState().error?.code === "MODEL_BRIDGE_UNAVAILABLE",
+  "Browser-only mode must explicitly report the unavailable Electron bridge"
+);
+
+const configuredConnection = new ModelConnectionController(
+  {
+    getConnectionInfo: async () => ({
+      configured: true,
+      endpointHost: "models.example.test",
+      model: "remote-test"
+    }),
+    testConnection: async () => ({ ok: true })
+  },
+  () => "connection-test-time"
+);
+await configuredConnection.initialize();
+assert(configuredConnection.getState().status === "configured", "Configured models must not be reported as connected before testing");
+assert(
+  !JSON.stringify(configuredConnection.getState()).toLowerCase().includes("api-key"),
+  "Connection state must not expose API key data"
+);
+await configuredConnection.testConnection();
+assert(
+  configuredConnection.getState().status === "remote_available" &&
+    configuredConnection.getState().activeProvider === "remote-llm",
+  "A successful connection test must activate the remote provider"
+);
+
+const failedConnection = new ModelConnectionController(
+  {
+    getConnectionInfo: async () => ({
+      configured: true,
+      endpointHost: "models.example.test",
+      model: "remote-test"
+    }),
+    testConnection: async () => ({
+      ok: false,
+      error: { code: "MODEL_AUTH_FAILED", message: "Authentication failed.", retriable: false }
+    })
+  },
+  () => "connection-failure-time"
+);
+await failedConnection.initialize();
+await failedConnection.testConnection();
+assert(
+  failedConnection.getState().status === "connection_failed" &&
+    failedConnection.getState().error?.code === "MODEL_AUTH_FAILED",
+  "A failed connection test must preserve its structured error"
+);
+
+let observedPrimaryCalls = 0;
+const fallbackConnection = new ModelConnectionController({
+  getConnectionInfo: async () => ({
+    configured: true,
+    endpointHost: "models.example.test",
+    model: "remote-test"
+  }),
+  testConnection: async () => ({ ok: true })
+});
+await fallbackConnection.initialize();
+const circuitBreakingModel = new FallbackModelRuntime(
+  {
+    decide: async () => {
+      observedPrimaryCalls += 1;
+      throw new ModelConnectionRequestError({
+        code: "MODEL_TIMEOUT",
+        message: "Remote request timed out.",
+        retriable: true
+      });
+    }
+  },
+  localModel,
+  {
+    shouldAttemptPrimary: () => fallbackConnection.shouldAttemptRemote(),
+    onPrimarySuccess: (decision) => fallbackConnection.recordRemoteSuccess(decision),
+    onPrimaryFailure: (error) => fallbackConnection.recordFallback(error)
+  }
+);
+await circuitBreakingModel.decide(modelContextFor("准备 Python AI 环境", {}, []));
+await circuitBreakingModel.decide(modelContextFor("准备 Python AI 环境", {}, []));
+assert(observedPrimaryCalls === 1, "Fallback mode must stop repeated remote calls until an explicit connection retest");
+assert(
+  fallbackConnection.getState().status === "fallback_local" &&
+    fallbackConnection.getState().error?.code === "MODEL_TIMEOUT",
+  "Runtime fallback must expose the remote failure reason"
+);
 
 const modelQueue = [];
 const modelScheduler = {
