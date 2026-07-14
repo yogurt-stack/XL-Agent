@@ -50,7 +50,7 @@ export type AgentStateListener = (state: AgentState) => void;
 
 export interface AgentRuntimePort {
   getState(): AgentState;
-  dispatch(event: AgentEvent): void;
+  dispatch(event: AgentEvent): AgentState;
   subscribe(listener: AgentStateListener): () => void;
   start(): void;
   stop(): void;

@@ -160,4 +160,4 @@ Electron renderer passed: settings, safe metadata and connection test UI verifie
 
 ## 10. 后续工作
 
-下一优先级是严格计划验证器：先补充任务能力需求、资源提供能力、替代能力和平台兼容数据，再校验必需能力、依赖闭包、来源、授权以及审批 revision 绑定。
+严格计划验证器已在后续改造中完成，详见 `docs/strict-plan-validation-2026-07-14.md`。当前下一优先级是正式测试框架和 CI。

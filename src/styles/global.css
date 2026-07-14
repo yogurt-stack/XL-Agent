@@ -1787,6 +1787,57 @@ textarea:focus-visible {
   color: #effaf6;
 }
 
+.plan-validation-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 14px;
+  border: 1px solid rgb(255 255 255 / 10%);
+  background: rgb(21 31 47 / 84%);
+  padding: 12px 13px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.plan-validation-card > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.plan-validation-card strong,
+.plan-validation-card span {
+  display: block;
+}
+
+.plan-validation-card span {
+  margin-top: 3px;
+  color: var(--subtle);
+}
+
+.plan-validation-card ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #ffd3d3;
+}
+
+.plan-validation-valid {
+  border-color: rgb(85 198 169 / 34%);
+  background: rgb(36 65 63 / 38%);
+}
+
+.plan-validation-valid > svg {
+  color: #70d8ba;
+}
+
+.plan-validation-invalid {
+  border-color: rgb(239 122 122 / 35%);
+  background: rgb(83 37 46 / 34%);
+}
+
+.plan-validation-invalid > svg {
+  color: #ff9b9b;
+}
+
 .execution-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

@@ -24,6 +24,9 @@ export const clarificationQuestions: ClarificationQuestion[] = [
   }
 ];
 
+const windows11 = ["Windows 11"] as const;
+const x64 = ["x64"] as const;
+
 export const trustedCatalog: TrustedResource[] = [
   {
     id: "python-312",
@@ -36,6 +39,11 @@ export const trustedCatalog: TrustedResource[] = [
     recommendation: "Windows 11 x64 官方安装包，支持当前示例项目。",
     required: true,
     dependsOn: [],
+    provides: ["python-runtime"],
+    requiresCapabilities: [],
+    supportedOperatingSystems: [...windows11],
+    supportedArchitectures: [...x64],
+    sourceTrust: "official",
     fallbackId: "miniforge-py312"
   },
   {
@@ -49,6 +57,11 @@ export const trustedCatalog: TrustedResource[] = [
     recommendation: "官方稳定版，适合作为 Windows 开发入口。",
     required: true,
     dependsOn: [],
+    provides: ["code-editor"],
+    requiresCapabilities: [],
+    supportedOperatingSystems: [...windows11],
+    supportedArchitectures: [...x64],
+    sourceTrust: "official",
     fallbackId: "vscode-zip"
   },
   {
@@ -62,6 +75,11 @@ export const trustedCatalog: TrustedResource[] = [
     recommendation: "官方发行版，保留默认 PATH 策略。",
     required: true,
     dependsOn: [],
+    provides: ["source-control"],
+    requiresCapabilities: [],
+    supportedOperatingSystems: [...windows11],
+    supportedArchitectures: [...x64],
+    sourceTrust: "official",
     fallbackId: "git-portable"
   },
   {
@@ -74,7 +92,12 @@ export const trustedCatalog: TrustedResource[] = [
     purpose: "Vite、npm 与前端工具链",
     recommendation: "当任务包含全栈或前端启动需求时推荐保留。",
     required: false,
-    dependsOn: []
+    dependsOn: [],
+    provides: ["node-runtime"],
+    requiresCapabilities: [],
+    supportedOperatingSystems: [...windows11],
+    supportedArchitectures: [...x64],
+    sourceTrust: "official"
   },
   {
     id: "sample-project",
@@ -87,6 +110,11 @@ export const trustedCatalog: TrustedResource[] = [
     recommendation: "包含 Windows 初始化和验证脚本。",
     required: true,
     dependsOn: ["python-312", "git"],
+    provides: ["workspace-template"],
+    requiresCapabilities: ["python-runtime", "source-control"],
+    supportedOperatingSystems: [...windows11],
+    supportedArchitectures: [...x64],
+    sourceTrust: "trusted-catalog",
     fallbackId: "sample-project-mirror"
   },
   {
@@ -99,7 +127,12 @@ export const trustedCatalog: TrustedResource[] = [
     purpose: "Python 官方安装包的可信替代运行时",
     recommendation: "仅在主 Python 包不可用或版本不匹配时启用。",
     required: true,
-    dependsOn: []
+    dependsOn: [],
+    provides: ["python-runtime"],
+    requiresCapabilities: [],
+    supportedOperatingSystems: [...windows11],
+    supportedArchitectures: [...x64],
+    sourceTrust: "trusted-mirror"
   },
   {
     id: "vscode-zip",
@@ -111,7 +144,12 @@ export const trustedCatalog: TrustedResource[] = [
     purpose: "VS Code 安装包的免安装替代交付",
     recommendation: "主安装包被取消或不可用时启用。",
     required: true,
-    dependsOn: []
+    dependsOn: [],
+    provides: ["code-editor"],
+    requiresCapabilities: [],
+    supportedOperatingSystems: [...windows11],
+    supportedArchitectures: [...x64],
+    sourceTrust: "trusted-mirror"
   },
   {
     id: "git-portable",
@@ -123,7 +161,12 @@ export const trustedCatalog: TrustedResource[] = [
     purpose: "Git 安装包的可信替代交付",
     recommendation: "主 Git 包被取消或不可用时启用。",
     required: true,
-    dependsOn: []
+    dependsOn: [],
+    provides: ["source-control"],
+    requiresCapabilities: [],
+    supportedOperatingSystems: [...windows11],
+    supportedArchitectures: [...x64],
+    sourceTrust: "trusted-mirror"
   },
   {
     id: "sample-project-mirror",
@@ -135,7 +178,12 @@ export const trustedCatalog: TrustedResource[] = [
     purpose: "示例项目代码包的可信备用源",
     recommendation: "主包校验失败后使用已验证镜像。",
     required: true,
-    dependsOn: ["python-312", "git"]
+    dependsOn: ["python-312", "git"],
+    provides: ["workspace-template"],
+    requiresCapabilities: ["python-runtime", "source-control"],
+    supportedOperatingSystems: [...windows11],
+    supportedArchitectures: [...x64],
+    sourceTrust: "trusted-mirror"
   }
 ];
 

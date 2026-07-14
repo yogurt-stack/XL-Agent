@@ -1,4 +1,6 @@
 import { catalogById, clarificationQuestions, windows11Profile } from "./catalog";
+import { validatePlannedResources, validatePlanResourceIds } from "./planValidation";
+import { deriveTaskRequirements } from "./taskRequirements";
 import type {
   AgentEvent,
   AgentLogEntry,
@@ -226,6 +228,7 @@ function enterReplanning(
       activeResourceId: null,
       replanReason: reason,
       requestedReplanStrategy,
+      approvedRevision: null,
       agentRun: { ...state.agentRun, status: "thinking" }
     },
     "warning",
@@ -297,6 +300,9 @@ export function createInitialAgentState(): AgentState {
       nextAction: "等待任务输入。"
     },
     planExplanation: null,
+    taskRequirements: null,
+    planValidation: null,
+    approvedRevision: null,
     agentRun: {
       step: 0,
       maxSteps: 6,
@@ -380,19 +386,38 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       );
     }
 
-    case "PLAN_GENERATED":
+    case "PLAN_GENERATED": {
       if (state.phase !== "planning") return state;
+      const revision = state.revision + 1;
+      const resources = createInitialPlan(state);
+      const taskRequirements = deriveTaskRequirements(state);
+      const planValidation = validatePlannedResources(resources, {
+        requirements: taskRequirements,
+        systemProfile: state.systemProfile,
+        revision
+      });
+      if (!planValidation.valid) {
+        return withLog(
+          { ...state, taskRequirements, planValidation, approvedRevision: null },
+          "error",
+          `固定计划未通过验证：${planValidation.issues[0]?.message ?? "未知计划错误"}`
+        );
+      }
       return withLog(
         {
           ...state,
           phase: "waiting_approval",
-          revision: state.revision + 1,
-          resources: createInitialPlan(state),
+          revision,
+          resources,
+          taskRequirements,
+          planValidation,
+          approvedRevision: null,
           workspace: { ...state.workspace, nextAction: "确认资源计划后开始模拟下载。" }
         },
         "success",
-        `可信资源计划 r${state.revision + 1} 已生成，等待用户确认。`
+        `可信资源计划 r${revision} 已通过严格验证，等待用户确认。`
       );
+    }
 
     case "MODEL_DECISION_RECORDED":
       if (state.agentRun.step >= state.agentRun.maxSteps) return state;
@@ -451,42 +476,83 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
 
     case "MODEL_PLAN_PROPOSED": {
       if (state.phase !== "planning") return state;
+      const revision = state.revision + 1;
+      const taskRequirements = deriveTaskRequirements(state);
+      const planValidation = validatePlanResourceIds(event.resourceIds, {
+        requirements: taskRequirements,
+        systemProfile: state.systemProfile,
+        revision
+      });
+      if (!planValidation.valid) {
+        return withLog(
+          {
+            ...state,
+            taskRequirements,
+            planValidation,
+            approvedRevision: null,
+            agentRun: { ...state.agentRun, status: "thinking" }
+          },
+          "error",
+          `模型计划未通过严格验证：${planValidation.issues[0]?.message ?? "未知计划错误"}`
+        );
+      }
       const resources = createModelPlan(event.resourceIds);
-      if (resources.length === 0) return state;
       return withLog(
         {
           ...state,
           phase: "waiting_approval",
           route: "windows-ai-development",
-          revision: state.revision + 1,
+          revision,
           resources,
           planExplanation: event.explanation,
+          taskRequirements,
+          planValidation,
+          approvedRevision: null,
           agentRun: { ...state.agentRun, status: "waiting_approval" },
           workspace: { ...state.workspace, nextAction: "确认模型生成的资源计划后开始模拟下载。" }
         },
         "success",
-        `模型资源计划 r${state.revision + 1} 已生成，等待用户确认。`
+        `模型资源计划 r${revision} 已通过严格验证，等待用户确认。`
       );
     }
 
-    case "MODEL_REPLAN_PROPOSED":
+    case "MODEL_REPLAN_PROPOSED": {
       if (state.phase !== "replanning") return state;
       if (state.requestedReplanStrategy && event.strategy !== state.requestedReplanStrategy) return state;
+      const revision = state.revision + 1;
+      const resources = buildReplacementPlan(state, event.strategy);
+      const taskRequirements = state.taskRequirements ?? deriveTaskRequirements(state);
+      const planValidation = validatePlannedResources(resources, {
+        requirements: taskRequirements,
+        systemProfile: state.systemProfile,
+        revision
+      });
+      if (!planValidation.valid) {
+        return withLog(
+          { ...state, taskRequirements, planValidation, approvedRevision: null },
+          "error",
+          `模型替代计划未通过严格验证：${planValidation.issues[0]?.message ?? "未知计划错误"}`
+        );
+      }
       return withLog(
         {
           ...state,
           phase: "waiting_approval",
-          revision: state.revision + 1,
-          resources: buildReplacementPlan(state, event.strategy),
+          revision,
+          resources,
           activeResourceId: null,
           requestedReplanStrategy: null,
           planExplanation: event.explanation,
+          taskRequirements,
+          planValidation,
+          approvedRevision: null,
           agentRun: { ...state.agentRun, status: "waiting_approval" },
           workspace: { ...state.workspace, nextAction: "模型替代计划需再次确认后才会执行。" }
         },
         "success",
-        `模型已生成${event.strategy === "trusted-mirror" ? "可信备用来源" : "主来源重试"}计划 r${state.revision + 1}，等待再次确认。`
+        `模型已生成${event.strategy === "trusted-mirror" ? "可信备用来源" : "主来源重试"}计划 r${revision}，严格验证通过并等待再次确认。`
       );
+    }
 
     case "MODEL_FINISHED":
       return withLog(
@@ -536,12 +602,22 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         );
       }
 
+      const resources = state.resources.map((item) =>
+        item.id === event.resourceId ? { ...item, selected: event.selected } : item
+      );
+      const taskRequirements = state.taskRequirements ?? deriveTaskRequirements(state);
+      const planValidation = validatePlannedResources(resources, {
+        requirements: taskRequirements,
+        systemProfile: state.systemProfile,
+        revision: state.revision
+      });
       return withLog(
         {
           ...state,
-          resources: state.resources.map((item) =>
-            item.id === event.resourceId ? { ...item, selected: event.selected } : item
-          )
+          resources,
+          taskRequirements,
+          planValidation,
+          approvedRevision: null
         },
         "info",
         `${event.selected ? "已选择" : "已取消"}可选资源 ${resource.name}。`
@@ -549,7 +625,31 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
     }
 
     case "APPROVE_PLAN": {
-      if (state.phase !== "waiting_approval" || !hasRequiredSelection(state.resources)) return state;
+      if (state.phase !== "waiting_approval") return state;
+      const taskRequirements = state.taskRequirements ?? deriveTaskRequirements(state);
+      const currentPlanValidation = validatePlannedResources(state.resources, {
+        requirements: taskRequirements,
+        systemProfile: state.systemProfile,
+        revision: state.revision
+      });
+      const approvalValidation = validatePlannedResources(state.resources, {
+        requirements: taskRequirements,
+        systemProfile: state.systemProfile,
+        revision: state.revision,
+        approvalRevision: event.revision
+      });
+      if (!approvalValidation.valid || !hasRequiredSelection(state.resources)) {
+        return withLog(
+          {
+            ...state,
+            taskRequirements,
+            planValidation: currentPlanValidation,
+            approvedRevision: null
+          },
+          "error",
+          `计划 r${state.revision} 审批被拒绝：${approvalValidation.issues[0]?.message ?? "必需资源未选择"}`
+        );
+      }
       const prepared = prepareDownloads(state.resources);
       return withLog(
         {
@@ -559,6 +659,9 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
           activeResourceId: prepared.activeResourceId,
           replanReason: null,
           requestedReplanStrategy: null,
+          taskRequirements,
+          planValidation: currentPlanValidation,
+          approvedRevision: state.revision,
           agentRun: { ...state.agentRun, step: 0, status: "executing" },
           workspace: { ...state.workspace, nextAction: "等待资源下载和验证完成。" }
         },
@@ -626,6 +729,7 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
           ...state,
           phase: "replanning",
           requestedReplanStrategy: event.action,
+          approvedRevision: null,
           agentRun: { ...state.agentRun, status: "thinking" },
           workspace: { ...state.workspace, nextAction: "等待模型生成新的待审批资源计划。" }
         },
@@ -636,23 +740,42 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       );
     }
 
-    case "REPLAN_GENERATED":
+    case "REPLAN_GENERATED": {
       if (state.phase !== "replanning") return state;
       if (state.requestedReplanStrategy && event.strategy !== state.requestedReplanStrategy) return state;
+      const revision = state.revision + 1;
+      const resources = buildReplacementPlan(state, event.strategy);
+      const taskRequirements = state.taskRequirements ?? deriveTaskRequirements(state);
+      const planValidation = validatePlannedResources(resources, {
+        requirements: taskRequirements,
+        systemProfile: state.systemProfile,
+        revision
+      });
+      if (!planValidation.valid) {
+        return withLog(
+          { ...state, taskRequirements, planValidation, approvedRevision: null },
+          "error",
+          `替代计划未通过严格验证：${planValidation.issues[0]?.message ?? "未知计划错误"}`
+        );
+      }
       return withLog(
         {
           ...state,
           phase: "waiting_approval",
-          revision: state.revision + 1,
-          resources: buildReplacementPlan(state, event.strategy),
+          revision,
+          resources,
           activeResourceId: null,
           requestedReplanStrategy: null,
+          taskRequirements,
+          planValidation,
+          approvedRevision: null,
           agentRun: { ...state.agentRun, status: "waiting_approval" },
           workspace: { ...state.workspace, nextAction: "替代计划需再次确认后才会执行。" }
         },
         "success",
-        `已生成${event.strategy === "trusted-mirror" ? "可信备用来源" : "主来源重试"}计划 r${state.revision + 1}，等待再次确认。`
+        `已生成${event.strategy === "trusted-mirror" ? "可信备用来源" : "主来源重试"}计划 r${revision}，严格验证通过并等待再次确认。`
       );
+    }
 
     case "VERIFY_RESOURCES": {
       if (state.phase !== "verifying") return state;

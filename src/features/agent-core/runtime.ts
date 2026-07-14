@@ -50,6 +50,7 @@ export class AgentRuntime implements AgentRuntimePort {
     this.invalidatePendingWork();
     this.applyEvent(event);
     this.drive();
+    return this.state;
   }
 
   private applyEvent(event: AgentEvent) {

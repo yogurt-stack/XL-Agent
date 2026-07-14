@@ -40,9 +40,9 @@ import {
   totalDownloadSizeMb
 } from "../features/agent-core/selectors";
 import { getActiveClarification } from "../features/agent-core/machine";
-import type { AgentEvent, AgentState, ResourceStatus } from "../features/agent-core/types";
+import type { AgentEvent, AgentState, ResourceCapability, ResourceStatus } from "../features/agent-core/types";
 
-type Dispatch = (event: AgentEvent) => void;
+type Dispatch = (event: AgentEvent) => AgentState;
 type Navigate = (view: "home" | "clarification" | "plan" | "execution" | "workspace" | "settings") => void;
 
 const statusMeta: Record<ResourceStatus, { label: string; className: string }> = {
@@ -59,6 +59,14 @@ const statusMeta: Record<ResourceStatus, { label: string; className: string }> =
 function formatMb(value: number) {
   return `${value.toFixed(1)} MB`;
 }
+
+const capabilityLabels: Record<ResourceCapability, string> = {
+  "python-runtime": "Python 运行时",
+  "code-editor": "代码编辑器",
+  "source-control": "源码管理",
+  "node-runtime": "Node.js 运行时",
+  "workspace-template": "可验证示例项目"
+};
 
 function ResourceStatusBadge({ status }: { status: ResourceStatus }) {
   const meta = statusMeta[status];
@@ -121,6 +129,7 @@ export function AgentHomeView({ state, dispatch, onNavigate }: { state: AgentSta
     "准备可交接的 Python AI 示例项目"
   ];
   const downloadCount = state.resources.filter((resource) => resource.status === "downloading").length;
+  const taskSubmissionLocked = state.phase === "downloading" || state.phase === "verifying";
 
   return (
     <section className="agent-view agent-home-view">
@@ -134,19 +143,19 @@ export function AgentHomeView({ state, dispatch, onNavigate }: { state: AgentSta
           event.preventDefault();
           const formData = new FormData(event.currentTarget);
           const task = String(formData.get("task") ?? "");
-          dispatch({ type: "SUBMIT_TASK", task });
-          onNavigate("clarification");
+          const nextState = dispatch({ type: "SUBMIT_TASK", task });
+          if (nextState.phase === "routing" && nextState.task === task.trim()) onNavigate("clarification");
         }}
       >
-        <textarea name="task" defaultValue={state.task || "帮我准备一个 Windows 下的 AI 开发环境"} />
-        <button className="btn btn-primary" type="submit"><Sparkles size={17} />开始任务</button>
+        <textarea disabled={taskSubmissionLocked} name="task" defaultValue={state.task || "帮我准备一个 Windows 下的 AI 开发环境"} />
+        <button className="btn btn-primary" disabled={taskSubmissionLocked} title={taskSubmissionLocked ? "当前资源执行完成后才能开始新任务" : undefined} type="submit"><Sparkles size={17} />开始任务</button>
       </form>
       <div className="agent-home-grid">
         <section className="agent-panel">
           <div className="agent-panel-heading"><Clock3 size={17} /><h2>最近任务</h2></div>
           <div className="recent-task-list">
             {recentTasks.map((task) => (
-              <button key={task} type="button" onClick={() => { dispatch({ type: "SUBMIT_TASK", task }); onNavigate("clarification"); }}>
+              <button disabled={taskSubmissionLocked} key={task} type="button" onClick={() => { const nextState = dispatch({ type: "SUBMIT_TASK", task }); if (nextState.phase === "routing" && nextState.task === task) onNavigate("clarification"); }}>
                 <span>{task}</span><ChevronRight size={16} />
               </button>
             ))}
@@ -204,11 +213,31 @@ export function ResourcePlanView({ state, dispatch, onNavigate }: { state: Agent
   if (state.phase === "planning" || state.phase === "routing" || state.phase === "clarifying") return <WaitingPanel title="正在生成计划" copy="资源计划将由已确认的系统画像和澄清答案生成。" />;
   if (state.resources.length === 0) return <WaitingPanel title="尚无资源计划" copy="请先在首页提交任务并完成澄清。" />;
   const waitingApproval = state.phase === "waiting_approval";
+  const validationCurrent = state.planValidation?.checkedRevision === state.revision;
+  const canApprove = waitingApproval && validationCurrent && state.planValidation?.valid === true;
   return (
     <section className="agent-view plan-view">
       <div className="agent-page-heading"><div><span>资源计划 r{state.revision}</span><h1>{state.replanReason ? "替代计划等待再次确认" : "可信资源准备计划"}</h1></div><p>总量 {formatMb(totalDownloadSizeMb(state))} · 预计 {estimatedMinutes(state)} 分钟</p></div>
       {state.planExplanation && !state.replanReason && <div className="agent-plan-rationale"><BrainCircuit size={17} /><span><strong>模型建议</strong>{state.planExplanation}</span></div>}
       {state.replanReason && <div className="agent-alert"><AlertTriangle size={17} />{state.replanReason === "download_failed" ? "下载失败后已生成备用来源。" : state.replanReason === "version_mismatch" ? "版本验证不匹配，已生成替代版本。" : "必需资源被取消，已生成替代交付方案。"}</div>}
+      <section className={`plan-validation-card ${canApprove ? "plan-validation-valid" : "plan-validation-invalid"}`} role="status" aria-live="polite">
+        {canApprove ? <CheckCircle2 size={19} /> : <AlertTriangle size={19} />}
+        <div>
+          <strong>{canApprove ? `计划 r${state.revision} 已通过严格验证` : `计划 r${state.revision} 尚不能审批`}</strong>
+          <span>
+            必需能力：{state.taskRequirements?.requiredCapabilities.length
+              ? state.taskRequirements.requiredCapabilities.map((capability) => capabilityLabels[capability]).join("、")
+              : "等待任务需求识别"}
+          </span>
+          {state.planValidation?.issues.length ? (
+            <ul>
+              {state.planValidation.issues.map((item, index) => (
+                <li key={`${item.code}-${item.resourceId ?? item.capability ?? index}`}>{item.message}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      </section>
       <div className="agent-resource-list">
         {state.resources.map((resource) => (
           <article className={`agent-resource-row ${resource.required ? "agent-resource-required" : ""}`} key={resource.id}>
@@ -220,7 +249,7 @@ export function ResourcePlanView({ state, dispatch, onNavigate }: { state: Agent
           </article>
         ))}
       </div>
-      <div className="plan-footer"><span>已选择 {state.resources.filter((resource) => resource.selected).length} 项资源</span><button className="btn btn-primary" disabled={!waitingApproval} type="button" onClick={() => { dispatch({ type: "APPROVE_PLAN" }); onNavigate("execution"); }}><ShieldCheck size={16} />确认下载计划 r{state.revision}</button></div>
+      <div className="plan-footer"><span>已选择 {state.resources.filter((resource) => resource.selected).length} 项资源</span><button className="btn btn-primary" disabled={!canApprove} title={canApprove ? `批准计划 r${state.revision}` : "请先解决计划验证问题"} type="button" onClick={() => { const nextState = dispatch({ type: "APPROVE_PLAN", revision: state.revision }); if (nextState.phase === "downloading" && nextState.approvedRevision === state.revision) onNavigate("execution"); }}><ShieldCheck size={16} />确认下载计划 r{state.revision}</button></div>
     </section>
   );
 }
@@ -245,7 +274,7 @@ export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: 
           <div className="failure-actions">
             <button className="btn btn-secondary" type="button" onClick={() => dispatch({ type: "RESOLVE_DOWNLOAD_FAILURE", action: "primary-retry" })}><RefreshCw size={16} />重试原来源</button>
             <button className="btn btn-primary" disabled={!fallbackResource} type="button" title={fallbackResource ? `切换到 ${fallbackResource.source}` : "可信目录中没有可用替代来源"} onClick={() => dispatch({ type: "RESOLVE_DOWNLOAD_FAILURE", action: "trusted-mirror" })}><GitBranch size={16} />使用可信替代来源</button>
-            <button className="btn btn-ghost" type="button" onClick={() => { dispatch({ type: "RESOLVE_DOWNLOAD_FAILURE", action: "delegate-agent-b" }); onNavigate("workspace"); }}><Bot size={16} />交给 Agent B</button>
+            <button className="btn btn-ghost" type="button" onClick={() => { const nextState = dispatch({ type: "RESOLVE_DOWNLOAD_FAILURE", action: "delegate-agent-b" }); if (nextState.phase === "handoff" && nextState.agentRun.status === "delegated") onNavigate("workspace"); }}><Bot size={16} />交给 Agent B</button>
           </div>
           <small className="failure-resolution-note">重试或替代来源都会生成新的资源计划，并等待再次确认后执行。</small>
         </section>

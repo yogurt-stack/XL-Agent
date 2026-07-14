@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputDir = path.join(tmpdir(), "xunlei-agent-core-verify");
 const tscBin = path.join(root, "node_modules", ".bin", process.platform === "win32" ? "tsc.cmd" : "tsc");
-const coreFiles = ["types.ts", "catalog.ts", "machine.ts", "interfaces.ts", "agentServices.ts", "mockServices.ts", "localRuleModel.ts", "modelConnection.ts", "remoteModel.ts", "runtime.ts", "manifest.ts"].map((file) =>
+const coreFiles = ["types.ts", "catalog.ts", "taskRequirements.ts", "planValidation.ts", "machine.ts", "interfaces.ts", "agentServices.ts", "mockServices.ts", "localRuleModel.ts", "modelConnection.ts", "remoteModel.ts", "runtime.ts", "manifest.ts"].map((file) =>
   path.join("src", "features", "agent-core", file)
 );
 
@@ -42,10 +42,143 @@ const { LocalRuleModelRuntime, inferLocalTaskIntent } = require(path.join(output
 const { ModelConnectionController, ModelConnectionRequestError } = require(path.join(outputDir, "modelConnection.js"));
 const { FallbackModelRuntime, RemoteLlmModelRuntime } = require(path.join(outputDir, "remoteModel.js"));
 const { createResourceManifest } = require(path.join(outputDir, "manifest.js"));
+const { trustedCatalog, windows11Profile } = require(path.join(outputDir, "catalog.js"));
+const { deriveTaskRequirements } = require(path.join(outputDir, "taskRequirements.js"));
+const { validatePlannedResources, validatePlanResourceIds } = require(path.join(outputDir, "planValidation.js"));
 
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
 };
+
+const issueCodes = (result) => new Set(result.issues.map((item) => item.code));
+const pythonRequirementState = {
+  task: "准备 Python 机器学习环境",
+  answers: { "python-scope": "仅 Python AI" }
+};
+const pythonRequirements = deriveTaskRequirements(pythonRequirementState);
+const baseValidationContext = {
+  requirements: pythonRequirements,
+  systemProfile: windows11Profile,
+  revision: 1
+};
+const validPythonPlan = validatePlanResourceIds(
+  ["python-312", "vscode", "git", "sample-project"],
+  baseValidationContext
+);
+assert(validPythonPlan.valid, "A complete Python plan must pass strict validation");
+
+const unresolvedTaskPlan = validatePlanResourceIds(
+  ["python-312", "vscode", "git", "sample-project"],
+  {
+    ...baseValidationContext,
+    requirements: deriveTaskRequirements({ task: "帮我准备环境", answers: {} })
+  }
+);
+assert(
+  issueCodes(unresolvedTaskPlan).has("TASK_REQUIREMENTS_UNRESOLVED"),
+  "An ambiguous task must not receive an approvable plan"
+);
+
+const unknownAndDuplicatePlan = validatePlanResourceIds(
+  ["python-312", "vscode", "git", "git", "sample-project", "unknown-package"],
+  baseValidationContext
+);
+assert(
+  issueCodes(unknownAndDuplicatePlan).has("UNKNOWN_RESOURCE") &&
+    issueCodes(unknownAndDuplicatePlan).has("DUPLICATE_RESOURCE"),
+  "Unknown and duplicate resource IDs must be rejected instead of silently filtered"
+);
+
+const incompletePlan = validatePlanResourceIds(["python-312", "git"], baseValidationContext);
+assert(
+  issueCodes(incompletePlan).has("MISSING_REQUIRED_CAPABILITY"),
+  "Plans that omit task capabilities must be rejected"
+);
+
+const missingDependencyPlan = validatePlanResourceIds(
+  ["sample-project"],
+  {
+    ...baseValidationContext,
+    requirements: {
+      intent: "python-ai",
+      label: "依赖验证场景",
+      requiredCapabilities: ["workspace-template"]
+    }
+  }
+);
+assert(
+  issueCodes(missingDependencyPlan).has("MISSING_DEPENDENCY_CAPABILITY"),
+  "Selected resources must have a closed capability dependency set"
+);
+
+const pythonResource = trustedCatalog.find((resource) => resource.id === "python-312");
+assert(pythonResource, "Python catalog fixture is missing");
+const unsafeCatalog = [
+  {
+    ...pythonResource,
+    license: "Proprietary-Test-License",
+    sourceTrust: "unverified",
+    supportedOperatingSystems: [],
+    fallbackId: "missing-fallback"
+  }
+];
+const unsafePlan = validatePlanResourceIds(
+  ["python-312"],
+  {
+    ...baseValidationContext,
+    requirements: {
+      intent: "python-ai",
+      label: "策略验证场景",
+      requiredCapabilities: ["python-runtime"]
+    },
+    catalog: unsafeCatalog
+  }
+);
+const unsafeCodes = issueCodes(unsafePlan);
+assert(
+  unsafeCodes.has("INCOMPATIBLE_SYSTEM") &&
+    unsafeCodes.has("UNTRUSTED_SOURCE") &&
+    unsafeCodes.has("LICENSE_NOT_ALLOWED") &&
+    unsafeCodes.has("INVALID_FALLBACK"),
+  "System, source, license and fallback policies must all be enforced"
+);
+
+const tamperedPythonPlan = validatePlannedResources(
+  [{ ...pythonResource, source: "Untrusted Override", selected: true, status: "pending", progress: 0, attempts: 0 }],
+  {
+    ...baseValidationContext,
+    requirements: {
+      intent: "python-ai",
+      label: "元数据验证场景",
+      requiredCapabilities: ["python-runtime"]
+    }
+  }
+);
+assert(
+  issueCodes(tamperedPythonPlan).has("RESOURCE_METADATA_MISMATCH"),
+  "Planned resource metadata must remain identical to the trusted catalog"
+);
+
+const invalidProposalBase = createInitialAgentState();
+const rejectedModelPlan = transition(
+  {
+    ...invalidProposalBase,
+    phase: "planning",
+    task: "准备 Python 机器学习环境",
+    answers: { "python-scope": "仅 Python AI" }
+  },
+  {
+    type: "MODEL_PLAN_PROPOSED",
+    resourceIds: ["git"],
+    explanation: "Intentionally incomplete remote plan."
+  }
+);
+assert(
+  rejectedModelPlan.phase === "planning" &&
+    rejectedModelPlan.revision === 0 &&
+    rejectedModelPlan.planValidation?.valid === false,
+  "An invalid model plan must stay in planning and must not receive an approval revision"
+);
 
 const queue = [];
 const scheduler = {
@@ -95,8 +228,46 @@ assert(state.phase === "replanning", "Cancelling a required resource must trigge
 await runUntil("waiting_approval");
 assert(state.phase === "waiting_approval" && state.revision === 2, "Replacement plan must await approval");
 assert(state.resources.some((resource) => resource.id === "miniforge-py312"), "Mirror policy must select the trusted fallback");
+assert(state.planValidation?.valid, "Capability-equivalent fallback resources must keep the plan valid");
 
-send({ type: "APPROVE_PLAN" });
+send({ type: "APPROVE_PLAN", revision: state.revision - 1 });
+assert(
+  state.phase === "waiting_approval" &&
+    state.approvedRevision === null &&
+    state.planValidation?.valid &&
+    state.logs.at(-1)?.message.includes("审批 revision"),
+  "A stale approval must be rejected without invalidating the current plan"
+);
+
+send({ type: "APPROVE_PLAN", revision: state.revision });
+assert(
+  state.phase === "downloading" && state.approvedRevision === state.revision,
+  "A valid approval must bind execution to the current revision"
+);
+const lockedTaskSubmission = send({ type: "SUBMIT_TASK", task: "不应覆盖正在执行的任务" });
+assert(
+  lockedTaskSubmission.phase === "downloading" && lockedTaskSubmission.task === "准备 Windows AI 环境",
+  "Task submission during download must return the unchanged execution state"
+);
+const activeApprovedResourceId = state.activeResourceId;
+assert(activeApprovedResourceId, "Approved plans must select an active resource");
+const unapprovedDownloadPolicy = new DefaultAgentPolicy().evaluate(
+  {
+    actionId: "unapproved-download-test",
+    type: "call_tool",
+    purpose: "Verify revision-bound policy enforcement.",
+    call: {
+      callId: "unapproved-download-test",
+      name: "simulate_download",
+      input: { resourceId: activeApprovedResourceId }
+    }
+  },
+  { ...state, approvedRevision: null }
+);
+assert(
+  unapprovedDownloadPolicy.outcome === "deny",
+  "Download policy must reject an active resource when the approved revision is missing"
+);
 await runUntil("awaiting_failure_action");
 assert(state.revision === 2, "A download failure must not create a new revision before user action");
 send({ type: "RESOLVE_DOWNLOAD_FAILURE", action: "trusted-mirror" });
@@ -104,7 +275,7 @@ await runUntil("waiting_approval");
 assert(state.revision === 3, "Injected download failure must create a new approval revision");
 assert(state.resources.some((resource) => resource.id === "sample-project-mirror"), "Download failure must select the project mirror");
 
-send({ type: "APPROVE_PLAN" });
+send({ type: "APPROVE_PLAN", revision: state.revision });
 await runUntil("verifying");
 send({ type: "VERIFY_RESOURCES", versionMismatchResourceId: "sample-project-mirror" });
 assert(state.phase === "replanning", "Version mismatch must trigger replanning");
@@ -115,7 +286,7 @@ assert(
 await runUntil("waiting_approval");
 assert(state.phase === "waiting_approval" && state.revision === 4, "Version replacement must await approval");
 
-send({ type: "APPROVE_PLAN" });
+send({ type: "APPROVE_PLAN", revision: state.revision });
 await runUntil("handoff");
 const manifest = createResourceManifest(state);
 assert(state.workspace.ready && manifest.revision === 4, "Handoff Manifest revision is invalid");
@@ -371,7 +542,7 @@ assert(modelState.agentRun.step === 4, "Known task must produce four model decis
 assert(modelState.agentRun.toolResults.length === 2, "Runtime must record both read-only tool results");
 assert(modelState.agentRun.policyAudit.length === 4, "Runtime must audit every model action");
 
-modelRuntime.dispatch({ type: "APPROVE_PLAN" });
+modelRuntime.dispatch({ type: "APPROVE_PLAN", revision: modelState.revision });
 await runModelUntil("awaiting_failure_action");
 assert(modelState.revision === 1, "A model must not replan before the user selects a failure action");
 assert(
@@ -460,7 +631,7 @@ assert(
     modelState.agentRun.policyAudit.filter((entry) => entry.actionId.startsWith("runtime-download-r1")).length,
   "Every controlled download tool call must pass through policy evaluation"
 );
-modelRuntime.dispatch({ type: "APPROVE_PLAN" });
+modelRuntime.dispatch({ type: "APPROVE_PLAN", revision: modelState.revision });
 await runModelUntil("handoff");
 assert(modelState.workspace.ready, "Model-driven runtime must reach workspace handoff");
 

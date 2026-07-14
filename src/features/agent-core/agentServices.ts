@@ -64,7 +64,8 @@ export class InMemoryAgentToolExecutor implements AgentToolExecutor {
       !resource ||
       !resource.selected ||
       state.phase !== "downloading" ||
-      state.activeResourceId !== resource.id
+      state.activeResourceId !== resource.id ||
+      state.approvedRevision !== state.revision
     ) {
       return errorResult(
         call,
@@ -143,12 +144,13 @@ export class DefaultAgentPolicy implements AgentPolicy {
       if (
         state.phase !== "downloading" ||
         state.activeResourceId !== call.input.resourceId ||
-        !resource?.selected
+        !resource?.selected ||
+        state.approvedRevision !== state.revision
       ) {
         return {
           outcome: "deny",
           risk: "high",
-          reason: "资源计划尚未确认，禁止执行模拟下载。"
+          reason: "资源计划尚未确认或审批 revision 已失效，禁止执行模拟下载。"
         };
       }
       return {

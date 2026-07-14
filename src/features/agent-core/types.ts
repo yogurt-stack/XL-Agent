@@ -27,6 +27,55 @@ export type ReplanStrategy = "trusted-mirror" | "primary-retry";
 
 export type FailureResolutionAction = ReplanStrategy | "delegate-agent-b";
 
+export type TargetOperatingSystem = "Windows 11";
+
+export type TargetArchitecture = "x64";
+
+export type ResourceCapability =
+  | "python-runtime"
+  | "code-editor"
+  | "source-control"
+  | "node-runtime"
+  | "workspace-template";
+
+export type ResourceSourceTrust = "official" | "trusted-catalog" | "trusted-mirror" | "unverified";
+
+export type LocalTaskIntent = "python-ai" | "fullstack-ai" | "base-development" | "ambiguous";
+
+export type TaskRequirements = {
+  intent: LocalTaskIntent;
+  label: string;
+  requiredCapabilities: ResourceCapability[];
+};
+
+export type PlanValidationIssueCode =
+  | "TASK_REQUIREMENTS_UNRESOLVED"
+  | "EMPTY_PLAN"
+  | "UNKNOWN_RESOURCE"
+  | "DUPLICATE_RESOURCE"
+  | "REQUIRED_RESOURCE_NOT_SELECTED"
+  | "MISSING_REQUIRED_CAPABILITY"
+  | "MISSING_DEPENDENCY_CAPABILITY"
+  | "INCOMPATIBLE_SYSTEM"
+  | "UNTRUSTED_SOURCE"
+  | "LICENSE_NOT_ALLOWED"
+  | "INVALID_FALLBACK"
+  | "RESOURCE_METADATA_MISMATCH"
+  | "REVISION_MISMATCH";
+
+export type PlanValidationIssue = {
+  code: PlanValidationIssueCode;
+  message: string;
+  resourceId?: string;
+  capability?: ResourceCapability;
+};
+
+export type PlanValidationResult = {
+  valid: boolean;
+  checkedRevision: number;
+  issues: PlanValidationIssue[];
+};
+
 export type ClarificationQuestion = {
   id: string;
   prompt: string;
@@ -46,6 +95,11 @@ export type TrustedResource = {
   recommendation: string;
   required: boolean;
   dependsOn: string[];
+  provides: ResourceCapability[];
+  requiresCapabilities: ResourceCapability[];
+  supportedOperatingSystems: TargetOperatingSystem[];
+  supportedArchitectures: TargetArchitecture[];
+  sourceTrust: ResourceSourceTrust;
   fallbackId?: string;
 };
 
@@ -66,8 +120,8 @@ export type AgentLogEntry = {
 };
 
 export type SystemProfile = {
-  os: "Windows 11";
-  architecture: "x64";
+  os: TargetOperatingSystem;
+  architecture: TargetArchitecture;
   shell: "PowerShell 7";
   workspaceRoot: "C:\\XunleiAgent\\ai-dev-env-windows";
 };
@@ -95,6 +149,9 @@ export type AgentState = {
   logs: AgentLogEntry[];
   workspace: WorkspaceHandoff;
   planExplanation: string | null;
+  taskRequirements: TaskRequirements | null;
+  planValidation: PlanValidationResult | null;
+  approvedRevision: number | null;
   agentRun: AgentRunState;
 };
 
@@ -243,7 +300,7 @@ export type AgentEvent =
   | { type: "SKIP_CLARIFICATION"; questionId: string }
   | { type: "PLAN_GENERATED" }
   | { type: "TOGGLE_RESOURCE"; resourceId: string; selected: boolean }
-  | { type: "APPROVE_PLAN" }
+  | { type: "APPROVE_PLAN"; revision: number }
   | { type: "DOWNLOAD_PROGRESS"; resourceId: string; progress: number }
   | { type: "DOWNLOAD_FAILED"; resourceId: string; reason: string }
   | { type: "RESOLVE_DOWNLOAD_FAILURE"; action: FailureResolutionAction }

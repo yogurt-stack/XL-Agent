@@ -17,6 +17,7 @@
 - 本地规则模型与可选远程 LLM 自动回退
 - 应用级模型连接状态、测试连接、结构化错误和失败熔断
 - 受控工具、权限策略和内存审计轨迹
+- 基于任务能力、依赖、目标系统、来源、授权和 revision 的严格计划验证
 
 ## 启动
 
@@ -45,7 +46,7 @@ npm run verify:production-build
 npm run verify:agent-core
 ```
 
-该场景覆盖必需资源取消、下载失败暂停、主来源重试、可信替代来源、Agent B 未完成交接、版本不匹配、替代计划再次确认和最终 Manifest revision。
+该场景覆盖未知/重复资源、任务能力和依赖闭包、系统/来源/授权策略、revision 审批绑定、必需资源取消、下载失败暂停、主来源重试、可信替代来源、Agent B 未完成交接和最终 Manifest。
 
 ## 可选远程 LLM
 
@@ -81,6 +82,8 @@ React 不再自行维护计时器或自动状态流转；它只订阅 `AgentRunt
 - `ModelRuntime`：根据当前状态、工具历史和剩余步数生成一项结构化 `ModelDecision`。
 - `AgentToolExecutor`：执行协议允许的系统画像读取、可信目录查询和模拟下载工具；全部下载进度与失败都由 `simulate_download` ToolResult 驱动。
 - `AgentPolicy`：在执行动作前返回允许、需要审批或拒绝的策略结果。
+- `TaskRequirements`：把自然语言意图和澄清答案转换为确定性的必需能力集合。
+- `PlanValidationResult`：在计划生成和审批时记录结构化验证问题；只有当前 revision 验证通过并完成审批后才能执行下载工具。
 
 状态转换仍全部保留在 `machine.ts` 中的纯 `transition` 函数；`runtime.ts` 只编排自动事件、延迟和订阅。因此将来替换真实路由、下载或验证实现时，不需要把业务逻辑移回 React。
 
@@ -112,7 +115,7 @@ xunlei-ai-task-agent/
 
 1. 输入任务，例如“帮我准备一个 Windows 下的 AI 开发环境”。
 2. Agent 固定路由到 Windows AI 开发环境 Skill，并一次询问一个澄清问题。
-3. 生成可信资源计划 r1；取消必需资源或版本不匹配会进入重规划。
+3. 生成可信资源计划 r1，并验证任务能力、依赖、系统、来源和授权；取消必需资源或版本不匹配会进入重规划。
 4. 下载失败后暂停在人工决策点，可选择重试原来源、可信替代来源或交给 Agent B。
-5. 重试和替代来源由模型生成新计划，并进入 `waiting_approval` 等待再次确认；Agent B 分支生成未完成交接。
+5. 重试和替代来源由模型生成新计划，严格验证后进入 `waiting_approval`；审批事件必须绑定当前 revision，Agent B 分支生成未完成交接。
 6. 验证通过后生成含 `revision` 字段的 `resource-manifest.json` 和工作区交接预览。

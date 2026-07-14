@@ -81,6 +81,8 @@ cancelled
 - 下载失败、版本不匹配和取消必需资源可以触发恢复或重规划。
 - 任何替代计划都必须生成新 revision，并回到 `waiting_approval`。
 - Manifest 由当前状态计算生成，不是固定字符串。
+- 模型计划在获得 revision 前必须通过任务能力、依赖、系统、来源和授权验证。
+- `APPROVE_PLAN` 必须携带当前 revision，下载 Policy 同时检查 `approvedRevision`。
 
 ### 3.3 最小模型运行时
 
@@ -189,6 +191,8 @@ Runtime 创建受控 ToolCall
 
 当前 Policy 仍是程序内硬编码规则，没有用户级授权存储、企业策略、审批有效期或字段级权限。
 
+严格计划验证已经独立为纯函数模块，Policy 和 Tool Executor 会拒绝没有当前 revision 审批的下载调用。
+
 ### 3.8 失败恢复
 
 示例项目在 56% 固定返回：
@@ -217,6 +221,7 @@ retriable: true
 - 支持 Skill 静态展示。
 - 澄清页和询问原因。
 - 资源计划详情、勾选、授权、依赖、大小和预计时间。
+- 当前任务必需能力、严格计划验证状态和结构化阻断原因。
 - 执行进度、模型决策、ToolResult、Policy 审计和操作日志。
 - 下载失败人工处置面板。
 - 重规划状态和新 revision 确认入口。
@@ -266,8 +271,8 @@ retriable: true
 
 | 方向 | 当前完成度 | 说明 |
 | --- | ---: | --- |
-| 高保真比赛 Demo | 85% | 核心流程、失败恢复和交接可演示 |
-| Agent Core 协议与状态机 | 80% | 主要状态、动作、Tool 和 Policy 已建立 |
+| 高保真比赛 Demo | 88% | 核心流程、严格计划验证、失败恢复和交接可演示 |
+| Agent Core 协议与状态机 | 86% | 主要状态、动作、验证、Tool 和 Policy 已建立 |
 | 最小模型驱动闭环 | 75% | 模型参与理解、规划和重规划 |
 | UI 产品流程 | 80% | 主要页面完整，配置和真实历史缺失 |
 | 远程 LLM 产品化 | 75% | 已有状态、测试连接、错误可见性和本地回退，仍缺配置编辑与真实端点自动测试 |
@@ -295,8 +300,8 @@ retriable: true
 - 第 1 项：完成。
 - 第 2 项：完成。
 - 第 3 项：完成。
-- 第 4 项：未开始，是下一目标。
-- 第 5 项：部分完成，已有综合场景、模型客户端和 Electron renderer 冒烟脚本，但没有正式测试框架。
+- 第 4 项：完成，已覆盖能力、依赖、系统、来源、授权、fallback、元数据和 revision。
+- 第 5 项：部分完成，已有综合场景、模型客户端和完整计划审批 Electron 冒烟脚本，但没有正式测试框架和 CI。
 - 第 6 项：未开始，并且仍应保持低优先级。
 
 ## 7. 本轮完成：模型连接可观测性
@@ -311,21 +316,26 @@ retriable: true
 6. 未配置、非 HTTPS、401、超时、非法响应、非法 JSON、成功和回退测试。
 7. 隐藏 Electron production renderer 冒烟测试，覆盖设置导航和测试连接状态切换。
 
-## 8. 后续目标
+## 8. 本轮完成：严格计划验证器
 
-### 严格计划验证器
+已经完成：
 
-至少校验：
+1. 从任务文本和澄清答案推导必需能力。
+2. 可信资源声明提供能力、依赖能力、系统兼容性和来源信任等级。
+3. 校验未知/重复 ID、必需资源、能力闭包、系统、来源、授权、fallback 和目录元数据。
+4. 非法模型计划留在 `planning`，不能获得新的审批 revision。
+5. 初始计划和替代计划进入 `waiting_approval` 前统一验证。
+6. `APPROVE_PLAN(revision)` 再次验证，成功后写入 `approvedRevision`。
+7. Policy 和 Tool Executor 双重拒绝无当前 revision 审批的下载。
+8. 计划页展示必需能力和结构化验证问题，验证失败时禁用确认按钮。
+9. Electron 冒烟测试覆盖首页、澄清、严格验证、revision 审批和进入执行页。
+10. 点击路径审计修复了执行期间新任务被拒绝但页面仍错误跳转的问题。
 
-- 必需资源是否齐全。
-- 依赖是否闭合。
-- 资源 ID 是否来自可信目录。
-- 版本和目标系统是否兼容。
-- 来源和授权是否符合策略。
-- 用户审批是否绑定正确 revision。
-- 模型是否尝试遗漏基础资源或绕过审批。
+详细说明见 `docs/strict-plan-validation-2026-07-14.md`。
 
-### 测试体系
+## 9. 后续目标
+
+### 正式测试体系与 CI
 
 建议引入 Vitest 和 Playwright，分别覆盖：
 
@@ -336,9 +346,11 @@ retriable: true
 - 首页到交接的 UI 冒烟流程。
 - 三个失败处置按钮的点击路径。
 
+建议增加 GitHub Actions，自动运行 typecheck、Agent Core、模型客户端和 production build 验证。
+
 ### 真实能力
 
-严格计划验证器和测试完成后，再逐步引入：
+正式测试体系完成后，再逐步引入：
 
 - 真实目标系统画像读取。
 - 真实下载器。
@@ -348,7 +360,7 @@ retriable: true
 - SQLite 任务恢复。
 - MCP、插件和受控脚本执行。
 
-## 9. 必须保持的架构约束
+## 10. 必须保持的架构约束
 
 - React 只能渲染状态和派发事件，不能放 Agent 规则。
 - 所有状态转移必须经过 `machine.ts`。
@@ -356,13 +368,15 @@ retriable: true
 - 所有执行动作必须经过 Policy 和 Agent Tool。
 - Tool 只能执行预注册能力，禁止 `eval` 和任意 Shell。
 - 替代计划必须进入新的 revision 并重新审批。
+- 所有计划和替代计划必须通过 `planValidation.ts`，禁止在 UI 中绕过验证。
+- 下载 Policy 必须同时满足 `approvedRevision === revision`。
 - 用户选择的恢复策略必须约束模型重规划结果。
 - API Key 只能保留在 Electron 主进程。
 - 不得使用 `VITE_` 前缀暴露密钥。
 - 当前阶段继续保持无真实下载、无文件写入、无 SQLite。
 - 不要把项目扩展成通用编码 Agent；优先强化可信资源准备、审计和交接。
 
-## 10. 已知注意事项
+## 11. 已知注意事项
 
 - 直接在普通浏览器打开 Vite 页面时没有 Electron preload，会使用本地规则模型。
 - 修改 `.env` 后必须重启 Electron 主进程。
@@ -371,9 +385,9 @@ retriable: true
 - `read_system_profile` 当前返回固定 Windows 11 x64，而且系统画像已经存在于 AgentState，因此它主要用于演示 Tool 协议。
 - 当前所有下载、时间戳、校验、工作区和 Agent B 都是模拟数据。
 - 当前 ToolResult 会记录每次进度调用，最终产品应默认聚合、失败突出、详情可展开。
-- 当前 GitHub CLI 令牌曾显示失效，但 Git HTTPS push 在提交 `6c879a1` 时成功；如后续 `gh` 操作失败，需要重新执行 `gh auth login`。
+- Electron renderer 冒烟测试需要在允许启动隐藏 Electron 窗口的环境中运行；受限沙箱可能以 `SIGABRT` 退出。
 
-## 11. 关键文件
+## 12. 关键文件
 
 | 文件 | 作用 |
 | --- | --- |
@@ -384,6 +398,8 @@ retriable: true
 | `src/features/agent-core/localRuleModel.ts` | 本地确定性模型 |
 | `src/features/agent-core/remoteModel.ts` | 远程模型校验与本地回退 |
 | `src/features/agent-core/modelConnection.ts` | 应用级模型连接状态、测试和回退熔断 |
+| `src/features/agent-core/taskRequirements.ts` | 从任务和澄清答案推导必需能力 |
+| `src/features/agent-core/planValidation.ts` | 计划能力、依赖、兼容、来源、授权和 revision 纯验证器 |
 | `src/features/agent-core/agentServices.ts` | 三个内存 Tool 和默认 Policy |
 | `src/features/agent-core/mockServices.ts` | 无模型兼容路径和模拟验证 |
 | `src/features/agent-core/catalog.ts` | 固定 Windows 画像和可信资源目录 |
@@ -396,7 +412,7 @@ retriable: true
 | `scripts/verify-agent-core.mjs` | 综合 Agent 场景验证 |
 | `docs/agent-runtime-replanning-and-recovery.md` | 本次 Runtime 和失败恢复详细说明 |
 
-## 12. 启动与验证
+## 13. 启动与验证
 
 ```bash
 npm install
@@ -419,22 +435,21 @@ git diff --check
 
 ```text
 Agent Core scenario passed: revision=4, phase=handoff
-Remote model client passed
-Electron renderer connection settings smoke passed
+Remote model client passed: configuration, auth, timeout, response and success cases verified
+Electron renderer passed: settings, strict plan approval and safe metadata verified
 TypeScript typecheck passed
 Vite production build passed
 Production renderer build passed: 2 relative assets verified
-Electron production preview loaded dist/index.html successfully
 ```
 
-## 13. 新对话建议开场
+## 14. 新对话建议开场
 
 可以在新对话中直接发送：
 
 ```text
 请先阅读 docs/project-handoff-2026-07-14.md 和当前 Agent Core 代码。
-保持现有架构约束，继续完成优先级第 4 项：严格计划验证器。
-先核对 catalog.ts、types.ts、machine.ts、agentServices.ts 和现有资源替代关系，
-先设计任务需求、能力依赖和计划校验结果，再接入状态机与 Policy，并补充自动测试。
+保持现有架构约束，继续完成优先级第 5 项：正式测试体系和 CI。
+优先引入 Vitest 拆分 planValidation、machine、Policy 和 Tool 单元测试，
+再增加 GitHub Actions；Electron E2E 继续覆盖首页到交接和三个失败处置按钮。
 不要接入真实下载、文件写入、SQLite、MCP 或插件。
 ```

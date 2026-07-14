@@ -8,7 +8,10 @@ import type {
   ToolResult
 } from "./types";
 
-export type LocalTaskIntent = "python-ai" | "fullstack-ai" | "base-development" | "ambiguous";
+import { inferLocalTaskIntent } from "./taskRequirements";
+import type { LocalTaskIntent } from "./types";
+
+export { inferLocalTaskIntent } from "./taskRequirements";
 
 type SupportedLocalIntent = Exclude<LocalTaskIntent, "ambiguous">;
 
@@ -47,38 +50,6 @@ const clarificationByIntent: Record<
     options: ["包含 VS Code", "仅 Git 命令行"]
   }
 };
-
-function includesAny(text: string, keywords: string[]) {
-  return keywords.some((keyword) => text.includes(keyword));
-}
-
-/**
- * 使用澄清答案和关键词识别当前 Demo 支持的三类垂直任务。
- * @param task 用户输入的自然语言任务。
- * @param workloadAnswer 已记录的主要工作负载澄清答案。
- * @returns 匹配的本地意图；信息不足时返回 ambiguous。
- */
-export function inferLocalTaskIntent(task: string, workloadAnswer?: string): LocalTaskIntent {
-  if (workloadAnswer === "全栈 AI 应用") return "fullstack-ai";
-  if (workloadAnswer === "Python AI 开发") return "python-ai";
-  if (workloadAnswer === "仅准备基础环境") return "base-development";
-
-  const normalized = task.trim().toLowerCase();
-  if (
-    includesAny(normalized, ["全栈", "前端", "node.js", "nodejs", "react", "vite", "full stack", "fullstack"])
-  ) {
-    return "fullstack-ai";
-  }
-  if (
-    includesAny(normalized, ["python", "人工智能", "机器学习", "深度学习", "大模型", "llm", "ai 开发", "ai环境", "ai 环境"])
-  ) {
-    return "python-ai";
-  }
-  if (includesAny(normalized, ["基础工具", "基础开发", "开发工具", "git", "vscode", "visual studio code", "basic tools"])) {
-    return "base-development";
-  }
-  return "ambiguous";
-}
 
 function hasSuccessfulResult(results: ToolResult[], tool: AgentToolName) {
   return results.some((result) => result.tool === tool && result.status === "success");

@@ -61,7 +61,7 @@ export function useAgentCore() {
   const [modelConnectionState, setModelConnectionState] = useState(() => modelConnection.getState());
 
   const dispatch = useCallback((event: AgentEvent) => {
-    runtime.dispatch(event);
+    return runtime.dispatch(event);
   }, [runtime]);
 
   const testModelConnection = useCallback(() => modelConnection.testConnection(), [modelConnection]);

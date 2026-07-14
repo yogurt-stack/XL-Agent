@@ -27,6 +27,15 @@ ipcMain.handle("agent:testModelConnection", () => ({
   }
 }));
 
+ipcMain.handle("agent:modelDecision", () => ({
+  ok: false,
+  error: {
+    code: "MODEL_NETWORK_ERROR",
+    message: "Renderer smoke intentionally exercises the local fallback.",
+    retriable: true
+  }
+}));
+
 app.whenReady().then(async () => {
   const window = new BrowserWindow({
     show: false,
@@ -38,13 +47,14 @@ app.whenReady().then(async () => {
     }
   });
 
+  let exitCode = 0;
   try {
     await window.loadFile(path.join(root, "dist", "index.html"));
     const result = await window.webContents.executeJavaScript(`
       (async () => {
         const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         const waitFor = async (predicate, message) => {
-          for (let attempt = 0; attempt < 50; attempt += 1) {
+          for (let attempt = 0; attempt < 250; attempt += 1) {
             if (predicate()) return;
             await wait(20);
           }
@@ -72,28 +82,81 @@ app.whenReady().then(async () => {
           () => document.body.innerText.includes("远程可用"),
           "Successful connection state did not render."
         );
+        const settingsVisibleBeforeTask = document.body.innerText.includes("models.example.test");
+        const modelVisibleBeforeTask = document.body.innerText.includes("renderer-smoke-model");
+        const remoteAvailableBeforeTask = document.body.innerText.includes("远程可用");
+
+        const homeButton = [...document.querySelectorAll("button")]
+          .find((button) => button.textContent?.trim() === "首页");
+        if (!homeButton) throw new Error("Home navigation button is missing.");
+        homeButton.click();
+        await waitFor(
+          () => document.body.innerText.includes("准备一个可交接的开发工作区"),
+          "Home view did not render."
+        );
+
+        const taskInput = document.querySelector('textarea[name="task"]');
+        const startButton = [...document.querySelectorAll("button")]
+          .find((button) => button.textContent?.includes("开始任务"));
+        if (!taskInput || !startButton) throw new Error("Task submission controls are missing.");
+        taskInput.value = "准备 Python 机器学习环境";
+        startButton.click();
+
+        await waitFor(
+          () => document.body.innerText.includes("Python AI 环境是否需要同时准备前端工具链"),
+          "Python task clarification did not render."
+        );
+        const pythonOnlyButton = [...document.querySelectorAll("button")]
+          .find((button) => button.textContent?.trim() === "仅 Python AI");
+        if (!pythonOnlyButton) throw new Error("Python-only clarification action is missing.");
+        pythonOnlyButton.click();
+
+        await waitFor(
+          () => [...document.querySelectorAll("button")]
+            .some((button) => button.textContent?.includes("查看资源计划")),
+          "Validated resource plan was not generated."
+        );
+        const viewPlanButton = [...document.querySelectorAll("button")]
+          .find((button) => button.textContent?.includes("查看资源计划"));
+        viewPlanButton.click();
+
+        await waitFor(
+          () => document.body.innerText.includes("已通过严格验证"),
+          "Strict plan validation result did not render."
+        );
+        const approveButton = [...document.querySelectorAll("button")]
+          .find((button) => button.textContent?.includes("确认下载计划"));
+        if (!approveButton || approveButton.disabled) {
+          throw new Error("A valid current revision must expose an enabled approval button.");
+        }
+        approveButton.click();
+        await waitFor(
+          () => document.body.innerText.includes("执行监控"),
+          "Approval did not navigate to the execution state."
+        );
 
         return {
           title: document.title,
-          settingsVisible: document.body.innerText.includes("models.example.test"),
-          modelVisible: document.body.innerText.includes("renderer-smoke-model"),
-          remoteAvailable: document.body.innerText.includes("远程可用"),
+          settingsVisible: settingsVisibleBeforeTask,
+          modelVisible: modelVisibleBeforeTask,
+          remoteAvailable: remoteAvailableBeforeTask,
+          strictPlanApproved: document.body.innerText.includes("执行监控"),
           bodyText: document.body.innerText
         };
       })()
     `);
 
     if (result.title !== "迅雷 AI Task Agent") throw new Error("Production renderer title is incorrect.");
-    if (!result.settingsVisible || !result.modelVisible || !result.remoteAvailable) {
-      throw new Error("Model connection settings smoke assertions failed.");
+    if (!result.settingsVisible || !result.modelVisible || !result.remoteAvailable || !result.strictPlanApproved) {
+      throw new Error("Renderer smoke assertions failed.");
     }
     if (result.bodyText.includes(testApiKey)) throw new Error("Renderer exposed the API key.");
-    console.log("Electron renderer passed: settings, safe metadata and connection test UI verified");
+    console.log("Electron renderer passed: settings, strict plan approval and safe metadata verified");
   } catch (error) {
     console.error(error);
-    process.exitCode = 1;
+    exitCode = 1;
   } finally {
     window.destroy();
-    app.quit();
+    app.exit(exitCode);
   }
 });

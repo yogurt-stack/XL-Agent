@@ -7,6 +7,9 @@ export function createResourceManifest(state: AgentState) {
     task: state.task,
     route: state.route,
     systemProfile: state.systemProfile,
+    taskRequirements: state.taskRequirements,
+    planValidation: state.planValidation,
+    approvedRevision: state.approvedRevision,
     mode: "frontend-memory-simulation",
     generatedAt: state.workspace.generatedAt ?? null,
     resources: state.resources.map((resource) => ({
