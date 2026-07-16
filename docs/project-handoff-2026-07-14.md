@@ -12,6 +12,15 @@
 
 本文件是在上述基准提交之后新增，并与后续 P0 稳定性修复一同纳入版本管理。
 
+### 1.1 2026-07-16 续作进度
+
+- 正式测试体系和 GitHub Actions CI 已完成并通过 PR #2 合并到 `main`。
+- Vitest 当前包含 6 个测试文件、20 个 Agent Core 测试，覆盖计划验证、状态机、Policy、Tool、Runtime 恢复、Manifest 和 selectors。
+- Playwright 当前包含 3 条真实 Electron 失败恢复链路，覆盖主来源重试、可信替代来源和 Agent B 未完成交接。
+- ToolResult 已按工具聚合，失败组自动展开，详情可以通过鼠标或键盘展开。
+- 关键页面已接入 axe-core serious/critical 无障碍扫描。
+- 第五阶段继续补齐 Linux CI 上的关键页面视觉基线；真实下载、文件写入和 SQLite 仍未进入本阶段。
+
 ## 2. 产品定位
 
 产品当前定位不是通用 Codex 替代品，也不是直接安装软件的脚本生成器，而是：
@@ -229,13 +238,15 @@ retriable: true
 - README、RESOURCE_MANIFEST、AGENTS 预览。
 - Agent B 未完成交接提示。
 - 响应式窗口布局和资源计划滚动。
+- ToolResult 按工具聚合、失败突出和展开详情。
+- 任务输入、资源选择、进度、日志和折叠详情的无障碍语义。
+- 首页、失败处置、替代计划、工作区和 Agent B 交接的 axe-core 检查。
 
 仍然缺少：
 
-- ToolResult 聚合与展开详情；当前高频下载结果偏调试器风格。
 - 真实最近任务和持久化。
 - 真实打开工作目录。
-- 完整无障碍与端到端视觉回归测试。
+- 更完整的辅助技术人工审计。
 
 ## 4. 当前完整演示流程
 
@@ -301,7 +312,7 @@ retriable: true
 - 第 2 项：完成。
 - 第 3 项：完成。
 - 第 4 项：完成，已覆盖能力、依赖、系统、来源、授权、fallback、元数据和 revision。
-- 第 5 项：部分完成，已有综合场景、模型客户端和完整计划审批 Electron 冒烟脚本，但没有正式测试框架和 CI。
+- 第 5 项：完成，已有 Vitest、覆盖率、Playwright Electron E2E、无障碍扫描、视觉基线和 GitHub Actions CI。
 - 第 6 项：未开始，并且仍应保持低优先级。
 
 ## 7. 本轮完成：模型连接可观测性
@@ -335,9 +346,9 @@ retriable: true
 
 ## 9. 后续目标
 
-### 正式测试体系与 CI
+### 正式测试体系与 CI（已完成）
 
-建议引入 Vitest 和 Playwright，分别覆盖：
+已经引入 Vitest 和 Playwright，分别覆盖：
 
 - 状态机纯函数单元测试。
 - Policy 允许、拒绝和审批分支。
@@ -346,9 +357,16 @@ retriable: true
 - 首页到交接的 UI 冒烟流程。
 - 三个失败处置按钮的点击路径。
 
-建议增加 GitHub Actions，自动运行 typecheck、Agent Core、模型客户端和 production build 验证。
+GitHub Actions 已自动运行 typecheck、Agent Core、模型客户端、production build 和 Electron E2E，并上传覆盖率与失败诊断产物。
 
-### 真实能力
+### 第五阶段稳定性收口
+
+- ToolResult 默认聚合，错误组自动展开，详情支持键盘访问。
+- 关键视图运行 axe-core serious/critical 扫描。
+- Linux CI 使用固定 1440×900 视口比较首页、失败处置、可信替代计划、就绪工作区和 Agent B 未完成交接视觉基线。
+- macOS 本地继续运行相同功能与无障碍路径，但不跨平台比较 Linux 字体渲染基线。
+
+### 真实能力（下一阶段候选）
 
 正式测试体系完成后，再逐步引入：
 
@@ -384,7 +402,7 @@ retriable: true
 - 远程失败会展示结构化原因并回退本地；需要在设置页重新测试才能恢复远程优先。
 - `read_system_profile` 当前返回固定 Windows 11 x64，而且系统画像已经存在于 AgentState，因此它主要用于演示 Tool 协议。
 - 当前所有下载、时间戳、校验、工作区和 Agent B 都是模拟数据。
-- 当前 ToolResult 会记录每次进度调用，最终产品应默认聚合、失败突出、详情可展开。
+- ToolResult 底层仍保留每次进度调用用于审计，但 UI 默认按工具聚合，失败突出且详情可展开。
 - Electron renderer 冒烟测试需要在允许启动隐藏 Electron 窗口的环境中运行；受限沙箱可能以 `SIGABRT` 退出。
 
 ## 12. 关键文件
@@ -410,6 +428,11 @@ retriable: true
 | `electron/modelClient.ts` | 可测试的远程模型配置、HTTPS 客户端与结构化错误 |
 | `electron/preload.ts` | 最小 contextBridge |
 | `scripts/verify-agent-core.mjs` | 综合 Agent 场景验证 |
+| `src/features/agent-core/*.test.ts` | Agent Core 正式单元与集成测试 |
+| `e2e/agent-recovery.spec.ts` | Electron 三条失败恢复、无障碍和视觉回归测试 |
+| `vitest.config.mts` | Vitest 与覆盖率配置 |
+| `playwright.config.ts` | Electron E2E、报告和 Linux 视觉基线路径配置 |
+| `.github/workflows/ci.yml` | GitHub Actions 质量与 Electron E2E 门禁 |
 | `docs/agent-runtime-replanning-and-recovery.md` | 本次 Runtime 和失败恢复详细说明 |
 
 ## 13. 启动与验证
@@ -425,6 +448,8 @@ npm run dev
 npm run verify:agent-core
 npm run verify:model-client
 npm run verify:electron-renderer
+npm run verify:ci
+npm run test:e2e
 npm run typecheck
 npm run build
 npm run verify:production-build
@@ -437,6 +462,8 @@ git diff --check
 Agent Core scenario passed: revision=4, phase=handoff
 Remote model client passed: configuration, auth, timeout, response and success cases verified
 Electron renderer passed: settings, strict plan approval and safe metadata verified
+Vitest passed: 6 files, 20 tests
+Playwright Electron passed: 3 recovery paths with accessibility and visual checks
 TypeScript typecheck passed
 Vite production build passed
 Production renderer build passed: 2 relative assets verified
@@ -448,8 +475,8 @@ Production renderer build passed: 2 relative assets verified
 
 ```text
 请先阅读 docs/project-handoff-2026-07-14.md 和当前 Agent Core 代码。
-保持现有架构约束，继续完成优先级第 5 项：正式测试体系和 CI。
-优先引入 Vitest 拆分 planValidation、machine、Policy 和 Tool 单元测试，
-再增加 GitHub Actions；Electron E2E 继续覆盖首页到交接和三个失败处置按钮。
-不要接入真实下载、文件写入、SQLite、MCP 或插件。
+正式测试、CI 和第五阶段稳定性收口已经完成。
+保持现有架构约束，先设计真实系统画像读取的最小受控边界，
+确认数据脱敏、平台兼容、Policy 和 ToolResult 契约后再实现。
+不要同时接入真实下载、文件写入、SQLite、MCP 或插件。
 ```

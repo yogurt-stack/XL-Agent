@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AgentHomeView,
   AgentTopBar,
@@ -14,12 +14,20 @@ import { useAgentCore } from "./features/agent-core/useAgentCore";
 export function App() {
   const { state, dispatch, modelConnectionState, testModelConnection } = useAgentCore();
   const [activeView, setActiveView] = useState<AppView>("home");
+  const mainPanelRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    const mainPanel = mainPanelRef.current;
+    if (!mainPanel) return;
+    mainPanel.scrollTop = 0;
+    mainPanel.scrollLeft = 0;
+  }, [activeView]);
 
   return (
     <div className="app-shell agent-shell">
       <Sidebar activeView={activeView} onViewChange={setActiveView} />
       <AgentTopBar modelConnection={modelConnectionState} state={state} />
-      <main className="main-panel">
+      <main className="main-panel" ref={mainPanelRef}>
         {activeView === "home" && <AgentHomeView dispatch={dispatch} state={state} onNavigate={setActiveView} />}
         {activeView === "clarification" && <ClarificationView dispatch={dispatch} state={state} onNavigate={setActiveView} />}
         {activeView === "plan" && <ResourcePlanView dispatch={dispatch} state={state} onNavigate={setActiveView} />}

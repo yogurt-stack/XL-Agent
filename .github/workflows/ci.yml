@@ -64,6 +64,12 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
+      - name: Install CJK fonts for visual regression
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends fonts-noto-cjk
+          fc-cache --force
+
       - name: Run Electron E2E with Xvfb
         run: xvfb-run --auto-servernum npm run test:e2e
 

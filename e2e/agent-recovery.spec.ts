@@ -4,6 +4,7 @@ import axe, { type AxeResults } from "axe-core";
 import { _electron as electron, type ElectronApplication } from "playwright";
 
 const projectRoot = path.resolve(__dirname, "..");
+const visualRegressionEnabled = process.platform === "linux";
 
 let electronApp: ElectronApplication;
 let page: Page;
@@ -23,13 +24,14 @@ function deterministicEnvironment() {
 
 test.beforeEach(async () => {
   electronApp = await electron.launch({
-    args: [projectRoot],
+    args: ["--disable-gpu", projectRoot],
     cwd: projectRoot,
     env: deterministicEnvironment(),
     locale: "zh-CN",
     timeout: 30_000
   });
   page = await electronApp.firstWindow();
+  await page.setViewportSize({ width: 1440, height: 900 });
   await electronApp.context().tracing.start({ screenshots: true, snapshots: true, sources: true });
   await page.waitForLoadState("domcontentloaded");
   await expect(page).toHaveTitle("迅雷 AI Task Agent");
@@ -78,6 +80,14 @@ async function startTaskAndWaitForFailure() {
   await expect(failurePanel.getByRole("button", { name: "重试原来源" })).toBeEnabled();
   await expect(failurePanel.getByRole("button", { name: "使用可信替代来源" })).toBeEnabled();
   await expect(failurePanel.getByRole("button", { name: "交给 Agent B" })).toBeEnabled();
+  await expectMainPanelAtTop("failure resolution");
+}
+
+async function expectMainPanelAtTop(view: string) {
+  await expect.poll(
+    () => page.locator("main.main-panel").evaluate((element) => element.scrollTop),
+    { message: `${view} should start at the top after navigation` }
+  ).toBe(0);
 }
 
 async function expectNoSeriousAccessibilityViolations(view: string) {
@@ -100,10 +110,25 @@ async function expectNoSeriousAccessibilityViolations(view: string) {
   expect(violations, `${view} has serious accessibility violations`).toEqual([]);
 }
 
+async function expectVisualBaseline(name: string) {
+  if (!visualRegressionEnabled) return;
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+  });
+  await expect(page.locator("main.main-panel")).toHaveScreenshot(`${name}.png`, {
+    animations: "disabled",
+    caret: "hide",
+    maxDiffPixelRatio: 0.01,
+    scale: "css"
+  });
+}
+
 async function approveReplacementPlan() {
   await expect(page.getByText("替代计划 r2 已生成")).toBeVisible();
   await page.getByRole("button", { name: "查看并确认" }).click();
   await expect(page.getByText("计划 r2 已通过严格验证")).toBeVisible();
+  await expectMainPanelAtTop("replacement plan");
   await page.getByRole("button", { name: "确认下载计划 r2" }).click();
 }
 
@@ -112,6 +137,7 @@ async function openCompletedWorkspace() {
   await page.getByRole("button", { name: "工作区" }).click();
   await expect(page.getByRole("heading", { name: "交接包已就绪" })).toBeVisible();
   await expect(page.getByText("已验证，可交接")).toBeVisible();
+  await expectMainPanelAtTop("ready workspace");
   return JSON.parse(await page.locator("pre.workspace-code-preview").innerText()) as {
     revision: number;
     approvedRevision: number;
@@ -122,14 +148,28 @@ async function openCompletedWorkspace() {
 
 test("retries the original source and reaches a ready workspace", async () => {
   await expectNoSeriousAccessibilityViolations("home");
+  await expectVisualBaseline("home");
   await startTaskAndWaitForFailure();
   await expectNoSeriousAccessibilityViolations("failure resolution");
-  await expect(page.getByText(/simulate_download/).first()).toBeVisible();
+
+  const catalogResults = page.locator("details.agent-tool-result-group").filter({ hasText: "search_trusted_catalog" });
+  const downloadResults = page.locator("details.agent-tool-result-group").filter({ hasText: "simulate_download" });
+  await expect(catalogResults).toHaveCount(1);
+  await expect(downloadResults).toHaveCount(1);
+  expect(await catalogResults.evaluate((element) => (element as HTMLDetailsElement).open)).toBe(false);
+  expect(await downloadResults.evaluate((element) => (element as HTMLDetailsElement).open)).toBe(true);
+  await catalogResults.locator("summary").click();
+  await expect.poll(() => catalogResults.evaluate((element) => (element as HTMLDetailsElement).open)).toBe(true);
+  await expect(catalogResults.locator(".agent-trace-row")).toHaveCount(1);
+  await expect(downloadResults).toContainText("需关注");
+  await expectVisualBaseline("failure-with-tool-details");
+
   await page.getByRole("button", { name: "重试原来源" }).click();
   await approveReplacementPlan();
 
   const manifest = await openCompletedWorkspace();
   await expectNoSeriousAccessibilityViolations("ready workspace");
+  await expectVisualBaseline("ready-workspace");
   expect(manifest).toMatchObject({
     revision: 2,
     approvedRevision: 2,
@@ -148,8 +188,14 @@ test("switches to the trusted fallback and records its provenance", async () => 
   await expect(page.getByText("替代计划 r2 已生成")).toBeVisible();
   await page.getByRole("button", { name: "查看并确认" }).click();
   await expectNoSeriousAccessibilityViolations("replacement plan");
+  await expectMainPanelAtTop("trusted replacement plan");
   await expect(page.getByRole("heading", { name: "AI Dev Starter Mirror", exact: true })).toBeVisible();
   await expect(page.getByText("替代 sample-project")).toBeVisible();
+  const replacementDetails = page.locator(".agent-resource-row").filter({ hasText: "AI Dev Starter Mirror" }).locator(".resource-plan-details");
+  await expect(replacementDetails).toBeVisible();
+  const replacementDetailsBounds = await replacementDetails.boundingBox();
+  expect(replacementDetailsBounds?.width).toBeGreaterThan(800);
+  await expectVisualBaseline("trusted-replacement-plan");
   await page.getByRole("button", { name: "确认下载计划 r2" }).click();
 
   const manifest = await openCompletedWorkspace();
@@ -172,7 +218,9 @@ test("delegates the failed resource to Agent B as an incomplete handoff", async 
   await expect(page.getByRole("heading", { name: "等待资源准备完成" })).toBeVisible();
   await expect(page.getByText("已交给 Agent B 处理未完成资源")).toBeVisible();
   await expect(page.getByText("仍有资源未验证")).toBeVisible();
+  await expectMainPanelAtTop("Agent B handoff");
   await expectNoSeriousAccessibilityViolations("Agent B handoff");
+  await expectVisualBaseline("agent-b-incomplete-handoff");
 
   const manifest = JSON.parse(await page.locator("pre.workspace-code-preview").innerText()) as {
     resources: Array<{ id: string; status: string; failureReason: string | null }>;
