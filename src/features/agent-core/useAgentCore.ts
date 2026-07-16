@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { InMemoryAgentToolExecutor } from "./agentServices";
 import { LocalRuleModelRuntime } from "./localRuleModel";
 import {
   ModelConnectionController,
@@ -7,6 +8,7 @@ import {
 } from "./modelConnection";
 import { FallbackModelRuntime, parseRemoteDecision, RemoteLlmModelRuntime } from "./remoteModel";
 import { createMockAgentRuntime } from "./runtime";
+import { createSystemProfileToolOutput, isHostSystemProfile } from "./systemProfile";
 import type { AgentEvent } from "./types";
 
 function createRendererAgentServices() {
@@ -38,6 +40,15 @@ function createRendererAgentServices() {
     return { runtime: createMockAgentRuntime(localModel), modelConnection };
   }
 
+  const tools = new InMemoryAgentToolExecutor(async () => {
+    const result = await electronBridge.readSystemProfile();
+    if (!result.ok) throw new Error(result.error.message);
+    if (!isHostSystemProfile(result.profile)) {
+      throw new Error("Electron 返回了非法系统画像。");
+    }
+    return createSystemProfileToolOutput(result.profile);
+  });
+
   const remoteModel = new RemoteLlmModelRuntime({
     async requestDecision(context) {
       const result = await electronBridge.requestModelDecision(context);
@@ -50,7 +61,7 @@ function createRendererAgentServices() {
     onPrimarySuccess: (decision) => modelConnection.recordRemoteSuccess(decision),
     onPrimaryFailure: (error) => modelConnection.recordFallback(error)
   });
-  return { runtime: createMockAgentRuntime(fallbackModel), modelConnection };
+  return { runtime: createMockAgentRuntime(fallbackModel, tools), modelConnection };
 }
 
 export function useAgentCore() {

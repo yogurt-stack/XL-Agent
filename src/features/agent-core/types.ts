@@ -31,6 +31,10 @@ export type TargetOperatingSystem = "Windows 11";
 
 export type TargetArchitecture = "x64";
 
+export type HostPlatform = "darwin" | "linux" | "win32" | "unknown";
+
+export type HostArchitecture = "x64" | "arm64" | "other";
+
 export type ResourceCapability =
   | "python-runtime"
   | "code-editor"
@@ -126,6 +130,32 @@ export type SystemProfile = {
   workspaceRoot: "C:\\XunleiAgent\\ai-dev-env-windows";
 };
 
+export type HostSystemProfile = {
+  platform: HostPlatform;
+  platformLabel: string;
+  architecture: HostArchitecture;
+  release: string;
+  cpuCount: number;
+  totalMemoryGb: number;
+  defaultShell: string;
+  collectedBy: "electron-main" | "renderer-fallback";
+  collectedAt: string;
+  privacy: {
+    hostname: false;
+    username: false;
+    homeDirectory: false;
+    environment: false;
+    shellPath: false;
+  };
+};
+
+export type SystemProfileToolOutput = {
+  targetProfile: SystemProfile;
+  hostProfile: HostSystemProfile;
+  planningProfileSource: "locked-demo-target";
+  boundary: "Host profile is read-only telemetry; plan validation still uses the locked Windows target profile.";
+};
+
 export type WorkspaceHandoff = {
   ready: boolean;
   generatedAt?: string;
@@ -139,6 +169,7 @@ export type AgentState = {
   task: string;
   route: string | null;
   systemProfile: SystemProfile;
+  hostProfile: HostSystemProfile | null;
   clarifications: ClarificationQuestion[];
   clarificationIndex: number;
   answers: Record<string, string | "skipped">;

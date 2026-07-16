@@ -1,13 +1,17 @@
 import { trustedCatalog } from "./catalog";
 import type { AgentPolicy, AgentToolExecutor } from "./interfaces";
+import { createSystemProfileToolOutput } from "./systemProfile";
 import type {
   AgentAction,
   AgentState,
   AgentToolCall,
   PolicyDecision,
   SimulatedDownloadOutput,
+  SystemProfileToolOutput,
   ToolResult
 } from "./types";
+
+export type SystemProfileReader = () => Promise<SystemProfileToolOutput> | SystemProfileToolOutput;
 
 function mockTimestamp(state: AgentState, suffix: string) {
   return `mock-step-${state.agentRun.step}-${suffix}`;
@@ -43,9 +47,21 @@ function errorResult(
 
 /** 执行只读系统画像、可信目录查询和前端模拟下载三个受控工具。 */
 export class InMemoryAgentToolExecutor implements AgentToolExecutor {
+  constructor(private readonly readSystemProfile: SystemProfileReader = createSystemProfileToolOutput) {}
+
   async execute(call: AgentToolCall, state: AgentState): Promise<ToolResult> {
     if (call.name === "read_system_profile") {
-      return successResult(call, state, state.systemProfile);
+      try {
+        return successResult(call, state, await this.readSystemProfile());
+      } catch (error) {
+        return errorResult(
+          call,
+          state,
+          "SYSTEM_PROFILE_UNAVAILABLE",
+          error instanceof Error ? error.message : "系统画像读取失败。",
+          true
+        );
+      }
     }
 
     if (call.name === "search_trusted_catalog") {

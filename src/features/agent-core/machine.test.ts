@@ -1,6 +1,26 @@
 import { describe, expect, it } from "vitest";
 import { createInitialAgentState, transition } from "./machine";
-import type { AgentState } from "./types";
+import { createSystemProfileToolOutput } from "./systemProfile";
+import type { AgentState, HostSystemProfile } from "./types";
+
+const linuxHostProfile: HostSystemProfile = {
+  platform: "linux",
+  platformLabel: "Linux",
+  architecture: "x64",
+  release: "test-release",
+  cpuCount: 8,
+  totalMemoryGb: 16,
+  defaultShell: "zsh",
+  collectedBy: "electron-main",
+  collectedAt: "test-static",
+  privacy: {
+    hostname: false,
+    username: false,
+    homeDirectory: false,
+    environment: false,
+    shellPath: false
+  }
+};
 
 function createWaitingApprovalState(): AgentState {
   let state = createInitialAgentState();
@@ -20,6 +40,28 @@ function createWaitingApprovalState(): AgentState {
 }
 
 describe("agent state machine", () => {
+  it("records sanitized host profile output while preserving the planning target", () => {
+    const initial = createInitialAgentState();
+    const profiled = transition(initial, {
+      type: "MODEL_TOOL_COMPLETED",
+      result: {
+        callId: "profile",
+        tool: "read_system_profile",
+        status: "success",
+        output: createSystemProfileToolOutput(linuxHostProfile),
+        startedAt: "start",
+        finishedAt: "finish"
+      }
+    });
+
+    expect(profiled.systemProfile).toEqual(initial.systemProfile);
+    expect(profiled.hostProfile).toEqual(linuxHostProfile);
+    expect(profiled.agentRun.toolResults.at(-1)?.output).toMatchObject({
+      hostProfile: linuxHostProfile,
+      planningProfileSource: "locked-demo-target"
+    });
+  });
+
   it("binds approval to the current plan revision", () => {
     const waitingApproval = createWaitingApprovalState();
 

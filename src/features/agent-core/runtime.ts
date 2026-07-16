@@ -294,14 +294,17 @@ function isSimulatedDownloadOutput(value: unknown): value is SimulatedDownloadOu
   return typeof output.resourceId === "string" && typeof output.progress === "number";
 }
 
-export function createMockAgentRuntime(model: ModelRuntime = new LocalRuleModelRuntime()) {
+export function createMockAgentRuntime(
+  model: ModelRuntime = new LocalRuleModelRuntime(),
+  tools: AgentToolExecutor = new InMemoryAgentToolExecutor()
+) {
   return new AgentRuntime({
     router: new FixedWindowsRouter(),
     planner: new FixedWindowsPlanner(),
     verifier: new MockVerifier(),
     scheduler: createTimeoutScheduler(),
     model,
-    tools: new InMemoryAgentToolExecutor(),
+    tools,
     policy: new DefaultAgentPolicy()
   });
 }

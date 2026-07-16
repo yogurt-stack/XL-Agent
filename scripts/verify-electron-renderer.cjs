@@ -13,6 +13,28 @@ ipcMain.handle("agent:modelConnectionInfo", () => ({
   }
 }));
 
+ipcMain.handle("agent:readSystemProfile", () => ({
+  ok: true,
+  profile: {
+    platform: "linux",
+    platformLabel: "Linux",
+    architecture: "x64",
+    release: "renderer-smoke",
+    cpuCount: 4,
+    totalMemoryGb: 8,
+    defaultShell: "sh",
+    collectedBy: "electron-main",
+    collectedAt: "renderer-smoke-static",
+    privacy: {
+      hostname: false,
+      username: false,
+      homeDirectory: false,
+      environment: false,
+      shellPath: false
+    }
+  }
+}));
+
 ipcMain.handle("agent:testModelConnection", () => ({
   ok: true,
   decision: {

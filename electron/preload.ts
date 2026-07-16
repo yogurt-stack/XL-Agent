@@ -30,8 +30,40 @@ type ModelConnectionInfoIpcResult =
     }
   | { ok: false; error: ModelConnectionError };
 
+type HostSystemProfile = {
+  platform: "darwin" | "linux" | "win32" | "unknown";
+  platformLabel: string;
+  architecture: "x64" | "arm64" | "other";
+  release: string;
+  cpuCount: number;
+  totalMemoryGb: number;
+  defaultShell: string;
+  collectedBy: "electron-main";
+  collectedAt: string;
+  privacy: {
+    hostname: false;
+    username: false;
+    homeDirectory: false;
+    environment: false;
+    shellPath: false;
+  };
+};
+
+type SystemProfileIpcResult =
+  | { ok: true; profile: HostSystemProfile }
+  | {
+      ok: false;
+      error: {
+        code: "SYSTEM_PROFILE_UNAVAILABLE";
+        message: string;
+        retriable: boolean;
+      };
+    };
+
 contextBridge.exposeInMainWorld("xunleiAgent", {
   getAppInfo: () => ipcRenderer.invoke("app:getInfo") as Promise<AppInfo>,
+  readSystemProfile: () =>
+    ipcRenderer.invoke("agent:readSystemProfile") as Promise<SystemProfileIpcResult>,
   getModelConnectionInfo: () =>
     ipcRenderer.invoke("agent:modelConnectionInfo") as Promise<ModelConnectionInfoIpcResult>,
   testModelConnection: () =>

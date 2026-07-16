@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain } from "electron";
 import { config as loadEnv } from "dotenv";
+import os from "node:os";
 import path from "node:path";
 import { RemoteModelClient, toModelConnectionError } from "./modelClient";
 
@@ -8,6 +9,73 @@ loadEnv({ path: path.resolve(process.cwd(), ".env"), quiet: true });
 app.setName("迅雷 AI Task Agent");
 
 const remoteModelClient = new RemoteModelClient();
+
+type HostPlatform = "darwin" | "linux" | "win32" | "unknown";
+
+type HostArchitecture = "x64" | "arm64" | "other";
+
+type HostSystemProfile = {
+  platform: HostPlatform;
+  platformLabel: string;
+  architecture: HostArchitecture;
+  release: string;
+  cpuCount: number;
+  totalMemoryGb: number;
+  defaultShell: string;
+  collectedBy: "electron-main";
+  collectedAt: string;
+  privacy: {
+    hostname: false;
+    username: false;
+    homeDirectory: false;
+    environment: false;
+    shellPath: false;
+  };
+};
+
+function normalizePlatform(value: NodeJS.Platform): HostPlatform {
+  if (value === "darwin" || value === "linux" || value === "win32") return value;
+  return "unknown";
+}
+
+function normalizeArchitecture(value: string): HostArchitecture {
+  if (value === "x64" || value === "arm64") return value;
+  return "other";
+}
+
+function platformLabel(platform: HostPlatform) {
+  if (platform === "darwin") return "macOS";
+  if (platform === "linux") return "Linux";
+  if (platform === "win32") return "Windows";
+  return "未知系统";
+}
+
+function shellBasename(rawShell: string | undefined) {
+  if (!rawShell) return "unknown";
+  return path.basename(rawShell).replace(/[^A-Za-z0-9._-]/g, "").slice(0, 40) || "unknown";
+}
+
+function readHostSystemProfile(): HostSystemProfile {
+  const platform = normalizePlatform(process.platform);
+  return {
+    platform,
+    platformLabel: platformLabel(platform),
+    architecture: normalizeArchitecture(process.arch),
+    release: os.release().replace(/[^A-Za-z0-9._-]/g, "").slice(0, 40) || "unknown",
+    cpuCount: os.cpus().length,
+    totalMemoryGb: Math.round(os.totalmem() / 1024 / 1024 / 1024),
+    defaultShell: shellBasename(process.env.SHELL ?? process.env.ComSpec),
+    collectedBy: "electron-main",
+    collectedAt: new Date().toISOString(),
+    privacy: {
+      hostname: false,
+      username: false,
+      homeDirectory: false,
+      environment: false,
+      shellPath: false
+    }
+  };
+}
 
 function getDevServerUrl() {
   const rawUrl = process.env.VITE_DEV_SERVER_URL;
@@ -60,6 +128,21 @@ ipcMain.handle("app:getInfo", () => ({
   electron: process.versions.electron,
   chrome: process.versions.chrome
 }));
+
+ipcMain.handle("agent:readSystemProfile", () => {
+  try {
+    return { ok: true as const, profile: readHostSystemProfile() };
+  } catch (error) {
+    return {
+      ok: false as const,
+      error: {
+        code: "SYSTEM_PROFILE_UNAVAILABLE" as const,
+        message: error instanceof Error ? error.message : "系统画像读取失败。",
+        retriable: true
+      }
+    };
+  }
+});
 
 ipcMain.handle("agent:modelDecision", async (_event, context: unknown) => {
   try {

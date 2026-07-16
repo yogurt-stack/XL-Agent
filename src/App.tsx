@@ -33,7 +33,7 @@ export function App() {
         {activeView === "plan" && <ResourcePlanView dispatch={dispatch} state={state} onNavigate={setActiveView} />}
         {activeView === "execution" && <ExecutionView dispatch={dispatch} state={state} onNavigate={setActiveView} modelConnection={modelConnectionState} />}
         {activeView === "workspace" && <WorkspaceView state={state} />}
-        {activeView === "settings" && <SettingsView modelConnection={modelConnectionState} onTestConnection={testModelConnection} />}
+        {activeView === "settings" && <SettingsView modelConnection={modelConnectionState} onTestConnection={testModelConnection} state={state} />}
       </main>
     </div>
   );

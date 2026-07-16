@@ -15,11 +15,12 @@
 ### 1.1 2026-07-16 续作进度
 
 - 正式测试体系和 GitHub Actions CI 已完成并通过 PR #2 合并到 `main`。
-- Vitest 当前包含 6 个测试文件、20 个 Agent Core 测试，覆盖计划验证、状态机、Policy、Tool、Runtime 恢复、Manifest 和 selectors。
+- Vitest 当前包含 7 个测试文件、25 个 Agent Core 测试，覆盖计划验证、状态机、Policy、Tool、系统画像契约、Runtime 恢复、Manifest 和 selectors。
 - Playwright 当前包含 3 条真实 Electron 失败恢复链路，覆盖主来源重试、可信替代来源和 Agent B 未完成交接。
 - ToolResult 已按工具聚合，失败组自动展开，详情可以通过鼠标或键盘展开。
 - 关键页面已接入 axe-core serious/critical 无障碍扫描。
 - 第五阶段继续补齐 Linux CI 上的关键页面视觉基线；真实下载、文件写入和 SQLite 仍未进入本阶段。
+- 第六阶段已开始并完成最小真实系统画像读取：Electron 主进程只读采集脱敏主机画像，计划校验仍锁定 Windows 11 x64 目标画像。
 
 ## 2. 产品定位
 
@@ -171,7 +172,7 @@ XL_AGENT_LLM_API_KEY=secret
 
 | Tool | 当前作用 | 是否真实执行 |
 | --- | --- | --- |
-| `read_system_profile` | 返回固定 Windows 11 x64 目标画像 | 否 |
+| `read_system_profile` | Electron 环境读取脱敏主机画像，并返回锁定的 Windows 11 x64 目标画像边界 | 只读采集 |
 | `search_trusted_catalog` | 查询内存可信资源目录 | 否 |
 | `simulate_download` | 返回模拟下载进度和固定失败 | 否 |
 
@@ -186,6 +187,8 @@ Runtime 创建受控 ToolCall
 ```
 
 旧的 `MockDownloadExecutor` 已删除，下载不会绕过 Agent Tool 接口。
+
+`read_system_profile` 当前只采集平台、架构、系统版本、CPU 数、内存 GB 和默认 shell 文件名。它不采集用户名、主机名、Home 路径、环境变量或完整 shell 路径。该主机画像用于 ToolResult 和设置页审计；因为可信目录仍只覆盖 Windows 11 x64，计划验证继续使用锁定的目标画像，避免把当前 macOS/Linux 运行机误当成资源计划目标。
 
 ### 3.7 Policy 与审批
 
@@ -370,7 +373,6 @@ GitHub Actions 已自动运行 typecheck、Agent Core、模型客户端、produc
 
 正式测试体系完成后，再逐步引入：
 
-- 真实目标系统画像读取。
 - 真实下载器。
 - SHA256 和数字签名验证。
 - 临时目录和原子文件写入。
@@ -400,7 +402,7 @@ GitHub Actions 已自动运行 typecheck、Agent Core、模型客户端、produc
 - 修改 `.env` 后必须重启 Electron 主进程。
 - 当前 `XL_AGENT_LLM_ENDPOINT` 必须填写完整 Chat Completions 请求地址。
 - 远程失败会展示结构化原因并回退本地；需要在设置页重新测试才能恢复远程优先。
-- `read_system_profile` 当前返回固定 Windows 11 x64，而且系统画像已经存在于 AgentState，因此它主要用于演示 Tool 协议。
+- `read_system_profile` 会读取脱敏主机画像，但计划目标仍固定为 Windows 11 x64；跨平台可信资源目录尚未建立。
 - 当前所有下载、时间戳、校验、工作区和 Agent B 都是模拟数据。
 - ToolResult 底层仍保留每次进度调用用于审计，但 UI 默认按工具聚合，失败突出且详情可展开。
 - Electron renderer 冒烟测试需要在允许启动隐藏 Electron 窗口的环境中运行；受限沙箱可能以 `SIGABRT` 退出。
@@ -416,11 +418,12 @@ GitHub Actions 已自动运行 typecheck、Agent Core、模型客户端、produc
 | `src/features/agent-core/localRuleModel.ts` | 本地确定性模型 |
 | `src/features/agent-core/remoteModel.ts` | 远程模型校验与本地回退 |
 | `src/features/agent-core/modelConnection.ts` | 应用级模型连接状态、测试和回退熔断 |
+| `src/features/agent-core/systemProfile.ts` | 系统画像 ToolResult 契约、fallback 和 IPC 返回值校验 |
 | `src/features/agent-core/taskRequirements.ts` | 从任务和澄清答案推导必需能力 |
 | `src/features/agent-core/planValidation.ts` | 计划能力、依赖、兼容、来源、授权和 revision 纯验证器 |
 | `src/features/agent-core/agentServices.ts` | 三个内存 Tool 和默认 Policy |
 | `src/features/agent-core/mockServices.ts` | 无模型兼容路径和模拟验证 |
-| `src/features/agent-core/catalog.ts` | 固定 Windows 画像和可信资源目录 |
+| `src/features/agent-core/catalog.ts` | 锁定 Windows 目标画像和可信资源目录 |
 | `src/features/agent-core/manifest.ts` | 根据 AgentState 计算 Manifest |
 | `src/features/agent-core/useAgentCore.ts` | React 与 Runtime 适配 |
 | `src/components/AgentViews.tsx` | 六个主要业务页面与模型设置 |
@@ -462,7 +465,7 @@ git diff --check
 Agent Core scenario passed: revision=4, phase=handoff
 Remote model client passed: configuration, auth, timeout, response and success cases verified
 Electron renderer passed: settings, strict plan approval and safe metadata verified
-Vitest passed: 6 files, 20 tests
+Vitest passed: 7 files, 25 tests
 Playwright Electron passed: 3 recovery paths with accessibility and visual checks
 TypeScript typecheck passed
 Vite production build passed
@@ -476,7 +479,8 @@ Production renderer build passed: 2 relative assets verified
 ```text
 请先阅读 docs/project-handoff-2026-07-14.md 和当前 Agent Core 代码。
 正式测试、CI 和第五阶段稳定性收口已经完成。
-保持现有架构约束，先设计真实系统画像读取的最小受控边界，
-确认数据脱敏、平台兼容、Policy 和 ToolResult 契约后再实现。
-不要同时接入真实下载、文件写入、SQLite、MCP 或插件。
+真实系统画像读取的最小受控边界已经完成。
+保持现有架构约束，下一步优先设计真实下载器的最小受控边界，
+先确认 URL 来源、临时目录、SHA256、Policy 和 ToolResult 契约。
+不要同时接入 SQLite、MCP 或插件。
 ```
