@@ -80,6 +80,14 @@ async function startTaskAndWaitForFailure() {
   await expect(failurePanel.getByRole("button", { name: "重试原来源" })).toBeEnabled();
   await expect(failurePanel.getByRole("button", { name: "使用可信替代来源" })).toBeEnabled();
   await expect(failurePanel.getByRole("button", { name: "交给 Agent B" })).toBeEnabled();
+  await expectMainPanelAtTop("failure resolution");
+}
+
+async function expectMainPanelAtTop(view: string) {
+  await expect.poll(
+    () => page.locator("main.main-panel").evaluate((element) => element.scrollTop),
+    { message: `${view} should start at the top after navigation` }
+  ).toBe(0);
 }
 
 async function expectNoSeriousAccessibilityViolations(view: string) {
@@ -116,6 +124,7 @@ async function approveReplacementPlan() {
   await expect(page.getByText("替代计划 r2 已生成")).toBeVisible();
   await page.getByRole("button", { name: "查看并确认" }).click();
   await expect(page.getByText("计划 r2 已通过严格验证")).toBeVisible();
+  await expectMainPanelAtTop("replacement plan");
   await page.getByRole("button", { name: "确认下载计划 r2" }).click();
 }
 
@@ -124,6 +133,7 @@ async function openCompletedWorkspace() {
   await page.getByRole("button", { name: "工作区" }).click();
   await expect(page.getByRole("heading", { name: "交接包已就绪" })).toBeVisible();
   await expect(page.getByText("已验证，可交接")).toBeVisible();
+  await expectMainPanelAtTop("ready workspace");
   return JSON.parse(await page.locator("pre.workspace-code-preview").innerText()) as {
     revision: number;
     approvedRevision: number;
@@ -174,6 +184,7 @@ test("switches to the trusted fallback and records its provenance", async () => 
   await expect(page.getByText("替代计划 r2 已生成")).toBeVisible();
   await page.getByRole("button", { name: "查看并确认" }).click();
   await expectNoSeriousAccessibilityViolations("replacement plan");
+  await expectMainPanelAtTop("trusted replacement plan");
   await expect(page.getByRole("heading", { name: "AI Dev Starter Mirror", exact: true })).toBeVisible();
   await expect(page.getByText("替代 sample-project")).toBeVisible();
   await expectVisualBaseline("trusted-replacement-plan");
@@ -199,6 +210,7 @@ test("delegates the failed resource to Agent B as an incomplete handoff", async 
   await expect(page.getByRole("heading", { name: "等待资源准备完成" })).toBeVisible();
   await expect(page.getByText("已交给 Agent B 处理未完成资源")).toBeVisible();
   await expect(page.getByText("仍有资源未验证")).toBeVisible();
+  await expectMainPanelAtTop("Agent B handoff");
   await expectNoSeriousAccessibilityViolations("Agent B handoff");
   await expectVisualBaseline("agent-b-incomplete-handoff");
 
