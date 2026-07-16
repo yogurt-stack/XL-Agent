@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Bot,
@@ -34,11 +34,13 @@ import { createResourceManifest } from "../features/agent-core/manifest";
 import type { ModelConnectionState } from "../features/agent-core/modelConnection";
 import {
   estimatedMinutes,
+  groupedToolResults,
   overallProgress,
   phaseLabel,
   requiredMissingResources,
   totalDownloadSizeMb
 } from "../features/agent-core/selectors";
+import type { ToolResultGroup } from "../features/agent-core/selectors";
 import { getActiveClarification } from "../features/agent-core/machine";
 import type { AgentEvent, AgentState, ResourceCapability, ResourceStatus } from "../features/agent-core/types";
 
@@ -71,6 +73,30 @@ const capabilityLabels: Record<ResourceCapability, string> = {
 function ResourceStatusBadge({ status }: { status: ResourceStatus }) {
   const meta = statusMeta[status];
   return <span className={`resource-status ${meta.className}`}>{meta.label}</span>;
+}
+
+function ToolResultGroupView({ group }: { group: ToolResultGroup }) {
+  const [open, setOpen] = useState(group.errorCount > 0);
+
+  useEffect(() => {
+    if (group.errorCount > 0) setOpen(true);
+  }, [group.errorCount]);
+
+  return (
+    <details className="agent-tool-result-group" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary>
+        <span className="agent-trace-icon"><Wrench size={14} /></span>
+        <span className="agent-tool-result-copy">
+          <strong>{group.tool}</strong>
+          <small>{group.results.length} 次调用 · {group.successCount} 成功{group.errorCount ? ` · ${group.errorCount} 失败` : ""}{group.cancelledCount ? ` · ${group.cancelledCount} 取消` : ""}</small>
+        </span>
+        <em className={group.errorCount ? "trace-error" : `trace-${group.latestStatus}`}>{group.errorCount ? "需关注" : group.latestStatus}</em>
+      </summary>
+      <div className="agent-tool-result-details">
+        {group.results.map((result) => <div className="agent-trace-row" key={result.callId}><span className="agent-trace-icon"><Wrench size={14} /></span><div><strong>{result.callId}</strong><small>{result.status === "success" ? "受控工具执行成功" : result.error?.message ?? "工具已取消"}</small></div><em className={`trace-${result.status}`}>{result.status}</em></div>)}
+      </div>
+    </details>
+  );
 }
 
 const modelConnectionMeta: Record<
@@ -147,7 +173,8 @@ export function AgentHomeView({ state, dispatch, onNavigate }: { state: AgentSta
           if (nextState.phase === "routing" && nextState.task === task.trim()) onNavigate("clarification");
         }}
       >
-        <textarea disabled={taskSubmissionLocked} name="task" defaultValue={state.task || "帮我准备一个 Windows 下的 AI 开发环境"} />
+        <label className="sr-only" htmlFor="agent-task-input">任务描述</label>
+        <textarea id="agent-task-input" disabled={taskSubmissionLocked} name="task" defaultValue={state.task || "帮我准备一个 Windows 下的 AI 开发环境"} />
         <button className="btn btn-primary" disabled={taskSubmissionLocked} title={taskSubmissionLocked ? "当前资源执行完成后才能开始新任务" : undefined} type="submit"><Sparkles size={17} />开始任务</button>
       </form>
       <div className="agent-home-grid">
@@ -241,7 +268,7 @@ export function ResourcePlanView({ state, dispatch, onNavigate }: { state: Agent
       <div className="agent-resource-list">
         {state.resources.map((resource) => (
           <article className={`agent-resource-row ${resource.required ? "agent-resource-required" : ""}`} key={resource.id}>
-            <label className="resource-selection"><input checked={resource.selected} disabled={!waitingApproval} type="checkbox" onChange={(event) => dispatch({ type: "TOGGLE_RESOURCE", resourceId: resource.id, selected: event.target.checked })} /><span /></label>
+            <label className="resource-selection"><input aria-label={`${resource.selected ? "取消选择" : "选择"} ${resource.name}`} checked={resource.selected} disabled={!waitingApproval} type="checkbox" onChange={(event) => dispatch({ type: "TOGGLE_RESOURCE", resourceId: resource.id, selected: event.target.checked })} /><span /></label>
             <div className="resource-plan-main"><div><h3>{resource.name}</h3><span>{resource.version} {resource.replacedFrom ? `· 替代 ${resource.replacedFrom}` : ""}</span></div><ResourceStatusBadge status={resource.status} /></div>
             <div className="resource-plan-details"><span><strong>来源</strong>{resource.source}</span><span><strong>用途</strong>{resource.purpose}</span><span><strong>大小</strong>{formatMb(resource.sizeMb)}</span><span><strong>授权</strong>{resource.license}</span></div>
             <p>{resource.recommendation}</p>
@@ -261,6 +288,7 @@ export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: 
   const failedToolResult = [...state.agentRun.toolResults]
     .reverse()
     .find((result) => result.tool === "simulate_download" && result.status === "error");
+  const toolResultGroups = groupedToolResults(state);
   return (
     <section className="agent-view execution-view">
       <div className="agent-page-heading"><div><span>执行监控</span><h1>Agent 正在{phaseLabel(state.phase)}</h1></div><button className="btn btn-ghost" disabled={!isWorking} type="button" onClick={() => dispatch({ type: "CANCEL_TASK" })}><XCircle size={16} />取消任务</button></div>
@@ -284,7 +312,7 @@ export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: 
       <div className="execution-grid">
         <section className="agent-panel">
           <div className="agent-panel-heading"><PackageCheck size={17} /><h2>下载任务</h2></div>
-          {state.resources.length ? state.resources.map((resource) => <div className="execution-resource" key={resource.id}><div><strong>{resource.name}</strong><ResourceStatusBadge status={resource.status} /></div><div className="progress-track"><span style={{ width: `${resource.progress}%` }} /></div><small>{resource.progress}% {resource.failureReason ? `· ${resource.failureReason}` : ""}</small></div>) : <span className="agent-empty-copy">等待模型生成资源计划。</span>}
+          {state.resources.length ? state.resources.map((resource) => <div className="execution-resource" key={resource.id}><div><strong>{resource.name}</strong><ResourceStatusBadge status={resource.status} /></div><div aria-label={`${resource.name} 下载进度`} aria-valuemax={100} aria-valuemin={0} aria-valuenow={resource.progress} className="progress-track" role="progressbar"><span style={{ width: `${resource.progress}%` }} /></div><small>{resource.progress}% {resource.failureReason ? `· ${resource.failureReason}` : ""}</small></div>) : <span className="agent-empty-copy">等待模型生成资源计划。</span>}
         </section>
         <section className="agent-panel agent-trace-panel">
           <div className="agent-panel-heading"><BrainCircuit size={17} /><h2>Agent 决策轨迹</h2></div>
@@ -294,14 +322,14 @@ export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: 
           </div>
           <div className="agent-trace-group">
             <h3>工具结果</h3>
-            {state.agentRun.toolResults.length ? state.agentRun.toolResults.map((result) => <div className="agent-trace-row" key={result.callId}><span className="agent-trace-icon"><Wrench size={14} /></span><div><strong>{result.tool}</strong><small>{result.status === "success" ? "受控工具执行成功" : result.error?.message ?? "工具已取消"}</small></div><em className={`trace-${result.status}`}>{result.status}</em></div>) : <span className="agent-empty-copy">尚未调用工具。</span>}
+            {toolResultGroups.length ? toolResultGroups.map((group) => <ToolResultGroupView group={group} key={group.tool} />) : <span className="agent-empty-copy">尚未调用工具。</span>}
           </div>
           <div className="agent-trace-group">
             <h3>权限与审批</h3>
             {state.agentRun.policyAudit.length ? state.agentRun.policyAudit.map((entry) => <div className="agent-trace-row" key={entry.actionId}><span className="agent-trace-icon"><ShieldCheck size={14} /></span><div><strong>{entry.decision.risk.toUpperCase()} 风险</strong><small>{entry.decision.reason}</small></div><em className={`trace-${entry.decision.outcome}`}>{entry.decision.outcome}</em></div>) : <span className="agent-empty-copy">尚无策略判定。</span>}
           </div>
         </section>
-        <section className="agent-panel agent-log-panel"><div className="agent-panel-heading"><FileText size={17} /><h2>操作日志</h2></div>{state.logs.length ? <div className="agent-log-list">{state.logs.map((log) => <span className={`agent-log-${log.level}`} key={log.id}><small>{log.at}</small>{log.message}</span>)}</div> : <span className="agent-empty-copy">等待 Agent 事件。</span>}</section>
+        <section className="agent-panel agent-log-panel"><div className="agent-panel-heading"><FileText size={17} /><h2>操作日志</h2></div>{state.logs.length ? <div aria-label="操作日志列表" className="agent-log-list" tabIndex={0}>{state.logs.map((log) => <span className={`agent-log-${log.level}`} key={log.id}><small>{log.at}</small>{log.message}</span>)}</div> : <span className="agent-empty-copy">等待 Agent 事件。</span>}</section>
       </div>
     </section>
   );

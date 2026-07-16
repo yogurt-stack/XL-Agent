@@ -7,11 +7,16 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build": "tsc -p tsconfig.app.json && tsc -p tsconfig.node.json && tsc -p electron/tsconfig.json && vite build",
-    "typecheck": "tsc -p tsconfig.app.json && tsc -p tsconfig.node.json && tsc -p electron/tsconfig.json",
+    "typecheck": "tsc -p tsconfig.app.json && tsc -p tsconfig.node.json && tsc -p electron/tsconfig.json && tsc -p tsconfig.e2e.json",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "npm run build && playwright test",
     "verify:agent-core": "node scripts/verify-agent-core.mjs",
     "verify:electron-renderer": "npm run build && electron scripts/verify-electron-renderer.cjs",
     "verify:model-client": "node scripts/verify-model-client.mjs",
     "verify:production-build": "npm run build && node scripts/verify-production-build.mjs",
+    "verify:ci": "npm run typecheck && npm run test:coverage && npm run verify:agent-core && npm run verify:model-client && npm run verify:production-build",
     "preview": "npm run build && electron ."
   },
   "dependencies": {
@@ -21,12 +26,16 @@
     "react-dom": "^18.2.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@types/node": "^20.11.30",
     "@types/react": "^18.2.66",
     "@types/react-dom": "^18.2.22",
-    "@vitejs/plugin-react-swc": "^3.7.0",
+    "@vitejs/plugin-react-swc": "^3.11.0",
+    "@vitest/coverage-v8": "^3.2.7",
+    "axe-core": "^4.12.1",
     "electron": "^30.0.1",
     "typescript": "^5.4.5",
-    "vite": "^5.2.0"
+    "vite": "^6.4.3",
+    "vitest": "^3.2.7"
   }
 }

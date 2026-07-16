@@ -1455,6 +1455,16 @@ textarea:focus-visible {
   padding: 14px;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .agent-task-form textarea {
   width: 100%;
   min-height: 76px;
@@ -2162,6 +2172,12 @@ textarea:focus-visible {
   margin-top: 13px;
 }
 
+.agent-log-list:focus-visible {
+  border-radius: 6px;
+  outline: 2px solid var(--cyan);
+  outline-offset: 3px;
+}
+
 .agent-log-panel {
   grid-column: 1 / -1;
 }
@@ -2185,6 +2201,73 @@ textarea:focus-visible {
   font-size: 11px;
   font-weight: 650;
   text-transform: uppercase;
+}
+
+.agent-tool-result-group {
+  border-top: 1px solid rgb(255 255 255 / 5%);
+}
+
+.agent-tool-result-group:first-of-type {
+  border-top: 0;
+}
+
+.agent-tool-result-group > summary {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  padding: 9px 0;
+  cursor: pointer;
+  list-style: none;
+}
+
+.agent-tool-result-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.agent-tool-result-group > summary:focus-visible {
+  border-radius: 6px;
+  outline: 2px solid var(--cyan);
+  outline-offset: 3px;
+}
+
+.agent-tool-result-copy strong,
+.agent-tool-result-copy small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.agent-tool-result-copy strong {
+  color: #dce8f4;
+  font-size: 12px;
+}
+
+.agent-tool-result-copy small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.agent-tool-result-group > summary em {
+  color: var(--subtle);
+  font-size: 10px;
+  font-style: normal;
+  text-transform: uppercase;
+}
+
+.agent-tool-result-group > summary .trace-success {
+  color: #73d7ad;
+}
+
+.agent-tool-result-group > summary .trace-error {
+  color: #ff9ca3;
+}
+
+.agent-tool-result-details {
+  margin: 0 0 8px 32px;
+  border-left: 1px solid rgb(255 255 255 / 8%);
+  padding-left: 10px;
 }
 
 .agent-trace-row {

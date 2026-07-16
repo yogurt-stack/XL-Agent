@@ -11,5 +11,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["vite.config.mts"]
+  "include": ["vite.config.mts", "vitest.config.mts"]
 }
