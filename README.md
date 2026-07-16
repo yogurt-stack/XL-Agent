@@ -66,14 +66,14 @@ Electron 端到端测试使用 production renderer、真实 preload 和本地规
 npm run test:e2e
 ```
 
-E2E 固定单 worker 运行，显式禁用远程模型配置，并向真实 Electron renderer 注入 axe-core 扫描关键页面的 serious/critical 无障碍问题。失败时会在 `test-results/` 中保留页面截图和 Playwright trace，HTML 报告写入 `playwright-report/`。
+E2E 固定单 worker 运行，显式禁用远程模型配置，并向真实 Electron renderer 注入 axe-core 扫描关键页面的 serious/critical 无障碍问题。测试还会验证 ToolResult 聚合详情的展开状态，并在与 CI 一致的 Linux 环境比较首页、失败处置、可信替代计划、就绪工作区和 Agent B 未完成交接五个视觉基线。macOS 本地继续运行完整功能与无障碍断言，但不比较 Linux 字体渲染基线。失败时会在 `test-results/` 中保留页面截图、视觉差异图和 Playwright trace，HTML 报告写入 `playwright-report/`。
 
 ## 持续集成
 
 GitHub Actions 会在推送到 `main`、针对 `main` 的 Pull Request 以及手动触发时运行两个独立 Job：
 
 - `quality`：类型检查、Vitest 覆盖率、Agent Core、模型客户端和 production build。
-- `electron-e2e`：在 Linux Xvfb 环境中运行三个 Electron 失败恢复场景。
+- `electron-e2e`：在 Linux Xvfb 环境中运行三个 Electron 失败恢复场景、无障碍扫描和五个视觉基线比较。
 
 本地可以运行与快速质量门禁相同的命令：
 
