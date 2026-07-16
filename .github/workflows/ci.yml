@@ -70,16 +70,8 @@ jobs:
           sudo apt-get install --yes --no-install-recommends fonts-noto-cjk
           fc-cache --force
 
-      - name: Bootstrap Linux visual baselines with Xvfb
-        run: xvfb-run --auto-servernum npm run test:e2e -- --update-snapshots
-
-      - name: Upload generated Linux visual baselines
-        uses: actions/upload-artifact@v7
-        with:
-          name: linux-visual-baselines
-          path: e2e/agent-recovery.spec.ts-snapshots/
-          if-no-files-found: error
-          retention-days: 1
+      - name: Run Electron E2E with Xvfb
+        run: xvfb-run --auto-servernum npm run test:e2e
 
       - name: Upload Playwright failure artifacts
         if: ${{ failure() }}
