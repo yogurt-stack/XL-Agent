@@ -1719,6 +1719,7 @@ textarea:focus-visible {
 
 .resource-plan-details {
   display: grid;
+  grid-column: 2;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   margin-top: 12px;
@@ -1745,6 +1746,7 @@ textarea:focus-visible {
 }
 
 .agent-resource-row p {
+  grid-column: 2;
   margin: 11px 0 0;
   color: #b8c7d6;
   font-size: 13px;
@@ -1753,6 +1755,7 @@ textarea:focus-visible {
 
 .resource-plan-footer {
   display: flex;
+  grid-column: 2;
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 10px;

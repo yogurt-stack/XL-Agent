@@ -24,7 +24,7 @@ function deterministicEnvironment() {
 
 test.beforeEach(async () => {
   electronApp = await electron.launch({
-    args: [projectRoot],
+    args: ["--disable-gpu", projectRoot],
     cwd: projectRoot,
     env: deterministicEnvironment(),
     locale: "zh-CN",
@@ -112,6 +112,10 @@ async function expectNoSeriousAccessibilityViolations(view: string) {
 
 async function expectVisualBaseline(name: string) {
   if (!visualRegressionEnabled) return;
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+  });
   await expect(page).toHaveScreenshot(`${name}.png`, {
     animations: "disabled",
     caret: "hide",
@@ -187,6 +191,10 @@ test("switches to the trusted fallback and records its provenance", async () => 
   await expectMainPanelAtTop("trusted replacement plan");
   await expect(page.getByRole("heading", { name: "AI Dev Starter Mirror", exact: true })).toBeVisible();
   await expect(page.getByText("替代 sample-project")).toBeVisible();
+  const replacementDetails = page.locator(".agent-resource-row").filter({ hasText: "AI Dev Starter Mirror" }).locator(".resource-plan-details");
+  await expect(replacementDetails).toBeVisible();
+  const replacementDetailsBounds = await replacementDetails.boundingBox();
+  expect(replacementDetailsBounds?.width).toBeGreaterThan(800);
   await expectVisualBaseline("trusted-replacement-plan");
   await page.getByRole("button", { name: "确认下载计划 r2" }).click();
 
