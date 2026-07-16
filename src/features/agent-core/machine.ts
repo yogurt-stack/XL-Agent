@@ -1,5 +1,6 @@
 import { catalogById, clarificationQuestions, windows11Profile } from "./catalog";
 import { validatePlannedResources, validatePlanResourceIds } from "./planValidation";
+import { isSystemProfileToolOutput } from "./systemProfile";
 import { deriveTaskRequirements } from "./taskRequirements";
 import type {
   AgentEvent,
@@ -286,6 +287,7 @@ export function createInitialAgentState(): AgentState {
     task: "",
     route: null,
     systemProfile: windows11Profile,
+    hostProfile: null,
     clarifications: clarificationQuestions,
     clarificationIndex: 0,
     answers: {},
@@ -441,10 +443,21 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         }
       };
 
-    case "MODEL_TOOL_COMPLETED":
+    case "MODEL_TOOL_COMPLETED": {
+      const systemProfileUpdate =
+        event.result.tool === "read_system_profile" &&
+        event.result.status === "success" &&
+        isSystemProfileToolOutput(event.result.output)
+          ? {
+              systemProfile: event.result.output.targetProfile,
+              hostProfile: event.result.output.hostProfile
+            }
+          : {};
+
       return withLog(
         {
           ...state,
+          ...systemProfileUpdate,
           agentRun: {
             ...state.agentRun,
             status:
@@ -459,6 +472,7 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         event.result.status === "success" ? "success" : "error",
         `工具 ${event.result.tool} ${event.result.status === "success" ? "执行完成" : "执行失败"}。`
       );
+    }
 
     case "MODEL_CLARIFICATION_REQUESTED":
       return withLog(

@@ -2,7 +2,7 @@
 
 一个基于 Electron + React + TypeScript + Vite 的桌面端高保真交互 Demo。
 
-它模拟“用户用自然语言描述目标，Agent 路由并澄清需求，生成可信资源计划，经用户确认后模拟下载、验证、重规划并生成可交接工作区”的流程。所有资源、下载进度、失败重试和 Manifest 都在前端内存中模拟，不会真实下载文件。默认本地模型不发起网络请求；只有显式配置可选远程 LLM 时才会由 Electron 主进程访问指定 HTTPS 端点。
+它模拟“用户用自然语言描述目标，Agent 路由并澄清需求，生成可信资源计划，经用户确认后模拟下载、验证、重规划并生成可交接工作区”的流程。当前会由 Electron 主进程只读采集脱敏主机画像；所有资源、下载进度、失败重试和 Manifest 仍在前端内存中模拟，不会真实下载或写入文件。默认本地模型不发起网络请求；只有显式配置可选远程 LLM 时才会由 Electron 主进程访问指定 HTTPS 端点。
 
 ## 技术栈
 
@@ -10,13 +10,14 @@
 - React + TypeScript + Vite renderer
 - lucide-react 图标
 - 原生 CSS 样式
-- IPC 示例：`getAppInfo`
+- IPC 示例：`getAppInfo`、`readSystemProfile`
 - `nodeIntegration: false`
 - 纯 TypeScript Agent Core 状态机
 - 每轮最多 6 步的异步模型决策循环（用户批准新 revision 后重新计数）
 - 本地规则模型与可选远程 LLM 自动回退
 - 应用级模型连接状态、测试连接、结构化错误和失败熔断
 - 受控工具、权限策略和内存审计轨迹
+- Electron 主进程只读采集脱敏主机画像，不暴露用户名、主机名、Home 路径、环境变量或完整 shell 路径
 - ToolResult 按工具聚合、错误自动展开和键盘可达的执行日志
 - 基于任务能力、依赖、目标系统、来源、授权和 revision 的严格计划验证
 
@@ -58,7 +59,7 @@ npm run test:coverage
 
 覆盖率产物写入 `coverage/`，不会进入版本管理。现有 `verify:*` 脚本在正式测试迁移完成前继续作为综合回归基线。
 
-当前正式测试按职责覆盖严格计划验证、状态机 revision 审批、Policy/Tool 边界、Runtime 下载失败恢复以及成功或未完成的 Manifest 交接。每类规则使用独立测试文件，便于直接定位回归所在层级。
+当前正式测试按职责覆盖严格计划验证、状态机 revision 审批、Policy/Tool 边界、系统画像契约、Runtime 下载失败恢复以及成功或未完成的 Manifest 交接。每类规则使用独立测试文件，便于直接定位回归所在层级。
 
 Electron 端到端测试使用 production renderer、真实 preload 和本地规则模型，覆盖首页到交接以及三个失败处置按钮：
 
@@ -112,6 +113,12 @@ npm run verify:model-client
 npm run verify:electron-renderer
 ```
 
+## 系统画像边界
+
+`read_system_profile` 已经不再只是回传固定状态。Electron 环境会通过主进程读取平台、架构、系统版本、CPU 数、内存 GB 和默认 shell 文件名，并通过 preload 返回 renderer。该结果进入 `ToolResult` 和设置页审计，但不会暴露用户名、主机名、Home 路径、环境变量或完整 shell 路径。
+
+当前可信目录仍只覆盖 Windows 11 x64 目标资源，因此计划校验继续使用锁定的 Windows 目标画像。真实主机画像用于证明只读采集和脱敏边界，不会把当前 macOS/Linux 运行机直接变成资源计划目标。
+
 ## Agent Runtime 接口
 
 React 不再自行维护计时器或自动状态流转；它只订阅 `AgentRuntime` 的状态并派发用户事件。运行时接口位于 `src/features/agent-core/interfaces.ts`，固定 Mock 实现位于 `mockServices.ts`。
@@ -123,7 +130,7 @@ React 不再自行维护计时器或自动状态流转；它只订阅 `AgentRunt
 - `ModelRuntime`：在 `routing`、`planning` 和 `replanning` 阶段生成结构化决策；下载失败后先等待用户选择，模型只能按用户选择生成新 revision。
 - `AgentVerifier`：在 `verifying` 阶段生成验证结果。当前默认验证通过；UI/测试可显式派发版本不匹配事件以进入重规划。
 - `ModelRuntime`：根据当前状态、工具历史和剩余步数生成一项结构化 `ModelDecision`。
-- `AgentToolExecutor`：执行协议允许的系统画像读取、可信目录查询和模拟下载工具；全部下载进度与失败都由 `simulate_download` ToolResult 驱动。
+- `AgentToolExecutor`：执行协议允许的脱敏系统画像读取、可信目录查询和模拟下载工具；全部下载进度与失败都由 `simulate_download` ToolResult 驱动。
 - `AgentPolicy`：在执行动作前返回允许、需要审批或拒绝的策略结果。
 - `TaskRequirements`：把自然语言意图和澄清答案转换为确定性的必需能力集合。
 - `PlanValidationResult`：在计划生成和审批时记录结构化验证问题；只有当前 revision 验证通过并完成审批后才能执行下载工具。

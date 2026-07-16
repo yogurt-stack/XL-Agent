@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { DefaultAgentPolicy, InMemoryAgentToolExecutor } from "./agentServices";
 import { createInitialAgentState, transition } from "./machine";
-import type { AgentAction, AgentState } from "./types";
+import { createSystemProfileToolOutput } from "./systemProfile";
+import type { AgentAction, AgentState, HostSystemProfile } from "./types";
 
 function createWaitingApprovalState(): AgentState {
   let state = createInitialAgentState();
@@ -96,6 +97,24 @@ describe("default agent policy", () => {
 
 describe("in-memory agent tool executor", () => {
   const tools = new InMemoryAgentToolExecutor();
+  const linuxHostProfile: HostSystemProfile = {
+    platform: "linux",
+    platformLabel: "Linux",
+    architecture: "x64",
+    release: "test-release",
+    cpuCount: 8,
+    totalMemoryGb: 16,
+    defaultShell: "zsh",
+    collectedBy: "electron-main",
+    collectedAt: "test-static",
+    privacy: {
+      hostname: false,
+      username: false,
+      homeDirectory: false,
+      environment: false,
+      shellPath: false
+    }
+  };
 
   it("returns the system profile and filters the trusted catalog", async () => {
     const state = createInitialAgentState();
@@ -112,12 +131,37 @@ describe("in-memory agent tool executor", () => {
       state
     );
 
-    expect(profile).toMatchObject({ status: "success", output: state.systemProfile });
+    expect(profile).toMatchObject({
+      status: "success",
+      output: {
+        targetProfile: state.systemProfile,
+        planningProfileSource: "locked-demo-target",
+        hostProfile: { collectedBy: "renderer-fallback" }
+      }
+    });
     expect(catalog.status).toBe("success");
     expect(catalog.output).toEqual([
       expect.objectContaining({ id: "vscode" }),
       expect.objectContaining({ id: "git" })
     ]);
+  });
+
+  it("uses an injected host profile reader without changing the locked target profile", async () => {
+    const state = createInitialAgentState();
+    const injectedTools = new InMemoryAgentToolExecutor(() => createSystemProfileToolOutput(linuxHostProfile));
+    const result = await injectedTools.execute(
+      { callId: "profile", name: "read_system_profile", input: {} },
+      state
+    );
+
+    expect(result).toMatchObject({
+      status: "success",
+      output: {
+        targetProfile: state.systemProfile,
+        hostProfile: linuxHostProfile,
+        planningProfileSource: "locked-demo-target"
+      }
+    });
   });
 
   it("rejects unapproved downloads and advances an approved active resource", async () => {

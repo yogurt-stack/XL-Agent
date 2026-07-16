@@ -62,6 +62,12 @@ function formatMb(value: number) {
   return `${value.toFixed(1)} MB`;
 }
 
+function formatHostProfile(state: AgentState) {
+  const profile = state.hostProfile;
+  if (!profile) return "尚未读取";
+  return `${profile.platformLabel} ${profile.release} · ${profile.architecture}`;
+}
+
 const capabilityLabels: Record<ResourceCapability, string> = {
   "python-runtime": "Python 运行时",
   "code-editor": "代码编辑器",
@@ -133,11 +139,12 @@ export function AgentTopBar({
             {phaseLabel(state.phase)}
           </span>
         </div>
-        <span className="app-subtitle">Agent Core r{state.revision} · Windows 11 x64 · {modelConnection.activeProvider === "remote-llm" ? "远程模型" : "本地规则模型"}</span>
+        <span className="app-subtitle">Agent Core r{state.revision} · {state.systemProfile.os} {state.systemProfile.architecture} 目标 · {modelConnection.activeProvider === "remote-llm" ? "远程模型" : "本地规则模型"}</span>
       </div>
       <div className="topbar-meta">
         <span className="meta-chip"><ShieldCheck size={15} />可信目录</span>
         <span className="meta-chip"><TerminalSquare size={15} />{state.systemProfile.shell}</span>
+        <span className="meta-chip" title={state.hostProfile ? `主机画像：${formatHostProfile(state)}` : "系统画像将在任务路由前由只读工具采集"}><Server size={15} />{state.hostProfile ? state.hostProfile.platformLabel : "主机画像待读取"}</span>
         <span className={`meta-chip ${connectionMeta.className}`} title={modelConnection.error?.message}>
           {modelConnection.status === "checking" ? <Loader2 className="spin" size={15} /> : modelConnection.activeProvider === "remote-llm" ? <Wifi size={15} /> : <WifiOff size={15} />}
           {connectionMeta.label}
@@ -337,10 +344,12 @@ export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: 
 
 export function SettingsView({
   modelConnection,
-  onTestConnection
+  onTestConnection,
+  state
 }: {
   modelConnection: ModelConnectionState;
   onTestConnection: () => Promise<ModelConnectionState>;
+  state: AgentState;
 }) {
   const meta = modelConnectionMeta[modelConnection.status];
   const testing = modelConnection.status === "checking";
@@ -370,6 +379,13 @@ export function SettingsView({
           <div className="settings-row"><div><strong>端点主机</strong><span>仅显示 hostname，不展示完整请求路径。</span></div><code>{modelConnection.endpointHost ?? "未配置"}</code></div>
           <div className="settings-row"><div><strong>模型 ID</strong><span>由 XL_AGENT_LLM_MODEL 提供。</span></div><code>{modelConnection.model ?? "未配置"}</code></div>
           <div className="settings-row"><div><strong>配置方式</strong><span>修改项目根目录 .env 后需要重启 Electron 主进程。</span></div><code>主进程环境变量</code></div>
+        </section>
+        <section className="settings-section">
+          <div className="settings-section-heading"><TerminalSquare size={17} /><div><h2>系统画像边界</h2><span>只读主机画像用于审计；资源计划仍使用当前 Windows 目标画像。</span></div></div>
+          <div className="settings-row"><div><strong>计划目标</strong><span>用于可信目录兼容性校验。</span></div><code>{state.systemProfile.os} {state.systemProfile.architecture}</code></div>
+          <div className="settings-row"><div><strong>主机画像</strong><span>由 Electron 主进程采集，renderer 只接收脱敏摘要。</span></div><code>{formatHostProfile(state)}</code></div>
+          <div className="settings-row"><div><strong>Shell 摘要</strong><span>只显示 shell 文件名，不显示完整路径。</span></div><code>{state.hostProfile?.defaultShell ?? "pending"}</code></div>
+          <div className="settings-row"><div><strong>脱敏策略</strong><span>不采集用户名、主机名、Home 路径、环境变量或完整 shell 路径。</span></div><code>PII blocked</code></div>
         </section>
       </div>
     </section>

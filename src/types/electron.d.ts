@@ -1,3 +1,5 @@
+import type { HostSystemProfile } from "../features/agent-core/types";
+
 export type XunleiAppInfo = {
   name: string;
   version: string;
@@ -38,10 +40,22 @@ export type ModelConnectionInfoIpcResult =
     }
   | { ok: false; error: ModelConnectionIpcError };
 
+export type SystemProfileIpcResult =
+  | { ok: true; profile: HostSystemProfile }
+  | {
+      ok: false;
+      error: {
+        code: "SYSTEM_PROFILE_UNAVAILABLE";
+        message: string;
+        retriable: boolean;
+      };
+    };
+
 declare global {
   interface Window {
     xunleiAgent?: {
       getAppInfo: () => Promise<XunleiAppInfo>;
+      readSystemProfile: () => Promise<SystemProfileIpcResult>;
       getModelConnectionInfo: () => Promise<ModelConnectionInfoIpcResult>;
       testModelConnection: () => Promise<ModelDecisionIpcResult>;
       requestModelDecision: (context: unknown) => Promise<ModelDecisionIpcResult>;
