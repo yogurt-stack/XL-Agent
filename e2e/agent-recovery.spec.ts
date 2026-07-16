@@ -34,6 +34,9 @@ test.beforeEach(async () => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await electronApp.context().tracing.start({ screenshots: true, snapshots: true, sources: true });
   await page.waitForLoadState("domcontentloaded");
+  await page.addStyleTag({
+    content: ".topbar, .sidebar { backdrop-filter: none !important; }"
+  });
   await expect(page).toHaveTitle("迅雷 AI Task Agent");
   await expect(page.getByRole("heading", { name: "准备一个可交接的开发工作区" })).toBeVisible();
 });
