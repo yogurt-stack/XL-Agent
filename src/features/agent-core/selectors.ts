@@ -1,4 +1,13 @@
-import type { AgentPhase, AgentState, PlannedResource } from "./types";
+import type { AgentPhase, AgentState, PlannedResource, ToolResult } from "./types";
+
+export type ToolResultGroup = {
+  tool: ToolResult["tool"];
+  results: ToolResult[];
+  successCount: number;
+  errorCount: number;
+  cancelledCount: number;
+  latestStatus: ToolResult["status"];
+};
 
 export function selectedResources(state: AgentState) {
   return state.resources.filter((resource) => resource.selected);
@@ -26,6 +35,29 @@ export function requiredMissingResources(state: AgentState): PlannedResource[] {
   return state.resources.filter(
     (resource) => resource.required && (!resource.selected || resource.status !== "verified")
   );
+}
+
+export function groupedToolResults(state: AgentState): ToolResultGroup[] {
+  const groups = new Map<ToolResult["tool"], ToolResultGroup>();
+
+  for (const result of state.agentRun.toolResults) {
+    const group = groups.get(result.tool) ?? {
+      tool: result.tool,
+      results: [],
+      successCount: 0,
+      errorCount: 0,
+      cancelledCount: 0,
+      latestStatus: result.status
+    };
+    group.results.push(result);
+    group.latestStatus = result.status;
+    if (result.status === "success") group.successCount += 1;
+    if (result.status === "error") group.errorCount += 1;
+    if (result.status === "cancelled") group.cancelledCount += 1;
+    groups.set(result.tool, group);
+  }
+
+  return [...groups.values()];
 }
 
 export function phaseLabel(phase: AgentPhase) {

@@ -17,6 +17,7 @@
 - 本地规则模型与可选远程 LLM 自动回退
 - 应用级模型连接状态、测试连接、结构化错误和失败熔断
 - 受控工具、权限策略和内存审计轨迹
+- ToolResult 按工具聚合、错误自动展开和键盘可达的执行日志
 - 基于任务能力、依赖、目标系统、来源、授权和 revision 的严格计划验证
 
 ## 启动
@@ -39,6 +40,48 @@ npm run build
 ```bash
 npm run verify:production-build
 ```
+
+## 正式测试
+
+项目使用 Vitest 运行 Agent Core 的正式测试。测试运行在 Node 环境中，不依赖 Electron 窗口或远程模型配置。
+
+```bash
+# 交互式监听
+npm test
+
+# 单次运行，适用于 CI
+npm run test:run
+
+# 单次运行并生成 text、HTML 和 LCOV 覆盖率报告
+npm run test:coverage
+```
+
+覆盖率产物写入 `coverage/`，不会进入版本管理。现有 `verify:*` 脚本在正式测试迁移完成前继续作为综合回归基线。
+
+当前正式测试按职责覆盖严格计划验证、状态机 revision 审批、Policy/Tool 边界、Runtime 下载失败恢复以及成功或未完成的 Manifest 交接。每类规则使用独立测试文件，便于直接定位回归所在层级。
+
+Electron 端到端测试使用 production renderer、真实 preload 和本地规则模型，覆盖首页到交接以及三个失败处置按钮：
+
+```bash
+npm run test:e2e
+```
+
+E2E 固定单 worker 运行，显式禁用远程模型配置，并向真实 Electron renderer 注入 axe-core 扫描关键页面的 serious/critical 无障碍问题。失败时会在 `test-results/` 中保留页面截图和 Playwright trace，HTML 报告写入 `playwright-report/`。
+
+## 持续集成
+
+GitHub Actions 会在推送到 `main`、针对 `main` 的 Pull Request 以及手动触发时运行两个独立 Job：
+
+- `quality`：类型检查、Vitest 覆盖率、Agent Core、模型客户端和 production build。
+- `electron-e2e`：在 Linux Xvfb 环境中运行三个 Electron 失败恢复场景。
+
+本地可以运行与快速质量门禁相同的命令：
+
+```bash
+npm run verify:ci
+```
+
+Electron E2E 失败时，CI 会保留 `playwright-report/`、`test-results/`、截图和 trace，便于复现失败路径。工作流只申请仓库内容读取权限，不需要远程模型密钥。
 
 ## Agent Core 验证
 
