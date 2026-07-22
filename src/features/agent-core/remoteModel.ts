@@ -47,7 +47,10 @@ function isAgentAction(value: unknown): value is AgentAction {
         (value.call.input.resourceIds === undefined || isStringArray(value.call.input.resourceIds))
       );
     }
-    return value.call.name === "simulate_download" && typeof value.call.input.resourceId === "string";
+    return (
+      (value.call.name === "simulate_download" || value.call.name === "controlled_download") &&
+      typeof value.call.input.resourceId === "string"
+    );
   }
   return value.type === "finish" && typeof value.summary === "string";
 }

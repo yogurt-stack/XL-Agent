@@ -104,7 +104,15 @@ export type TrustedResource = {
   supportedOperatingSystems: TargetOperatingSystem[];
   supportedArchitectures: TargetArchitecture[];
   sourceTrust: ResourceSourceTrust;
+  download: TrustedDownloadMetadata;
   fallbackId?: string;
+};
+
+export type TrustedDownloadMetadata = {
+  url: string;
+  expectedSha256: string;
+  maxSizeMb: number;
+  allowedHosts: string[];
 };
 
 export type PlannedResource = TrustedResource & {
@@ -189,7 +197,8 @@ export type AgentState = {
 export type AgentToolName =
   | "read_system_profile"
   | "search_trusted_catalog"
-  | "simulate_download";
+  | "simulate_download"
+  | "controlled_download";
 
 export type AgentToolCall =
   | {
@@ -208,6 +217,13 @@ export type AgentToolCall =
   | {
       callId: string;
       name: "simulate_download";
+      input: {
+        resourceId: string;
+      };
+    }
+  | {
+      callId: string;
+      name: "controlled_download";
       input: {
         resourceId: string;
       };
@@ -264,6 +280,14 @@ export type ToolResult = {
 export type SimulatedDownloadOutput = {
   resourceId: string;
   progress: number;
+};
+
+export type ControlledDownloadOutput = {
+  resourceId: string;
+  urlHost: string;
+  bytesWritten: number;
+  tempFilePath: string;
+  elapsedMs: number;
 };
 
 export type ModelContext = {

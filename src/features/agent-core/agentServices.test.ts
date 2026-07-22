@@ -93,6 +93,46 @@ describe("default agent policy", () => {
     expect(policy.evaluate(activeDownload, approved).outcome).toBe("allow");
     expect(policy.evaluate(activeDownload, { ...approved, approvedRevision: null }).outcome).toBe("deny");
   });
+
+  it("allows controlled downloads only after approval and trusted HTTPS catalog host validation", () => {
+    const approved = createApprovedState();
+    const controlledDownload: AgentAction = {
+      actionId: "controlled-download",
+      type: "call_tool",
+      purpose: "Download an approved resource through the controlled main-process downloader.",
+      call: {
+        callId: "controlled-download",
+        name: "controlled_download",
+        input: { resourceId: approved.activeResourceId! }
+      }
+    };
+
+    expect(policy.evaluate(controlledDownload, createWaitingApprovalState()).outcome).toBe("deny");
+    expect(policy.evaluate(controlledDownload, approved)).toMatchObject({
+      outcome: "allow",
+      risk: "medium"
+    });
+
+    const untrustedHostState: AgentState = {
+      ...approved,
+      resources: approved.resources.map((resource) =>
+        resource.id === approved.activeResourceId
+          ? {
+              ...resource,
+              download: {
+                ...resource.download,
+                url: "https://evil.example/windows-ai-dev/python.exe"
+              }
+            }
+          : resource
+      )
+    };
+
+    expect(policy.evaluate(controlledDownload, untrustedHostState)).toMatchObject({
+      outcome: "deny",
+      risk: "high"
+    });
+  });
 });
 
 describe("in-memory agent tool executor", () => {
@@ -191,6 +231,23 @@ describe("in-memory agent tool executor", () => {
     expect(accepted).toMatchObject({
       status: "success",
       output: { resourceId: approved.activeResourceId, progress: 25 }
+    });
+  });
+
+  it("keeps controlled downloads unavailable until renderer workflow integration", async () => {
+    const approved = createApprovedState();
+    const result = await tools.execute(
+      {
+        callId: "controlled-download",
+        name: "controlled_download",
+        input: { resourceId: approved.activeResourceId! }
+      },
+      approved
+    );
+
+    expect(result).toMatchObject({
+      status: "error",
+      error: { code: "CONTROLLED_DOWNLOAD_UNAVAILABLE", retriable: false }
     });
   });
 

@@ -45,7 +45,16 @@ function errorResult(
   };
 }
 
-/** 执行只读系统画像、可信目录查询和前端模拟下载三个受控工具。 */
+function downloadHostAllowed(url: string, allowedHosts: string[]) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && allowedHosts.includes(parsed.host);
+  } catch {
+    return false;
+  }
+}
+
+/** 执行只读系统画像、可信目录查询和下载相关受控工具。 */
 export class InMemoryAgentToolExecutor implements AgentToolExecutor {
   constructor(private readonly readSystemProfile: SystemProfileReader = createSystemProfileToolOutput) {}
 
@@ -73,6 +82,16 @@ export class InMemoryAgentToolExecutor implements AgentToolExecutor {
           : `${resource.name} ${resource.purpose} ${resource.recommendation}`.toLowerCase().includes(query)
       );
       return successResult(call, state, resources);
+    }
+
+    if (call.name === "controlled_download") {
+      return errorResult(
+        call,
+        state,
+        "CONTROLLED_DOWNLOAD_UNAVAILABLE",
+        "真实下载器尚未接入 renderer 主流程；当前演示仍使用模拟下载。",
+        false
+      );
     }
 
     const resource = state.resources.find((item) => item.id === call.input.resourceId);
@@ -148,7 +167,7 @@ export class DefaultAgentPolicy implements AgentPolicy {
 
     if (action.type === "call_tool") {
       const call = action.call;
-      if (call.name !== "simulate_download") {
+      if (call.name === "read_system_profile" || call.name === "search_trusted_catalog") {
         return {
           outcome: "allow",
           risk: "low",
@@ -166,7 +185,21 @@ export class DefaultAgentPolicy implements AgentPolicy {
         return {
           outcome: "deny",
           risk: "high",
-          reason: "资源计划尚未确认或审批 revision 已失效，禁止执行模拟下载。"
+          reason: "资源计划尚未确认或审批 revision 已失效，禁止执行下载工具。"
+        };
+      }
+      if (call.name === "controlled_download") {
+        if (!downloadHostAllowed(resource.download.url, resource.download.allowedHosts)) {
+          return {
+            outcome: "deny",
+            risk: "high",
+            reason: "真实下载 URL 不在可信资源目录允许的 HTTPS 主机内。"
+          };
+        }
+        return {
+          outcome: "allow",
+          risk: "medium",
+          reason: "该资源已经通过当前 revision 审批，且下载 URL 来自可信目录允许主机。"
         };
       }
       return {

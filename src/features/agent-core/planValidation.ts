@@ -58,6 +58,7 @@ function sameMetadata(resource: TrustedResource, canonical: TrustedResource) {
     "fallbackId"
   ];
   if (scalarKeys.some((key) => resource[key] !== canonical[key])) return false;
+  if (JSON.stringify(resource.download) !== JSON.stringify(canonical.download)) return false;
 
   const arrayKeys: (keyof TrustedResource)[] = [
     "dependsOn",

@@ -62,4 +62,34 @@ describe("strict plan validation", () => {
     expect(result.valid).toBe(false);
     expect(result.issues.map((issue) => issue.code)).toContain("RESOURCE_METADATA_MISMATCH");
   });
+
+  it("rejects trusted download metadata tampering before approval", () => {
+    const pythonResource = trustedCatalog.find((resource) => resource.id === "python-312");
+    expect(pythonResource).toBeDefined();
+
+    const result = validatePlannedResources(
+      [{
+        ...pythonResource!,
+        download: {
+          ...pythonResource!.download,
+          url: "https://evil.example/python.exe"
+        },
+        selected: true,
+        status: "pending",
+        progress: 0,
+        attempts: 0
+      }],
+      {
+        ...validationContext,
+        requirements: {
+          intent: "python-ai",
+          label: "下载元数据验证场景",
+          requiredCapabilities: ["python-runtime"]
+        }
+      }
+    );
+
+    expect(result.valid).toBe(false);
+    expect(result.issues.map((issue) => issue.code)).toContain("RESOURCE_METADATA_MISMATCH");
+  });
 });

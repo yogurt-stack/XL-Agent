@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { createInitialAgentState } from "./machine";
 import { groupedToolResults, overallProgress, requiredMissingResources } from "./selectors";
-import type { AgentState, ToolResult } from "./types";
+import type { AgentState, ToolResult, TrustedDownloadMetadata } from "./types";
+
+const testDownload: TrustedDownloadMetadata = {
+  url: "https://downloads.xunlei.example/test/resource.bin",
+  expectedSha256: "d6f41ccfbdb978330567c70b892518af6bb9d934c264ff4d8ea8f8f7dff9e676",
+  maxSizeMb: 2,
+  allowedHosts: ["downloads.xunlei.example"]
+};
 
 function withToolResults(results: ToolResult[]): AgentState {
   const state = createInitialAgentState();
@@ -81,6 +88,7 @@ describe("agent presentation selectors", () => {
           supportedOperatingSystems: ["Windows 11"],
           supportedArchitectures: ["x64"],
           sourceTrust: "official",
+          download: testDownload,
           selected: true,
           status: "downloading",
           progress: 50,
@@ -102,6 +110,7 @@ describe("agent presentation selectors", () => {
           supportedOperatingSystems: ["Windows 11"],
           supportedArchitectures: ["x64"],
           sourceTrust: "official",
+          download: testDownload,
           selected: false,
           status: "pending",
           progress: 0,
