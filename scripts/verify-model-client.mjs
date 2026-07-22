@@ -78,8 +78,10 @@ const invalidDecisionJson = new RemoteModelClient(
 await assertRejectCode(() => invalidDecisionJson.testConnection(), "MODEL_INVALID_JSON");
 
 let capturedAuthorization = "";
+let capturedTestBody = null;
 const successfulClient = new RemoteModelClient(environment, async (_input, init) => {
   capturedAuthorization = new Headers(init?.headers).get("authorization") ?? "";
+  capturedTestBody = JSON.parse(String(init?.body ?? "{}"));
   return new Response(
     JSON.stringify({
       choices: [{
@@ -99,5 +101,40 @@ const decision = await successfulClient.testConnection();
 assert(decision.model === environment.XL_AGENT_LLM_MODEL, "Successful responses must use the configured model ID");
 assert(capturedAuthorization === `Bearer ${environment.XL_AGENT_LLM_API_KEY}`, "The API key must only be sent in the main-process Authorization header");
 assert(!JSON.stringify(decision).includes(environment.XL_AGENT_LLM_API_KEY), "Successful IPC payloads must not expose the API key");
+assert(capturedTestBody?.response_format?.type === "json_object", "Remote requests must force JSON object responses");
+assert(
+  capturedTestBody?.messages?.[0]?.content?.includes("最终输出只能是这个裸 JSON 对象"),
+  "Connection test prompt must require a bare JSON object"
+);
+
+let capturedDecisionBody = null;
+const decisionClient = new RemoteModelClient(environment, async (_input, init) => {
+  capturedDecisionBody = JSON.parse(String(init?.body ?? "{}"));
+  return new Response(
+    JSON.stringify({
+      choices: [{
+        message: {
+          content: JSON.stringify({
+            decisionId: "remote-decision-test",
+            explanation: "Decision request succeeded.",
+            action: {
+              actionId: "remote-decision-test",
+              type: "finish",
+              summary: "Decision request succeeded."
+            }
+          })
+        }
+      }]
+    }),
+    { status: 200 }
+  );
+});
+await decisionClient.requestDecision({ purpose: "model-decision-test" });
+assert(capturedDecisionBody?.response_format?.type === "json_object", "Decision requests must force JSON object responses");
+assert(
+  capturedDecisionBody?.messages?.[0]?.content?.includes("你必须只返回一个合法的 JSON 对象") &&
+    capturedDecisionBody?.messages?.[0]?.content?.includes("不要调用未列出的工具"),
+  "Decision prompt must require JSON-only ModelDecision output and constrained tools"
+);
 
 console.log("Remote model client passed: configuration, auth, timeout, response and success cases verified");
