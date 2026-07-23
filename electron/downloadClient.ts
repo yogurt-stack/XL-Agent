@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -15,6 +15,7 @@ export type ControlledDownloadOutput = {
   resourceId: string;
   urlHost: string;
   bytesWritten: number;
+  sha256: string;
   tempFilePath: string;
   elapsedMs: number;
 };
@@ -24,7 +25,9 @@ export type ControlledDownloadErrorCode =
   | "DOWNLOAD_HTTP_ERROR"
   | "DOWNLOAD_SIZE_LIMIT_EXCEEDED"
   | "DOWNLOAD_WRITE_FAILED"
-  | "DOWNLOAD_NETWORK_ERROR";
+  | "DOWNLOAD_NETWORK_ERROR"
+  | "CHECKSUM_METADATA_INVALID"
+  | "CHECKSUM_MISMATCH";
 
 export type ControlledDownloadError = {
   code: ControlledDownloadErrorCode;
@@ -98,10 +101,26 @@ function sanitizeResourceId(resourceId: string) {
   return safe || "resource";
 }
 
+function normalizeExpectedSha256(expectedSha256: string) {
+  const normalized = expectedSha256.trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(normalized)) {
+    throw downloadError(
+      "CHECKSUM_METADATA_INVALID",
+      "可信目录中的 SHA256 不是合法的 64 位十六进制值。",
+      false
+    );
+  }
+  return normalized;
+}
+
+function sha256Of(buffer: Buffer) {
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
 /**
  * 受控真实下载客户端的最小边界。
  *
- * 当前只负责主进程侧的 URL/Host/Size/临时文件写入控制；SHA256 校验和安装执行会在后续阶段接入。
+ * 当前负责主进程侧的 URL/Host/Size/SHA256/临时文件写入控制；安装执行会在后续阶段接入。
  */
 export async function downloadTrustedResource(
   request: ControlledDownloadRequest,
@@ -109,6 +128,7 @@ export async function downloadTrustedResource(
 ): Promise<ControlledDownloadOutput> {
   const startedAt = options.now?.() ?? Date.now();
   const parsedUrl = parseTrustedUrl(request.url, request.allowedHosts);
+  const expectedSha256 = normalizeExpectedSha256(request.expectedSha256);
   const maxBytes = maxBytesFromMb(request.maxSizeMb);
   const fetchRequest = options.fetchRequest ?? fetch;
   const tempRoot = options.tempRoot ?? path.join(os.tmpdir(), "xunlei-ai-task-agent-downloads");
@@ -162,6 +182,15 @@ export async function downloadTrustedResource(
     );
   }
 
+  const actualSha256 = sha256Of(buffer);
+  if (actualSha256 !== expectedSha256) {
+    throw downloadError(
+      "CHECKSUM_MISMATCH",
+      "下载文件 SHA256 与可信目录不一致。",
+      true
+    );
+  }
+
   const tempFilePath = path.join(
     tempRoot,
     `${sanitizeResourceId(request.resourceId)}-${createId()}.download`
@@ -178,6 +207,7 @@ export async function downloadTrustedResource(
     resourceId: request.resourceId,
     urlHost: parsedUrl.host,
     bytesWritten: buffer.byteLength,
+    sha256: actualSha256,
     tempFilePath,
     elapsedMs: Math.max(0, (options.now?.() ?? Date.now()) - startedAt)
   };

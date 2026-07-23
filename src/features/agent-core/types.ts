@@ -286,6 +286,7 @@ export type ControlledDownloadOutput = {
   resourceId: string;
   urlHost: string;
   bytesWritten: number;
+  sha256: string;
   tempFilePath: string;
   elapsedMs: number;
 };

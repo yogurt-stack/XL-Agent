@@ -2,13 +2,13 @@
 
 ## 1. 报告快照
 
-- 报告日期：2026-07-20
+- 报告日期：2026-07-20；最近更新：2026-07-23
 - 本地目录：`/Users/zhuweiyu/xunlei-ai-task-agent`
 - GitHub 仓库：`https://github.com/yogurt-stack/XL-Agent`
-- 当前主分支最新已合并提交：`7c2668f feat: add sanitized system profile probe (#4)`
+- 当前主分支最新已合并提交：以 GitHub `main` 最新提交为准
 - 当前产品阶段：比赛可演示的最小垂直 Agent MVP
-- 当前工程边界：真实只读系统画像已接入；真实下载、真实文件写入、SQLite、MCP、插件和真实 Agent B 尚未接入
-- 本地未提交变更：`electron/modelClient.ts` 中的中文 JSON-only 远程模型 prompt 调整尚未合并到 GitHub
+- 当前工程边界：真实只读系统画像已接入；远程模型 JSON-only prompt 已合并；真实下载客户端已具备 URL、Host、大小、SHA256 和临时文件写入边界，但尚未接入 renderer 主流程
+- 尚未接入：安装执行、最终工作区真实写入、SQLite、MCP、插件和真实 Agent B
 
 本报告用于替代口头进度说明，帮助后续开发按“受控资源准备 Agent”方向继续推进。
 
@@ -98,6 +98,7 @@ cancelled
 | `read_system_profile` | 已接入真实只读采集 | Electron 主进程采集脱敏主机画像，计划目标仍锁定 Windows 11 x64 |
 | `search_trusted_catalog` | 已实现内存查询 | 查询固定可信资源目录 |
 | `simulate_download` | 已实现模拟执行 | 返回模拟下载进度和固定失败 |
+| `controlled_download` | 已定义受控真实下载契约 | Electron 主进程客户端已实现，renderer 主流程暂未调用 |
 
 Policy 当前可以：
 
@@ -198,10 +199,10 @@ CHECKSUM_MISMATCH
 | 正式测试体系和 CI | 已完成 | PR #2 已合并，CI 持续运行 |
 | 第五阶段稳定性收口 | 已完成 | 视觉基线、无障碍扫描、ToolResult 聚合已完成 |
 | 第六阶段系统画像 | 已完成 | 真实只读脱敏采集已合并 PR #4 |
-| 远程模型 JSON 输出稳定性 | 本地已改，待提交 | 中文 JSON-only prompt 尚未上传 GitHub |
-| 真实下载器 | 未开始 | 下一阶段候选 |
-| SHA256 / 数字签名真实校验 | 未开始 | 需在真实下载器后接入 |
-| 临时目录与原子文件写入 | 未开始 | 需先定义写入 Policy |
+| 远程模型 JSON 输出稳定性 | 已完成 | 中文 JSON-only prompt 和连接测试 prompt 已合并并通过 CI |
+| 真实下载器 | 部分完成 | Electron 主进程受控下载客户端已实现，尚未接入 UI 主流程 |
+| SHA256 / 数字签名真实校验 | 部分完成 | SHA256 已在下载客户端中校验；数字签名未开始 |
+| 临时目录与原子文件写入 | 部分完成 | 下载客户端使用受控临时目录和不覆盖写入；最终工作区原子导出未开始 |
 | Manifest / README / 交接包真实导出 | 未开始 | 当前仍是预览 |
 | SQLite 任务恢复 | 未开始 | 等真实执行链路稳定后再做 |
 | MCP、插件和真实 Agent B | 未开始 | 保持低优先级 |
@@ -217,17 +218,17 @@ CHECKSUM_MISMATCH
 | 最小模型驱动闭环 | 78% | 本地模型稳定，远程模型仍需提升结构化输出稳定性 |
 | UI 产品流程 | 82% | 主流程完整，真实历史、配置编辑和真实目录操作缺失 |
 | 远程 LLM 产品化 | 78% | 连接状态和回退完整，真实端点自动测试与 provider 适配仍缺 |
-| 受控工具执行 | 40% | 只读系统画像已真实化，下载和目录仍是模拟 |
+| 受控工具执行 | 52% | 只读系统画像已真实化；下载客户端边界已实现，但主流程仍使用模拟下载 |
 | 工作区真实交付 | 30% | 预览完整，但没有真实文件和目录 |
 | 生产可用性 | 22% | 缺少持久化、真实执行、权限审计和发布体系 |
 
 ## 6. 当前主要差距
 
-1. 真实执行能力不足。
-   当前下载、校验、工作区和 Agent B 都是模拟数据，尚不能完成真实资源准备。
+1. 真实执行能力仍未完整接入主流程。
+   当前下载客户端已经具备受控边界和 SHA256 校验，但 renderer 执行链路仍使用模拟下载，工作区和 Agent B 仍是模拟数据。
 
-2. 远程模型协议仍需增强。
-   DeepSeek 等模型可能返回普通自然语言，导致 `MODEL_INVALID_DECISION`。本地已有中文 JSON-only prompt 调整，但尚未进入 GitHub 主分支。
+2. 远程模型协议仍需 provider 适配增强。
+   JSON-only prompt 已合并，但不同模型供应商的字段兼容性、base URL 自动拼接和真实端点自动测试仍未完成。
 
 3. 配置体验不够友好。
    `XL_AGENT_LLM_ENDPOINT` 必须填写完整请求地址，而不是 Base URL。后续可以支持 `XL_AGENT_LLM_BASE_URL` 自动拼接 `/chat/completions`。
@@ -240,11 +241,11 @@ CHECKSUM_MISMATCH
 
 ## 7. 下一阶段计划
 
-### 7.1 立即处理：远程模型 JSON 输出稳定性
+### 7.1 已完成：远程模型 JSON 输出稳定性
 
 目标：
 
-- 将本地 `electron/modelClient.ts` 中文 JSON-only prompt 提交 PR。
+- 将 `electron/modelClient.ts` 中文 JSON-only prompt 合并到 `main`。
 - 保持 `response_format: { type: "json_object" }`。
 - 如果模型仍返回非法结构，再增加一次轻量级修复策略或更明确的 provider 适配。
 
@@ -252,17 +253,20 @@ CHECKSUM_MISMATCH
 
 - `npm run typecheck` 通过。
 - `npm run verify:model-client` 通过。
-- 设置页“测试连接”能返回合法 `ModelDecision`，不再触发 `MODEL_INVALID_DECISION`。
+- 设置页“测试连接”对模型输出的 JSON-only 约束更明确，降低 `MODEL_INVALID_DECISION` 风险。
 
 ### 7.2 第七阶段：真实下载器最小受控边界
 
-目标：
+当前状态：已完成最小客户端边界，暂未接入 renderer 主流程。
+
+已完成：
 
 - 只接入可信目录中声明的 URL。
 - 下载前由 Policy 校验资源、revision、来源、授权和用户审批。
 - 下载到受控临时目录。
 - 不覆盖用户文件。
 - ToolResult 记录下载 URL 主机、大小、状态、错误码和耗时。
+- 独立验证脚本覆盖 URL、Host、HTTP、大小、SHA256 和临时文件写入。
 
 暂不做：
 
@@ -276,8 +280,8 @@ CHECKSUM_MISMATCH
 
 目标：
 
-- 对下载文件执行 SHA256 校验。
-- 支持校验失败恢复路径。
+- 对下载文件执行 SHA256 校验。（下载客户端已完成）
+- 支持校验失败恢复路径。（基础错误码已完成，UI 主流程接入待做）
 - 原子写入 Manifest、README、RESOURCE_MANIFEST 和 AGENTS。
 - 工作区页面从预览升级为真实文件状态。
 
@@ -309,7 +313,7 @@ CHECKSUM_MISMATCH
 - 所有计划和替代计划必须通过 `planValidation.ts`。
 - 下载 Policy 必须同时满足 `approvedRevision === revision`。
 - API Key 只能保留在 Electron 主进程。
-- 真实下载器接入前继续保持无真实文件写入、无 SQLite、无 MCP、无插件。
+- 真实下载接入 renderer 主流程和最终工作区导出前，继续保持无安装执行、无最终工作区真实写入、无 SQLite、无 MCP、无插件。
 
 ## 9. 结论
 

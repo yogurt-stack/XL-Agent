@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,10 +46,12 @@ const assertRejectCode = async (task, expectedCode) => {
   throw new Error(`Expected ${expectedCode}, but the request succeeded`);
 };
 
+const payload = "payload";
+const payloadSha256 = createHash("sha256").update(payload).digest("hex");
 const baseRequest = {
   resourceId: "python-312",
   url: "https://downloads.xunlei.example/windows-ai-dev/python.exe",
-  expectedSha256: "7b16d7f7610a4c9ebdb31d2b2ed7b0e0c3c9f681d7b9f2d4545cbf88d07a8c3a",
+  expectedSha256: payloadSha256,
   maxSizeMb: 1,
   allowedHosts: ["downloads.xunlei.example"]
 };
@@ -60,7 +63,7 @@ try {
     createId: () => "stable-id",
     fetchRequest: async (input) => {
       assert(String(input) === baseRequest.url, "Download client must request the trusted catalog URL");
-      return new Response("payload", {
+      return new Response(payload, {
         status: 200,
         headers: { "content-length": "7" }
       });
@@ -69,7 +72,8 @@ try {
   assert(success.resourceId === baseRequest.resourceId, "Success output must keep the resource ID");
   assert(success.urlHost === "downloads.xunlei.example", "Success output must report the trusted URL host");
   assert(success.bytesWritten === 7, "Success output must report written bytes");
-  assert(readFileSync(success.tempFilePath, "utf8") === "payload", "Downloaded payload must be written to disk");
+  assert(success.sha256 === payloadSha256, "Success output must report the verified SHA256");
+  assert(readFileSync(success.tempFilePath, "utf8") === payload, "Downloaded payload must be written to disk");
 
   await assertRejectCode(
     () => downloadTrustedResource({ ...baseRequest, url: "http://downloads.xunlei.example/file.exe" }),
@@ -80,7 +84,7 @@ try {
     "URL_NOT_ALLOWED"
   );
 
-  const redirectedResponse = new Response("payload", { status: 200 });
+  const redirectedResponse = new Response(payload, { status: 200 });
   Object.defineProperty(redirectedResponse, "url", {
     value: "https://evil.example/file.exe"
   });
@@ -109,7 +113,7 @@ try {
         {
           tempRoot: verifyTempRoot,
           fetchRequest: async () =>
-            new Response("payload", {
+            new Response(payload, {
               status: 200,
               headers: { "content-length": String(2 * 1024 * 1024) }
             })
@@ -124,13 +128,42 @@ try {
         { ...baseRequest, maxSizeMb: 0.000001 },
         {
           tempRoot: verifyTempRoot,
-          fetchRequest: async () => new Response("payload", { status: 200 })
+          fetchRequest: async () => new Response(payload, { status: 200 })
         }
       ),
     "DOWNLOAD_SIZE_LIMIT_EXCEEDED"
+  );
+
+  await assertRejectCode(
+    () =>
+      downloadTrustedResource(
+        { ...baseRequest, expectedSha256: "not-a-sha256" },
+        {
+          tempRoot: verifyTempRoot,
+          fetchRequest: async () => new Response(payload, { status: 200 })
+        }
+      ),
+    "CHECKSUM_METADATA_INVALID"
+  );
+
+  const checksumMismatchTempRoot = path.join(verifyTempRoot, "checksum-mismatch");
+  await assertRejectCode(
+    () =>
+      downloadTrustedResource(
+        { ...baseRequest, expectedSha256: "0".repeat(64) },
+        {
+          tempRoot: checksumMismatchTempRoot,
+          fetchRequest: async () => new Response(payload, { status: 200 })
+        }
+      ),
+    "CHECKSUM_MISMATCH"
+  );
+  assert(
+    !existsSync(checksumMismatchTempRoot) || readdirSync(checksumMismatchTempRoot).length === 0,
+    "Checksum mismatch must not leave a downloaded temp file"
   );
 } finally {
   rmSync(verifyTempRoot, { force: true, recursive: true });
 }
 
-console.log("Controlled download client passed: URL, host, HTTP, size and temp-file write cases verified");
+console.log("Controlled download client passed: URL, host, HTTP, size, SHA256 and temp-file write cases verified");
