@@ -16,6 +16,8 @@ function deterministicEnvironment() {
   return {
     ...inherited,
     VITE_DEV_SERVER_URL: "",
+    NODE_ENV: "test",
+    XL_AGENT_E2E_DOWNLOAD_FIXTURE: "1",
     XL_AGENT_LLM_ENDPOINT: "",
     XL_AGENT_LLM_MODEL: "",
     XL_AGENT_LLM_API_KEY: ""
@@ -153,7 +155,7 @@ test("retries the original source and reaches a ready workspace", async () => {
   await expectNoSeriousAccessibilityViolations("failure resolution");
 
   const catalogResults = page.locator("details.agent-tool-result-group").filter({ hasText: "search_trusted_catalog" });
-  const downloadResults = page.locator("details.agent-tool-result-group").filter({ hasText: "simulate_download" });
+  const downloadResults = page.locator("details.agent-tool-result-group").filter({ hasText: "controlled_download" });
   await expect(catalogResults).toHaveCount(1);
   await expect(downloadResults).toHaveCount(1);
   expect(await catalogResults.evaluate((element) => (element as HTMLDetailsElement).open)).toBe(false);

@@ -1,4 +1,7 @@
-import type { HostSystemProfile } from "../features/agent-core/types";
+import type {
+  ControlledDownloadResult,
+  HostSystemProfile
+} from "../features/agent-core/types";
 
 export type XunleiAppInfo = {
   name: string;
@@ -59,6 +62,7 @@ declare global {
       getModelConnectionInfo: () => Promise<ModelConnectionInfoIpcResult>;
       testModelConnection: () => Promise<ModelDecisionIpcResult>;
       requestModelDecision: (context: unknown) => Promise<ModelDecisionIpcResult>;
+      controlledDownload: (resourceId: string) => Promise<ControlledDownloadResult>;
     };
   }
 }

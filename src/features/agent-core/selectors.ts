@@ -67,7 +67,7 @@ export function phaseLabel(phase: AgentPhase) {
     clarifying: "澄清需求",
     planning: "生成资源计划",
     waiting_approval: "等待用户确认",
-    downloading: "模拟下载",
+    downloading: "受控下载",
     awaiting_failure_action: "等待失败处置",
     verifying: "验证资源",
     replanning: "重规划",

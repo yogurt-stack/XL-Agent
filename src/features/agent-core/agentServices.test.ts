@@ -234,7 +234,7 @@ describe("in-memory agent tool executor", () => {
     });
   });
 
-  it("keeps controlled downloads unavailable until renderer workflow integration", async () => {
+  it("keeps controlled downloads unavailable without an Electron bridge", async () => {
     const approved = createApprovedState();
     const result = await tools.execute(
       {
@@ -248,6 +248,68 @@ describe("in-memory agent tool executor", () => {
     expect(result).toMatchObject({
       status: "error",
       error: { code: "CONTROLLED_DOWNLOAD_UNAVAILABLE", retriable: false }
+    });
+  });
+
+  it("executes an approved controlled download and validates the bridge output", async () => {
+    const approved = createApprovedState();
+    const activeResource = approved.resources.find(
+      (resource) => resource.id === approved.activeResourceId
+    )!;
+    const toolsWithBridge = new InMemoryAgentToolExecutor(undefined, async (resourceId) => ({
+      ok: true,
+      output: {
+        resourceId,
+        urlHost: new URL(activeResource.download.url).host,
+        bytesWritten: 7,
+        sha256: activeResource.download.expectedSha256,
+        tempFilePath: `/tmp/${resourceId}.download`,
+        elapsedMs: 1
+      }
+    }));
+    const result = await toolsWithBridge.execute(
+      {
+        callId: "controlled-download",
+        name: "controlled_download",
+        input: { resourceId: activeResource.id }
+      },
+      approved
+    );
+
+    expect(result).toMatchObject({
+      status: "success",
+      tool: "controlled_download",
+      output: {
+        resourceId: activeResource.id,
+        sha256: activeResource.download.expectedSha256,
+        bytesWritten: 7
+      }
+    });
+  });
+
+  it("preserves structured controlled download failures from Electron", async () => {
+    const approved = createApprovedState();
+    const toolsWithBridge = new InMemoryAgentToolExecutor(undefined, async () => ({
+      ok: false,
+      error: {
+        code: "CHECKSUM_MISMATCH",
+        message: "下载文件 SHA256 与可信目录不一致。",
+        retriable: true
+      }
+    }));
+    const result = await toolsWithBridge.execute(
+      {
+        callId: "controlled-download-error",
+        name: "controlled_download",
+        input: { resourceId: approved.activeResourceId! }
+      },
+      approved
+    );
+
+    expect(result).toMatchObject({
+      status: "error",
+      tool: "controlled_download",
+      error: { code: "CHECKSUM_MISMATCH", retriable: true }
     });
   });
 

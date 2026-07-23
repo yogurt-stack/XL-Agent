@@ -5,6 +5,8 @@ import type {
   AgentAction,
   AgentState,
   AgentToolCall,
+  ControlledDownloadOutput,
+  ControlledDownloadResult,
   PolicyDecision,
   SimulatedDownloadOutput,
   SystemProfileToolOutput,
@@ -12,6 +14,7 @@ import type {
 } from "./types";
 
 export type SystemProfileReader = () => Promise<SystemProfileToolOutput> | SystemProfileToolOutput;
+export type ControlledDownloadRunner = (resourceId: string) => Promise<ControlledDownloadResult>;
 
 function mockTimestamp(state: AgentState, suffix: string) {
   return `mock-step-${state.agentRun.step}-${suffix}`;
@@ -54,9 +57,47 @@ function downloadHostAllowed(url: string, allowedHosts: string[]) {
   }
 }
 
+function isApprovedActiveResource(call: AgentToolCall, state: AgentState) {
+  if (call.name !== "simulate_download" && call.name !== "controlled_download") return null;
+  const resource = state.resources.find((item) => item.id === call.input.resourceId);
+  return resource?.selected &&
+    state.phase === "downloading" &&
+    state.activeResourceId === resource.id &&
+    state.approvedRevision === state.revision
+    ? resource
+    : null;
+}
+
+function isValidControlledDownloadOutput(
+  value: unknown,
+  resource: AgentState["resources"][number]
+): value is ControlledDownloadOutput {
+  if (typeof value !== "object" || value === null) return false;
+  const output = value as Record<string, unknown>;
+  return (
+    output.resourceId === resource.id &&
+    typeof output.urlHost === "string" &&
+    resource.download.allowedHosts.includes(output.urlHost) &&
+    typeof output.bytesWritten === "number" &&
+    Number.isFinite(output.bytesWritten) &&
+    output.bytesWritten >= 0 &&
+    output.bytesWritten <= resource.download.maxSizeMb * 1024 * 1024 &&
+    typeof output.sha256 === "string" &&
+    output.sha256.toLowerCase() === resource.download.expectedSha256.toLowerCase() &&
+    typeof output.tempFilePath === "string" &&
+    output.tempFilePath.length > 0 &&
+    typeof output.elapsedMs === "number" &&
+    Number.isFinite(output.elapsedMs) &&
+    output.elapsedMs >= 0
+  );
+}
+
 /** 执行只读系统画像、可信目录查询和下载相关受控工具。 */
 export class InMemoryAgentToolExecutor implements AgentToolExecutor {
-  constructor(private readonly readSystemProfile: SystemProfileReader = createSystemProfileToolOutput) {}
+  constructor(
+    private readonly readSystemProfile: SystemProfileReader = createSystemProfileToolOutput,
+    private readonly controlledDownload?: ControlledDownloadRunner
+  ) {}
 
   async execute(call: AgentToolCall, state: AgentState): Promise<ToolResult> {
     if (call.name === "read_system_profile") {
@@ -85,28 +126,74 @@ export class InMemoryAgentToolExecutor implements AgentToolExecutor {
     }
 
     if (call.name === "controlled_download") {
-      return errorResult(
-        call,
-        state,
-        "CONTROLLED_DOWNLOAD_UNAVAILABLE",
-        "真实下载器尚未接入 renderer 主流程；当前演示仍使用模拟下载。",
-        false
-      );
+      const resource = isApprovedActiveResource(call, state);
+      if (!resource) {
+        return errorResult(
+          call,
+          state,
+          "RESOURCE_NOT_APPROVED",
+          "只能下载当前 revision 中已审批且处于活动状态的资源。",
+          false
+        );
+      }
+      if (!downloadHostAllowed(resource.download.url, resource.download.allowedHosts)) {
+        return errorResult(
+          call,
+          state,
+          "URL_NOT_ALLOWED",
+          "真实下载 URL 不在可信资源目录允许的 HTTPS 主机内。",
+          false
+        );
+      }
+      if (!this.controlledDownload) {
+        return errorResult(
+          call,
+          state,
+          "CONTROLLED_DOWNLOAD_UNAVAILABLE",
+          "当前运行环境没有提供 Electron 受控下载桥接。",
+          false
+        );
+      }
+
+      try {
+        const result = await this.controlledDownload(resource.id);
+        if (result.ok === false) {
+          return errorResult(
+            call,
+            state,
+            result.error.code,
+            result.error.message,
+            result.error.retriable
+          );
+        }
+        if (!isValidControlledDownloadOutput(result.output, resource)) {
+          return errorResult(
+            call,
+            state,
+            "CONTROLLED_DOWNLOAD_INVALID_RESPONSE",
+            "Electron 受控下载桥接返回了与可信目录不一致的结果。",
+            true
+          );
+        }
+        return successResult(call, state, result.output);
+      } catch (error) {
+        return errorResult(
+          call,
+          state,
+          "CONTROLLED_DOWNLOAD_BRIDGE_ERROR",
+          error instanceof Error ? error.message : "Electron 受控下载桥接调用失败。",
+          true
+        );
+      }
     }
 
-    const resource = state.resources.find((item) => item.id === call.input.resourceId);
-    if (
-      !resource ||
-      !resource.selected ||
-      state.phase !== "downloading" ||
-      state.activeResourceId !== resource.id ||
-      state.approvedRevision !== state.revision
-    ) {
+    const resource = isApprovedActiveResource(call, state);
+    if (!resource) {
       return errorResult(
         call,
         state,
         "RESOURCE_NOT_APPROVED",
-        "只能模拟下载当前 revision 中已审批且处于活动状态的资源。",
+        "只能下载当前 revision 中已审批且处于活动状态的资源。",
         false
       );
     }

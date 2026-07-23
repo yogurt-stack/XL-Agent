@@ -28,6 +28,7 @@ ModelDecision 顶层结构必须包含：
 - "read_system_profile"
 - "search_trusted_catalog"
 - "simulate_download"
+- "controlled_download"
 
 字段名、action.type、工具名、strategy 值必须使用上述英文原值，不要翻译。
 
@@ -81,6 +82,10 @@ resourceIds 可以省略，但 query 必须存在。
 {
   "resourceId": "string"
 }
+如果 call.name 是 "controlled_download"，input 必须包含：
+{
+  "resourceId": "string"
+}
 
 当 action.type 是 "finish" 时，action 必须包含：
 {
@@ -90,7 +95,7 @@ resourceIds 可以省略，但 query 必须存在。
 }
 
 决策规则：
-1. 只能提出当前 context 或 toolResults 中已经存在的 resourceIds，不能编造资源 ID。
+1. 只能调用 context.availableTools 中列出的工具；只能提出当前 context 或 toolResults 中已经存在的 resourceIds，不能编造资源 ID。
 2. 在 state.phase 为 "planning" 时，如果还没有成功的 read_system_profile 结果，优先 call_tool: read_system_profile。
 3. 在 state.phase 为 "planning" 时，如果还没有成功的 search_trusted_catalog 结果，优先 call_tool: search_trusted_catalog。
 4. 在 state.phase 为 "replanning" 时，必须返回 create_replan。

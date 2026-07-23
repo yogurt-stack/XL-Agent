@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputDir = path.join(tmpdir(), "xunlei-download-client-compile");
+const coreOutputDir = path.join(outputDir, "core");
 const verifyTempRoot = mkdtempSync(path.join(tmpdir(), "xunlei-download-client-verify-"));
 const tscBin = path.join(root, "node_modules", ".bin", process.platform === "win32" ? "tsc.cmd" : "tsc");
 
@@ -22,14 +23,32 @@ const compilation = spawnSync(
     "--skipLibCheck",
     "--types", "node",
     "--outDir", outputDir,
-    path.join("electron", "downloadClient.ts")
+    path.join("electron", "downloadClient.ts"),
+    path.join("electron", "trustedDownloadCatalog.ts")
   ],
   { cwd: root, stdio: "inherit" }
 );
 if (compilation.status !== 0) process.exit(compilation.status ?? 1);
 
+const coreCatalogCompilation = spawnSync(
+  tscBin,
+  [
+    "--target", "ES2020",
+    "--module", "commonjs",
+    "--moduleResolution", "node",
+    "--skipLibCheck",
+    "--outDir", coreOutputDir,
+    path.join("src", "features", "agent-core", "catalog.ts"),
+    path.join("src", "features", "agent-core", "types.ts")
+  ],
+  { cwd: root, stdio: "inherit" }
+);
+if (coreCatalogCompilation.status !== 0) process.exit(coreCatalogCompilation.status ?? 1);
+
 const require = createRequire(import.meta.url);
 const { downloadTrustedResource, toControlledDownloadError } = require(path.join(outputDir, "downloadClient.js"));
+const { getTrustedDownloadMetadata } = require(path.join(outputDir, "trustedDownloadCatalog.js"));
+const { trustedCatalog } = require(path.join(coreOutputDir, "catalog.js"));
 
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
@@ -57,6 +76,21 @@ const baseRequest = {
 };
 
 try {
+  const trustedMetadata = getTrustedDownloadMetadata("python-312");
+  assert(trustedMetadata?.url.startsWith("https://downloads.xunlei.example/"), "Main-process catalog must resolve trusted resource IDs");
+  assert(getTrustedDownloadMetadata("unknown-resource") === null, "Main-process catalog must reject unknown resource IDs");
+  trustedMetadata.allowedHosts.push("evil.example");
+  assert(
+    !getTrustedDownloadMetadata("python-312").allowedHosts.includes("evil.example"),
+    "Trusted catalog lookups must return defensive copies"
+  );
+  for (const resource of trustedCatalog) {
+    assert(
+      JSON.stringify(getTrustedDownloadMetadata(resource.id)) === JSON.stringify(resource.download),
+      `Main-process download metadata drifted from Agent Core for ${resource.id}`
+    );
+  }
+
   const success = await downloadTrustedResource(baseRequest, {
     tempRoot: verifyTempRoot,
     now: () => 1000,

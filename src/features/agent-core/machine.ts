@@ -414,7 +414,7 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
           taskRequirements,
           planValidation,
           approvedRevision: null,
-          workspace: { ...state.workspace, nextAction: "确认资源计划后开始模拟下载。" }
+          workspace: { ...state.workspace, nextAction: "确认资源计划后开始受控下载。" }
         },
         "success",
         `可信资源计划 r${revision} 已通过严格验证，等待用户确认。`
@@ -523,7 +523,7 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
           planValidation,
           approvedRevision: null,
           agentRun: { ...state.agentRun, status: "waiting_approval" },
-          workspace: { ...state.workspace, nextAction: "确认模型生成的资源计划后开始模拟下载。" }
+          workspace: { ...state.workspace, nextAction: "确认模型生成的资源计划后开始受控下载。" }
         },
         "success",
         `模型资源计划 r${revision} 已通过严格验证，等待用户确认。`
@@ -680,7 +680,7 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
           workspace: { ...state.workspace, nextAction: "等待资源下载和验证完成。" }
         },
         "success",
-        `用户确认资源计划 r${state.revision}，开始模拟下载。`
+        `用户确认资源计划 r${state.revision}，开始受控下载。`
       );
     }
 

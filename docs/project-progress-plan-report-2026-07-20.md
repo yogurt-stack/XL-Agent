@@ -7,7 +7,7 @@
 - GitHub 仓库：`https://github.com/yogurt-stack/XL-Agent`
 - 当前主分支最新已合并提交：以 GitHub `main` 最新提交为准
 - 当前产品阶段：比赛可演示的最小垂直 Agent MVP
-- 当前工程边界：真实只读系统画像已接入；远程模型 JSON-only prompt 已合并；真实下载客户端已具备 URL、Host、大小、SHA256 和临时文件写入边界，但尚未接入 renderer 主流程
+- 当前工程边界：真实只读系统画像已接入；远程模型 JSON-only prompt 已合并；Electron 模式已将真实受控下载接入 Runtime、Policy、Tool、IPC、SHA256 校验和失败恢复主流程
 - 尚未接入：安装执行、最终工作区真实写入、SQLite、MCP、插件和真实 Agent B
 
 本报告用于替代口头进度说明，帮助后续开发按“受控资源准备 Agent”方向继续推进。
@@ -87,7 +87,7 @@ cancelled
 
 - `.env` 中 `XL_AGENT_LLM_ENDPOINT` 仍要求填写完整 Chat Completions 请求地址。
 - 自动测试没有调用真实远程模型。
-- 本地已有中文 JSON-only prompt 调整，但尚未提交合并。
+- 当前仅实现 OpenAI-compatible Chat Completions 适配器，尚未实现 Anthropic、Gemini 或 Responses API 适配器。
 
 ### 3.4 受控 Tool 与 Policy
 
@@ -98,7 +98,7 @@ cancelled
 | `read_system_profile` | 已接入真实只读采集 | Electron 主进程采集脱敏主机画像，计划目标仍锁定 Windows 11 x64 |
 | `search_trusted_catalog` | 已实现内存查询 | 查询固定可信资源目录 |
 | `simulate_download` | 已实现模拟执行 | 返回模拟下载进度和固定失败 |
-| `controlled_download` | 已定义受控真实下载契约 | Electron 主进程客户端已实现，renderer 主流程暂未调用 |
+| `controlled_download` | 已接入 Electron 主流程 | Runtime 经 Policy 审批后只向主进程传资源 ID；主进程从可信目录解析并下载 |
 
 Policy 当前可以：
 
@@ -109,6 +109,7 @@ Policy 当前可以：
 - 拒绝非当前活动资源下载。
 - 拒绝与用户失败处置选择不一致的模型重规划策略。
 - 下载前检查 `approvedRevision === revision`。
+- Electron 主进程拒绝未知资源 ID，renderer 无法通过 IPC 提交任意 URL、主机、大小或 SHA256。
 
 ### 3.5 系统画像边界
 
@@ -143,7 +144,7 @@ Policy 当前可以：
 
 ### 3.7 失败恢复
 
-当前演示中 `sample-project` 会在 56% 模拟返回：
+浏览器 fallback 演示中 `sample-project` 会在 56% 模拟返回；Electron E2E fixture 则通过真实 `controlled_download` IPC 返回同一结构化错误：
 
 ```text
 CHECKSUM_MISMATCH
@@ -181,7 +182,7 @@ CHECKSUM_MISMATCH
 
 已经完成：
 
-- Vitest：7 个测试文件，25 个 Agent Core 测试。
+- Vitest：7 个测试文件，31 个 Agent Core 测试。
 - Playwright Electron E2E：3 条真实 Electron 恢复链路。
 - axe-core：关键页面 serious/critical 无障碍扫描。
 - Linux CI 视觉回归：5 个关键页面基线。
@@ -200,8 +201,8 @@ CHECKSUM_MISMATCH
 | 第五阶段稳定性收口 | 已完成 | 视觉基线、无障碍扫描、ToolResult 聚合已完成 |
 | 第六阶段系统画像 | 已完成 | 真实只读脱敏采集已合并 PR #4 |
 | 远程模型 JSON 输出稳定性 | 已完成 | 中文 JSON-only prompt 和连接测试 prompt 已合并并通过 CI |
-| 真实下载器 | 部分完成 | Electron 主进程受控下载客户端已实现，尚未接入 UI 主流程 |
-| SHA256 / 数字签名真实校验 | 部分完成 | SHA256 已在下载客户端中校验；数字签名未开始 |
+| 真实下载器 | 已完成最小主流程接入 | Electron Runtime 经 Policy、Tool 和 IPC 调用主进程受控下载器 |
+| SHA256 / 数字签名真实校验 | 部分完成 | SHA256 与失败恢复已接入主流程；数字签名未开始 |
 | 临时目录与原子文件写入 | 部分完成 | 下载客户端使用受控临时目录和不覆盖写入；最终工作区原子导出未开始 |
 | Manifest / README / 交接包真实导出 | 未开始 | 当前仍是预览 |
 | SQLite 任务恢复 | 未开始 | 等真实执行链路稳定后再做 |
@@ -218,14 +219,14 @@ CHECKSUM_MISMATCH
 | 最小模型驱动闭环 | 78% | 本地模型稳定，远程模型仍需提升结构化输出稳定性 |
 | UI 产品流程 | 82% | 主流程完整，真实历史、配置编辑和真实目录操作缺失 |
 | 远程 LLM 产品化 | 78% | 连接状态和回退完整，真实端点自动测试与 provider 适配仍缺 |
-| 受控工具执行 | 52% | 只读系统画像已真实化；下载客户端边界已实现，但主流程仍使用模拟下载 |
+| 受控工具执行 | 68% | Electron 主流程已使用受控下载；安装、脚本执行和最终导出仍未接入 |
 | 工作区真实交付 | 30% | 预览完整，但没有真实文件和目录 |
 | 生产可用性 | 22% | 缺少持久化、真实执行、权限审计和发布体系 |
 
 ## 6. 当前主要差距
 
-1. 真实执行能力仍未完整接入主流程。
-   当前下载客户端已经具备受控边界和 SHA256 校验，但 renderer 执行链路仍使用模拟下载，工作区和 Agent B 仍是模拟数据。
+1. 真实执行能力只完成了下载子链路。
+   Electron renderer 已经通过 `controlled_download` 接入主进程下载和 SHA256 校验，但可信目录仍使用演示域名，安装、工作区导出和 Agent B 仍未真实化。
 
 2. 远程模型协议仍需 provider 适配增强。
    JSON-only prompt 已合并，但不同模型供应商的字段兼容性、base URL 自动拼接和真实端点自动测试仍未完成。
@@ -255,9 +256,9 @@ CHECKSUM_MISMATCH
 - `npm run verify:model-client` 通过。
 - 设置页“测试连接”对模型输出的 JSON-only 约束更明确，降低 `MODEL_INVALID_DECISION` 风险。
 
-### 7.2 第七阶段：真实下载器最小受控边界
+### 7.2 已完成：真实下载器最小受控边界与主流程接入
 
-当前状态：已完成最小客户端边界，暂未接入 renderer 主流程。
+当前状态：Electron Runtime、Policy、Tool、preload IPC 和主进程下载客户端已经连通。
 
 已完成：
 
@@ -267,6 +268,9 @@ CHECKSUM_MISMATCH
 - 不覆盖用户文件。
 - ToolResult 记录下载 URL 主机、大小、状态、错误码和耗时。
 - 独立验证脚本覆盖 URL、Host、HTTP、大小、SHA256 和临时文件写入。
+- Renderer 只传 `resourceId`，下载元数据由 Electron 主进程可信目录解析。
+- 浏览器模式保留模拟下载；Electron 模式默认选择 `controlled_download`。
+- Electron E2E 使用显式测试 fixture 验证真实 IPC、恢复决策和重新审批链路，不访问外网。
 
 暂不做：
 
@@ -281,7 +285,7 @@ CHECKSUM_MISMATCH
 目标：
 
 - 对下载文件执行 SHA256 校验。（下载客户端已完成）
-- 支持校验失败恢复路径。（基础错误码已完成，UI 主流程接入待做）
+- 支持校验失败恢复路径。（已完成）
 - 原子写入 Manifest、README、RESOURCE_MANIFEST 和 AGENTS。
 - 工作区页面从预览升级为真实文件状态。
 
@@ -313,7 +317,7 @@ CHECKSUM_MISMATCH
 - 所有计划和替代计划必须通过 `planValidation.ts`。
 - 下载 Policy 必须同时满足 `approvedRevision === revision`。
 - API Key 只能保留在 Electron 主进程。
-- 真实下载接入 renderer 主流程和最终工作区导出前，继续保持无安装执行、无最终工作区真实写入、无 SQLite、无 MCP、无插件。
+- 真实下载已接入 renderer 主流程；最终工作区导出完成前继续保持无安装执行、无最终工作区真实写入、无 SQLite、无 MCP、无插件。
 
 ## 9. 结论
 
@@ -321,8 +325,8 @@ CHECKSUM_MISMATCH
 
 下一步不应扩展成通用编码 Agent，也不应一次性接入多个真实执行能力。建议按顺序推进：
 
-1. 合并远程模型 JSON-only prompt 修复。
-2. 设计并实现真实下载器最小受控边界。
-3. 接入 SHA256 校验和失败恢复。
-4. 再进入真实工作区文件导出。
+1. 远程模型 JSON-only prompt 修复。（已完成）
+2. 真实下载器最小受控边界和主流程接入。（已完成）
+3. SHA256 校验和失败恢复。（已完成）
+4. 下一步进入真实工作区文件导出。
 5. 最后考虑持久化、MCP、插件和真实 Agent B。

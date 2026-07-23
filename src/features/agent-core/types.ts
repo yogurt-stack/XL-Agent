@@ -291,6 +291,16 @@ export type ControlledDownloadOutput = {
   elapsedMs: number;
 };
 
+export type ControlledDownloadError = {
+  code: string;
+  message: string;
+  retriable: boolean;
+};
+
+export type ControlledDownloadResult =
+  | { ok: true; output: ControlledDownloadOutput }
+  | { ok: false; error: ControlledDownloadError };
+
 export type ModelContext = {
   state: AgentState;
   step: number;

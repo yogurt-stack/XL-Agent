@@ -58,6 +58,23 @@ ipcMain.handle("agent:modelDecision", () => ({
   }
 }));
 
+ipcMain.handle("agent:controlledDownload", (_event, input) => ({
+  ok: true,
+  output: {
+    resourceId: input.resourceId,
+    urlHost: "downloads.xunlei.example",
+    bytesWritten: 7,
+    sha256: {
+      "python-312": "7b16d7f7610a4c9ebdb31d2b2ed7b0e0c3c9f681d7b9f2d4545cbf88d07a8c3a",
+      vscode: "59e5dd4db0c2dfaa6c03f4a9f98e1c8f0e16e0c2d2c0993c88f0ab622c91f4f2",
+      git: "c2d4519d06c2d6d0fb8a44d9d93e6b95c51ef4e9871d5ceaf3c11ac4e0db0c4b",
+      "sample-project": "b4a0f36f2cc8f5c7d09ea6d0f9f0de58b79b631aa6a5a8b09f9f0a8e2a4c7d1b"
+    }[input.resourceId],
+    tempFilePath: `/tmp/${input.resourceId}.download`,
+    elapsedMs: 1
+  }
+}));
+
 app.whenReady().then(async () => {
   const window = new BrowserWindow({
     show: false,

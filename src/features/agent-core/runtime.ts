@@ -13,7 +13,20 @@ import { DefaultAgentPolicy, InMemoryAgentToolExecutor } from "./agentServices";
 import { LocalRuleModelRuntime } from "./localRuleModel";
 import { createInitialAgentState, transition } from "./machine";
 import { MockVerifier, FixedWindowsPlanner, FixedWindowsRouter } from "./mockServices";
-import type { AgentAction, AgentEvent, AgentState, SimulatedDownloadOutput } from "./types";
+import type {
+  AgentAction,
+  AgentEvent,
+  AgentState,
+  AgentToolCall,
+  AgentToolName,
+  ControlledDownloadOutput,
+  SimulatedDownloadOutput
+} from "./types";
+
+export type RuntimeDownloadTool = Extract<
+  AgentToolName,
+  "simulate_download" | "controlled_download"
+>;
 
 export type AgentRuntimeDependencies = {
   router: AgentRouter;
@@ -25,6 +38,7 @@ export type AgentRuntimeDependencies = {
   policy: AgentPolicy;
   initialState?: AgentState;
   stepDelayMs?: number;
+  downloadTool?: RuntimeDownloadTool;
 };
 
 export class AgentRuntime implements AgentRuntimePort {
@@ -36,10 +50,12 @@ export class AgentRuntime implements AgentRuntimePort {
   private modelStepRunning = false;
   private toolStepRunning = false;
   private readonly stepDelayMs: number;
+  private readonly downloadTool: RuntimeDownloadTool;
 
   constructor(private readonly dependencies: AgentRuntimeDependencies) {
     this.state = dependencies.initialState ?? createInitialAgentState();
     this.stepDelayMs = dependencies.stepDelayMs ?? 420;
+    this.downloadTool = dependencies.downloadTool ?? "simulate_download";
   }
 
   getState() {
@@ -131,7 +147,7 @@ export class AgentRuntime implements AgentRuntimePort {
         state: this.state,
         step: this.state.agentRun.step,
         maxSteps: this.state.agentRun.maxSteps,
-        availableTools: ["read_system_profile", "search_trusted_catalog", "simulate_download"],
+        availableTools: ["read_system_profile", "search_trusted_catalog", this.downloadTool],
         toolResults: this.state.agentRun.toolResults
       });
       if (!this.isCurrentWork(version)) return;
@@ -198,15 +214,26 @@ export class AgentRuntime implements AgentRuntimePort {
     if (!resource) return;
 
     const callId = `download-r${this.state.revision}-${resource.id}-a${resource.attempts}-p${resource.progress}`;
+    const call: AgentToolCall =
+      this.downloadTool === "controlled_download"
+        ? {
+            callId,
+            name: "controlled_download",
+            input: { resourceId: resource.id }
+          }
+        : {
+            callId,
+            name: "simulate_download",
+            input: { resourceId: resource.id }
+          };
     const action: Extract<AgentAction, { type: "call_tool" }> = {
       actionId: `runtime-${callId}`,
       type: "call_tool",
-      purpose: "执行用户已确认的模拟下载任务。",
-      call: {
-        callId,
-        name: "simulate_download",
-        input: { resourceId: resource.id }
-      }
+      purpose:
+        this.downloadTool === "controlled_download"
+          ? "通过 Electron 主进程执行用户已确认的受控下载任务。"
+          : "执行用户已确认的模拟下载任务。",
+      call
     };
 
     this.toolStepRunning = true;
@@ -236,21 +263,33 @@ export class AgentRuntime implements AgentRuntimePort {
         } else {
           this.applyEvent({
             type: "MODEL_RUNTIME_FAILED",
-            reason: result.error?.message ?? "模拟下载工具执行失败。"
+            reason: result.error?.message ?? "下载工具执行失败。"
           });
         }
         return;
       }
 
-      if (!isSimulatedDownloadOutput(result.output) || result.output.resourceId !== resource.id) {
-        this.applyEvent({ type: "MODEL_RUNTIME_FAILED", reason: "模拟下载工具返回了非法结果。" });
-        return;
+      if (this.downloadTool === "controlled_download") {
+        if (!isControlledDownloadOutput(result.output) || result.output.resourceId !== resource.id) {
+          this.applyEvent({ type: "MODEL_RUNTIME_FAILED", reason: "受控下载工具返回了非法结果。" });
+          return;
+        }
+        this.applyEvent({
+          type: "DOWNLOAD_PROGRESS",
+          resourceId: result.output.resourceId,
+          progress: 100
+        });
+      } else {
+        if (!isSimulatedDownloadOutput(result.output) || result.output.resourceId !== resource.id) {
+          this.applyEvent({ type: "MODEL_RUNTIME_FAILED", reason: "模拟下载工具返回了非法结果。" });
+          return;
+        }
+        this.applyEvent({
+          type: "DOWNLOAD_PROGRESS",
+          resourceId: result.output.resourceId,
+          progress: result.output.progress
+        });
       }
-      this.applyEvent({
-        type: "DOWNLOAD_PROGRESS",
-        resourceId: result.output.resourceId,
-        progress: result.output.progress
-      });
     } finally {
       this.toolStepRunning = false;
       if (this.isCurrentWork(version)) this.drive();
@@ -294,9 +333,23 @@ function isSimulatedDownloadOutput(value: unknown): value is SimulatedDownloadOu
   return typeof output.resourceId === "string" && typeof output.progress === "number";
 }
 
+function isControlledDownloadOutput(value: unknown): value is ControlledDownloadOutput {
+  if (typeof value !== "object" || value === null) return false;
+  const output = value as Record<string, unknown>;
+  return (
+    typeof output.resourceId === "string" &&
+    typeof output.urlHost === "string" &&
+    typeof output.bytesWritten === "number" &&
+    typeof output.sha256 === "string" &&
+    typeof output.tempFilePath === "string" &&
+    typeof output.elapsedMs === "number"
+  );
+}
+
 export function createMockAgentRuntime(
   model: ModelRuntime = new LocalRuleModelRuntime(),
-  tools: AgentToolExecutor = new InMemoryAgentToolExecutor()
+  tools: AgentToolExecutor = new InMemoryAgentToolExecutor(),
+  downloadTool: RuntimeDownloadTool = "simulate_download"
 ) {
   return new AgentRuntime({
     router: new FixedWindowsRouter(),
@@ -305,6 +358,7 @@ export function createMockAgentRuntime(
     scheduler: createTimeoutScheduler(),
     model,
     tools,
-    policy: new DefaultAgentPolicy()
+    policy: new DefaultAgentPolicy(),
+    downloadTool
   });
 }

@@ -60,6 +60,27 @@ type SystemProfileIpcResult =
       };
     };
 
+type ControlledDownloadResult =
+  | {
+      ok: true;
+      output: {
+        resourceId: string;
+        urlHost: string;
+        bytesWritten: number;
+        sha256: string;
+        tempFilePath: string;
+        elapsedMs: number;
+      };
+    }
+  | {
+      ok: false;
+      error: {
+        code: string;
+        message: string;
+        retriable: boolean;
+      };
+    };
+
 contextBridge.exposeInMainWorld("xunleiAgent", {
   getAppInfo: () => ipcRenderer.invoke("app:getInfo") as Promise<AppInfo>,
   readSystemProfile: () =>
@@ -69,5 +90,7 @@ contextBridge.exposeInMainWorld("xunleiAgent", {
   testModelConnection: () =>
     ipcRenderer.invoke("agent:testModelConnection") as Promise<ModelDecisionIpcResult>,
   requestModelDecision: (context: unknown) =>
-    ipcRenderer.invoke("agent:modelDecision", context) as Promise<ModelDecisionIpcResult>
+    ipcRenderer.invoke("agent:modelDecision", context) as Promise<ModelDecisionIpcResult>,
+  controlledDownload: (resourceId: string) =>
+    ipcRenderer.invoke("agent:controlledDownload", { resourceId }) as Promise<ControlledDownloadResult>
 });

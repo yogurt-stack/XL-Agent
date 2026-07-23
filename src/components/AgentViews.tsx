@@ -294,7 +294,11 @@ export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: 
   const fallbackResource = failedResource?.fallbackId ? catalogById.get(failedResource.fallbackId) : undefined;
   const failedToolResult = [...state.agentRun.toolResults]
     .reverse()
-    .find((result) => result.tool === "simulate_download" && result.status === "error");
+    .find(
+      (result) =>
+        (result.tool === "simulate_download" || result.tool === "controlled_download") &&
+        result.status === "error"
+    );
   const toolResultGroups = groupedToolResults(state);
   return (
     <section className="agent-view execution-view">

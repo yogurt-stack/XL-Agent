@@ -1,17 +1,27 @@
 import { describe, expect, it } from "vitest";
 import { DefaultAgentPolicy, InMemoryAgentToolExecutor } from "./agentServices";
+import { catalogById } from "./catalog";
 import type { AgentScheduler } from "./interfaces";
 import { createResourceManifest } from "./manifest";
 import { FixedWindowsPlanner, FixedWindowsRouter, MockVerifier } from "./mockServices";
-import { AgentRuntime } from "./runtime";
-import type { AgentPhase, AgentState, FailureResolutionAction } from "./types";
+import { AgentRuntime, type RuntimeDownloadTool } from "./runtime";
+import type {
+  AgentPhase,
+  AgentState,
+  FailureResolutionAction
+} from "./types";
 
 type ScheduledJob = {
   cancelled: boolean;
   task: () => void | Promise<void>;
 };
 
-function createRuntimeHarness() {
+function createRuntimeHarness(
+  options: {
+    downloadTool?: RuntimeDownloadTool;
+    tools?: InMemoryAgentToolExecutor;
+  } = {}
+) {
   const queue: ScheduledJob[] = [];
   const scheduler: AgentScheduler = {
     schedule(task) {
@@ -27,9 +37,10 @@ function createRuntimeHarness() {
     planner: new FixedWindowsPlanner(),
     verifier: new MockVerifier(),
     scheduler,
-    tools: new InMemoryAgentToolExecutor(),
+    tools: options.tools ?? new InMemoryAgentToolExecutor(),
     policy: new DefaultAgentPolicy(),
-    stepDelayMs: 0
+    stepDelayMs: 0,
+    downloadTool: options.downloadTool
   });
   let state = runtime.getState();
   runtime.subscribe((nextState) => {
@@ -54,8 +65,10 @@ function createRuntimeHarness() {
   };
 }
 
-async function runToDownloadFailure() {
-  const harness = createRuntimeHarness();
+async function runToDownloadFailure(
+  options: Parameters<typeof createRuntimeHarness>[0] = {}
+) {
+  const harness = createRuntimeHarness(options);
   harness.runtime.dispatch({ type: "SUBMIT_TASK", task: "准备 Windows AI 环境" });
   await harness.runUntil("clarifying");
   harness.runtime.dispatch({
@@ -150,7 +163,7 @@ describe("agent runtime recovery", () => {
     expect(manifest.handoff.nextAction).toContain("Agent B");
   });
 
-  it("routes every controlled download through policy evaluation", async () => {
+  it("routes every simulated download through policy evaluation", async () => {
     const harness = await runToDownloadFailure();
     const state = harness.getState();
     const downloads = state.agentRun.toolResults.filter(
@@ -161,6 +174,78 @@ describe("agent runtime recovery", () => {
     );
 
     expect(downloads.length).toBeGreaterThan(0);
+    expect(downloadAudits).toHaveLength(downloads.length);
+    expect(downloadAudits.every((entry) => entry.decision.outcome === "allow")).toBe(true);
+  });
+
+  it("runs Electron controlled downloads through policy and preserves checksum recovery", async () => {
+    const attempts = new Map<string, number>();
+    const tools = new InMemoryAgentToolExecutor(undefined, async (resourceId) => {
+      const resource = catalogById.get(resourceId);
+      if (!resource) {
+        return {
+          ok: false,
+          error: {
+            code: "RESOURCE_NOT_TRUSTED",
+            message: "Resource is missing from the trusted catalog.",
+            retriable: false
+          }
+        };
+      }
+      const attempt = (attempts.get(resourceId) ?? 0) + 1;
+      attempts.set(resourceId, attempt);
+      if (resourceId === "sample-project" && attempt === 1) {
+        return {
+          ok: false,
+          error: {
+            code: "CHECKSUM_MISMATCH",
+            message: "下载文件 SHA256 与可信目录不一致。",
+            retriable: true
+          }
+        };
+      }
+      return {
+        ok: true,
+        output: {
+          resourceId,
+          urlHost: new URL(resource.download.url).host,
+          bytesWritten: 7,
+          sha256: resource.download.expectedSha256,
+          tempFilePath: `/tmp/${resourceId}.download`,
+          elapsedMs: 1
+        }
+      };
+    });
+    const harness = await runToDownloadFailure({
+      downloadTool: "controlled_download",
+      tools
+    });
+    const state = harness.getState();
+    const downloads = state.agentRun.toolResults.filter(
+      (result) => result.tool === "controlled_download"
+    );
+    const downloadAudits = state.agentRun.policyAudit.filter((entry) =>
+      entry.actionId.startsWith("runtime-download-r1")
+    );
+
+    expect(downloads.length).toBeGreaterThan(0);
+    expect(downloads).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "success",
+          output: expect.objectContaining({
+            sha256: expect.stringMatching(/^[a-f0-9]{64}$/)
+          })
+        }),
+        expect.objectContaining({
+          status: "error",
+          error: expect.objectContaining({
+            code: "CHECKSUM_MISMATCH",
+            retriable: true
+          })
+        })
+      ])
+    );
     expect(downloadAudits).toHaveLength(downloads.length);
     expect(downloadAudits.every((entry) => entry.decision.outcome === "allow")).toBe(true);
   });

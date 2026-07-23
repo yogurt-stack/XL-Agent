@@ -40,14 +40,17 @@ function createRendererAgentServices() {
     return { runtime: createMockAgentRuntime(localModel), modelConnection };
   }
 
-  const tools = new InMemoryAgentToolExecutor(async () => {
-    const result = await electronBridge.readSystemProfile();
-    if (!result.ok) throw new Error(result.error.message);
-    if (!isHostSystemProfile(result.profile)) {
-      throw new Error("Electron 返回了非法系统画像。");
-    }
-    return createSystemProfileToolOutput(result.profile);
-  });
+  const tools = new InMemoryAgentToolExecutor(
+    async () => {
+      const result = await electronBridge.readSystemProfile();
+      if (!result.ok) throw new Error(result.error.message);
+      if (!isHostSystemProfile(result.profile)) {
+        throw new Error("Electron 返回了非法系统画像。");
+      }
+      return createSystemProfileToolOutput(result.profile);
+    },
+    (resourceId) => electronBridge.controlledDownload(resourceId)
+  );
 
   const remoteModel = new RemoteLlmModelRuntime({
     async requestDecision(context) {
@@ -61,7 +64,10 @@ function createRendererAgentServices() {
     onPrimarySuccess: (decision) => modelConnection.recordRemoteSuccess(decision),
     onPrimaryFailure: (error) => modelConnection.recordFallback(error)
   });
-  return { runtime: createMockAgentRuntime(fallbackModel, tools), modelConnection };
+  return {
+    runtime: createMockAgentRuntime(fallbackModel, tools, "controlled_download"),
+    modelConnection
+  };
 }
 
 export function useAgentCore() {

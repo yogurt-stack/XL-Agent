@@ -133,7 +133,9 @@ await decisionClient.requestDecision({ purpose: "model-decision-test" });
 assert(capturedDecisionBody?.response_format?.type === "json_object", "Decision requests must force JSON object responses");
 assert(
   capturedDecisionBody?.messages?.[0]?.content?.includes("你必须只返回一个合法的 JSON 对象") &&
-    capturedDecisionBody?.messages?.[0]?.content?.includes("不要调用未列出的工具"),
+    capturedDecisionBody?.messages?.[0]?.content?.includes("不要调用未列出的工具") &&
+    capturedDecisionBody?.messages?.[0]?.content?.includes('"controlled_download"') &&
+    capturedDecisionBody?.messages?.[0]?.content?.includes("context.availableTools"),
   "Decision prompt must require JSON-only ModelDecision output and constrained tools"
 );
 
