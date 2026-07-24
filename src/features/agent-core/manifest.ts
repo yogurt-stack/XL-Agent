@@ -3,6 +3,7 @@ import type { AgentState } from "./types";
 export function createResourceManifest(state: AgentState) {
   return {
     schemaVersion: "agent-core-demo-1.0",
+    taskId: state.taskId,
     revision: state.revision,
     task: state.task,
     route: state.route,
@@ -10,7 +11,12 @@ export function createResourceManifest(state: AgentState) {
     taskRequirements: state.taskRequirements,
     planValidation: state.planValidation,
     approvedRevision: state.approvedRevision,
-    mode: "frontend-memory-simulation",
+    mode:
+      state.workspace.ready && state.workspace.rootPath?.startsWith("/virtual/")
+        ? "frontend-memory-simulation"
+        : state.workspace.ready
+          ? "electron-controlled-export"
+          : "handoff-preview",
     generatedAt: state.workspace.generatedAt ?? null,
     resources: state.resources.map((resource) => ({
       id: resource.id,
@@ -28,6 +34,10 @@ export function createResourceManifest(state: AgentState) {
     handoff: {
       ready: state.workspace.ready,
       files: state.workspace.files,
+      fileRecords: state.workspace.fileRecords,
+      rootPath: state.workspace.rootPath ?? null,
+      exportStatus: state.workspace.exportStatus,
+      exportError: state.workspace.exportError ?? null,
       nextAction: state.workspace.nextAction,
       missingItems: state.resources
         .filter((resource) => resource.required && resource.status !== "verified")

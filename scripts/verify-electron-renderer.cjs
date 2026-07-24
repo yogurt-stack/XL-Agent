@@ -75,6 +75,44 @@ ipcMain.handle("agent:controlledDownload", (_event, input) => ({
   }
 }));
 
+ipcMain.handle("agent:saveTaskState", () => ({
+  ok: true,
+  savedAt: "2026-07-24T00:00:00.000Z"
+}));
+
+ipcMain.handle("agent:loadTaskState", () => ({
+  ok: true,
+  restored: null
+}));
+
+ipcMain.handle("agent:flushTaskPersistence", () => ({ ok: true }));
+
+ipcMain.handle("agent:exportWorkspace", (_event, input) => ({
+  ok: true,
+  output: {
+    taskId: input.taskId,
+    revision: input.revision,
+    rootPath: `/tmp/${input.taskId}/revision-${input.revision}`,
+    generatedAt: "2026-07-24T00:00:00.000Z",
+    reusedExisting: false,
+    files: [
+      {
+        relativePath: "resource-manifest.json",
+        absolutePath: `/tmp/${input.taskId}/revision-${input.revision}/resource-manifest.json`,
+        bytesWritten: 80,
+        sha256: "a".repeat(64)
+      }
+    ]
+  }
+}));
+
+ipcMain.handle("agent:readWorkspaceFile", () => ({
+  ok: true,
+  content: JSON.stringify({ schemaVersion: "xunlei-agent-workspace-1.0" }, null, 2)
+}));
+
+ipcMain.handle("agent:openWorkspace", () => ({ ok: true }));
+
 app.whenReady().then(async () => {
   const window = new BrowserWindow({
     show: false,

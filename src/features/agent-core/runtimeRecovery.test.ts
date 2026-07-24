@@ -180,7 +180,7 @@ describe("agent runtime recovery", () => {
 
   it("runs Electron controlled downloads through policy and preserves checksum recovery", async () => {
     const attempts = new Map<string, number>();
-    const tools = new InMemoryAgentToolExecutor(undefined, async (resourceId) => {
+    const tools = new InMemoryAgentToolExecutor(undefined, async ({ resourceId }) => {
       const resource = catalogById.get(resourceId);
       if (!resource) {
         return {

@@ -1,5 +1,6 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, ipcMain, shell } from "electron";
 import { config as loadEnv } from "dotenv";
+import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -8,7 +9,12 @@ import {
   type ControlledDownloadOutput
 } from "./downloadClient";
 import { RemoteModelClient, toModelConnectionError } from "./modelClient";
+import { TaskStore } from "./taskStore";
 import { getTrustedDownloadMetadata, type TrustedDownloadMetadata } from "./trustedDownloadCatalog";
+import {
+  exportWorkspace,
+  toWorkspaceExportError
+} from "./workspaceExporter";
 
 loadEnv({ path: path.resolve(process.cwd(), ".env"), quiet: true });
 
@@ -16,6 +22,7 @@ app.setName("迅雷 AI Task Agent");
 
 const remoteModelClient = new RemoteModelClient();
 const downloadFixtureAttempts = new Map<string, number>();
+let taskStorePromise: Promise<TaskStore> | null = null;
 
 type HostPlatform = "darwin" | "linux" | "win32" | "unknown";
 
@@ -90,6 +97,54 @@ function getControlledDownloadResourceId(value: unknown) {
   return typeof resourceId === "string" && /^[a-z0-9][a-z0-9._-]{0,79}$/i.test(resourceId)
     ? resourceId
     : null;
+}
+
+function safePositiveInteger(value: string | undefined, fallback: number) {
+  if (!value) return fallback;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function getTaskStore() {
+  if (!taskStorePromise) {
+    const configuredPath = process.env.XL_AGENT_TASK_STORE_PATH;
+    const databasePath =
+      configuredPath && path.isAbsolute(configuredPath)
+        ? configuredPath
+        : path.join(app.getPath("userData"), "agent-tasks.sqlite");
+    taskStorePromise = TaskStore.open({
+      databasePath,
+      approvalTtlMs: safePositiveInteger(
+        process.env.XL_AGENT_APPROVAL_TTL_MS,
+        30 * 60 * 1000
+      )
+    });
+  }
+  return taskStorePromise;
+}
+
+function getWorkspaceRoot() {
+  const configuredRoot = process.env.XL_AGENT_WORKSPACE_ROOT;
+  return configuredRoot && path.isAbsolute(configuredRoot)
+    ? configuredRoot
+    : path.join(app.getPath("userData"), "workspaces");
+}
+
+function getTaskRevisionInput(value: unknown) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const input = value as Record<string, unknown>;
+  const taskId =
+    typeof input.taskId === "string" &&
+    /^[a-z0-9][a-z0-9._-]{0,127}$/i.test(input.taskId)
+      ? input.taskId
+      : null;
+  const revision =
+    typeof input.revision === "number" &&
+    Number.isSafeInteger(input.revision) &&
+    input.revision > 0
+      ? input.revision
+      : null;
+  return taskId && revision ? { taskId, revision } : null;
 }
 
 function fixtureDownload(
@@ -204,13 +259,34 @@ ipcMain.handle("agent:modelDecision", async (_event, context: unknown) => {
 
 ipcMain.handle("agent:controlledDownload", async (_event, input: unknown) => {
   const resourceId = getControlledDownloadResourceId(input);
+  const taskRevision = getTaskRevisionInput(input);
   const metadata = resourceId ? getTrustedDownloadMetadata(resourceId) : null;
-  if (!resourceId || !metadata) {
+  if (!resourceId || !metadata || !taskRevision) {
     return {
       ok: false as const,
       error: {
         code: "RESOURCE_NOT_TRUSTED",
         message: "请求的资源不在 Electron 主进程可信下载目录中。",
+        retriable: false
+      }
+    };
+  }
+
+  const approval = await (
+    await getTaskStore()
+  ).hasValidApproval(taskRevision.taskId, taskRevision.revision);
+  if (!approval.valid) {
+    return {
+      ok: false as const,
+      error: {
+        code:
+          approval.status === "expired"
+            ? "APPROVAL_EXPIRED"
+            : "APPROVAL_NOT_FOUND",
+        message:
+          approval.status === "expired"
+            ? "当前下载审批已过期，请重新确认资源计划。"
+            : "Electron 主进程未找到当前 revision 的有效用户审批。",
         retriable: false
       }
     };
@@ -236,6 +312,170 @@ ipcMain.handle("agent:controlledDownload", async (_event, input: unknown) => {
   }
 });
 
+ipcMain.handle("agent:saveTaskState", async (_event, state: unknown) => {
+  try {
+    return {
+      ok: true as const,
+      ...(await (await getTaskStore()).saveSnapshot(state))
+    };
+  } catch (error) {
+    return {
+      ok: false as const,
+      error: {
+        code: "TASK_PERSISTENCE_WRITE_FAILED",
+        message: error instanceof Error ? error.message : "SQLite 任务状态写入失败。",
+        retriable: true
+      }
+    };
+  }
+});
+
+ipcMain.handle("agent:loadTaskState", async () => {
+  try {
+    return {
+      ok: true as const,
+      restored: await (await getTaskStore()).loadLatestUnfinished()
+    };
+  } catch (error) {
+    return {
+      ok: false as const,
+      error: {
+        code: "TASK_PERSISTENCE_READ_FAILED",
+        message: error instanceof Error ? error.message : "SQLite 任务状态读取失败。",
+        retriable: true
+      }
+    };
+  }
+});
+
+ipcMain.handle("agent:flushTaskPersistence", async () => {
+  await (await getTaskStore()).flush();
+  return { ok: true as const };
+});
+
+ipcMain.handle("agent:exportWorkspace", async (_event, input: unknown) => {
+  const taskRevision = getTaskRevisionInput(input);
+  if (!taskRevision) {
+    return {
+      ok: false as const,
+      error: {
+        code: "WORKSPACE_EXPORT_INVALID_STATE",
+        message: "工作区导出请求缺少合法的 taskId 或 revision。",
+        retriable: false
+      }
+    };
+  }
+
+  try {
+    const store = await getTaskStore();
+    const approval = await store.hasValidApproval(
+      taskRevision.taskId,
+      taskRevision.revision
+    );
+    if (!approval.valid) {
+      return {
+        ok: false as const,
+        error: {
+          code:
+            approval.status === "expired"
+              ? "APPROVAL_EXPIRED"
+              : "APPROVAL_NOT_FOUND",
+          message:
+            approval.status === "expired"
+              ? "当前工作区导出审批已过期，请重新确认资源计划。"
+              : "Electron 主进程未找到当前 revision 的有效工作区导出审批。",
+          retriable: false
+        }
+      };
+    }
+    const state = await store.getTaskState(taskRevision.taskId);
+    if (!state || state.revision !== taskRevision.revision) {
+      return {
+        ok: false as const,
+        error: {
+          code: "WORKSPACE_EXPORT_INVALID_STATE",
+          message: "SQLite 中没有与导出请求匹配的任务快照。",
+          retriable: false
+        }
+      };
+    }
+    const output = await exportWorkspace(state, {
+      workspaceRoot: getWorkspaceRoot()
+    });
+    await store.recordWorkspaceExport(output);
+    return { ok: true as const, output };
+  } catch (error) {
+    return { ok: false as const, error: toWorkspaceExportError(error) };
+  }
+});
+
+ipcMain.handle("agent:readWorkspaceFile", async (_event, input: unknown) => {
+  const taskRevision = getTaskRevisionInput(input);
+  const relativePath =
+    typeof input === "object" &&
+    input !== null &&
+    !Array.isArray(input) &&
+    typeof (input as Record<string, unknown>).relativePath === "string"
+      ? (input as Record<string, string>).relativePath
+      : null;
+  if (!taskRevision || !relativePath) {
+    return {
+      ok: false as const,
+      error: {
+        code: "WORKSPACE_FILE_INVALID",
+        message: "工作区文件读取请求无效。",
+        retriable: false
+      }
+    };
+  }
+  const output = await (
+    await getTaskStore()
+  ).getWorkspaceExport(taskRevision.taskId, taskRevision.revision);
+  const file = output?.files.find(
+    (candidate) => candidate.relativePath === relativePath
+  );
+  if (!file) {
+    return {
+      ok: false as const,
+      error: {
+        code: "WORKSPACE_FILE_NOT_FOUND",
+        message: "请求的文件不属于已记录的工作区导出。",
+        retriable: false
+      }
+    };
+  }
+  try {
+    const content = await readFile(file.absolutePath, "utf8");
+    return { ok: true as const, content };
+  } catch (error) {
+    return {
+      ok: false as const,
+      error: {
+        code: "WORKSPACE_FILE_READ_FAILED",
+        message: error instanceof Error ? error.message : "工作区文件读取失败。",
+        retriable: true
+      }
+    };
+  }
+});
+
+ipcMain.handle("agent:openWorkspace", async (_event, input: unknown) => {
+  const taskRevision = getTaskRevisionInput(input);
+  if (!taskRevision) {
+    return { ok: false as const, error: "工作区打开请求无效。" };
+  }
+  const output = await (
+    await getTaskStore()
+  ).getWorkspaceExport(taskRevision.taskId, taskRevision.revision);
+  if (!output) {
+    return { ok: false as const, error: "未找到已导出的工作区。" };
+  }
+  const error = await shell.openPath(output.rootPath);
+  return error
+    ? { ok: false as const, error }
+    : { ok: true as const };
+});
+
 ipcMain.handle("agent:modelConnectionInfo", () => ({
   ok: true as const,
   info: remoteModelClient.getSafeConnectionInfo()
@@ -249,7 +489,8 @@ ipcMain.handle("agent:testModelConnection", async () => {
   }
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  await getTaskStore();
   createMainWindow();
 
   app.on("activate", () => {

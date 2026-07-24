@@ -1,4 +1,6 @@
 import path from "node:path";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import axe, { type AxeResults } from "axe-core";
 import { _electron as electron, type ElectronApplication } from "playwright";
@@ -8,8 +10,10 @@ const visualRegressionEnabled = process.platform === "linux";
 
 let electronApp: ElectronApplication;
 let page: Page;
+let testDataRoot: string;
+let testEnvironment: Record<string, string>;
 
-function deterministicEnvironment() {
+function deterministicEnvironment(approvalTtlMs: number) {
   const inherited = Object.fromEntries(
     Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)
   );
@@ -20,15 +24,18 @@ function deterministicEnvironment() {
     XL_AGENT_E2E_DOWNLOAD_FIXTURE: "1",
     XL_AGENT_LLM_ENDPOINT: "",
     XL_AGENT_LLM_MODEL: "",
-    XL_AGENT_LLM_API_KEY: ""
+    XL_AGENT_LLM_API_KEY: "",
+    XL_AGENT_APPROVAL_TTL_MS: String(approvalTtlMs),
+    XL_AGENT_TASK_STORE_PATH: path.join(testDataRoot, "agent-tasks.sqlite"),
+    XL_AGENT_WORKSPACE_ROOT: path.join(testDataRoot, "workspaces")
   };
 }
 
-test.beforeEach(async () => {
+async function launchApplication() {
   electronApp = await electron.launch({
     args: ["--disable-gpu", projectRoot],
     cwd: projectRoot,
-    env: deterministicEnvironment(),
+    env: testEnvironment,
     locale: "zh-CN",
     timeout: 30_000
   });
@@ -38,6 +45,13 @@ test.beforeEach(async () => {
   await page.waitForLoadState("domcontentloaded");
   await expect(page).toHaveTitle("迅雷 AI Task Agent");
   await expect(page.getByRole("heading", { name: "准备一个可交接的开发工作区" })).toBeVisible();
+}
+
+test.beforeEach(async ({}, testInfo) => {
+  testDataRoot = mkdtempSync(path.join(tmpdir(), "xunlei-agent-e2e-"));
+  const approvalTtlMs = testInfo.title.includes("rejects expired approval") ? 10 : 30 * 60 * 1000;
+  testEnvironment = deterministicEnvironment(approvalTtlMs);
+  await launchApplication();
 });
 
 test.afterEach(async ({}, testInfo: TestInfo) => {
@@ -60,10 +74,11 @@ test.afterEach(async ({}, testInfo: TestInfo) => {
     }
   } finally {
     await electronApp?.close();
+    rmSync(testDataRoot, { force: true, recursive: true });
   }
 });
 
-async function startTaskAndWaitForFailure() {
+async function approveInitialTask() {
   await page.getByRole("textbox", { name: "任务描述" }).fill("准备 Python 机器学习环境");
   await page.getByRole("button", { name: "开始任务" }).click();
 
@@ -75,7 +90,10 @@ async function startTaskAndWaitForFailure() {
   await page.getByRole("button", { name: "查看资源计划" }).click();
   await expect(page.getByText("计划 r1 已通过严格验证")).toBeVisible();
   await page.getByRole("button", { name: "确认下载计划 r1" }).click();
+}
 
+async function startTaskAndWaitForFailure() {
+  await approveInitialTask();
   await expect(page.getByRole("heading", { name: "AI Dev Starter 需要人工决策" })).toBeVisible();
   const failurePanel = page.getByRole("alert");
   await expect(failurePanel).toContainText("CHECKSUM_MISMATCH");
@@ -138,14 +156,36 @@ async function openCompletedWorkspace() {
   await expect(page.getByText("工作区交接", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "工作区" }).click();
   await expect(page.getByRole("heading", { name: "交接包已就绪" })).toBeVisible();
-  await expect(page.getByText("已验证，可交接")).toBeVisible();
+  await expect(page.getByText("已验证并真实落盘")).toBeVisible();
   await expectMainPanelAtTop("ready workspace");
-  return JSON.parse(await page.locator("pre.workspace-code-preview").innerText()) as {
+  await expect(page.locator("pre.workspace-code-preview")).toContainText(
+    "xunlei-agent-workspace-1.0"
+  );
+  const rootPath = await page.locator(".workspace-view .agent-page-heading > p").innerText();
+  const expectedFiles = [
+    "README.md",
+    "RESOURCE_MANIFEST.md",
+    "AGENTS.md",
+    "resource-manifest.json",
+    "scripts/bootstrap.ps1",
+    "scripts/verify-environment.ps1"
+  ];
+  expect(rootPath.startsWith(testDataRoot)).toBe(true);
+  for (const relativePath of expectedFiles) {
+    expect(existsSync(path.join(rootPath, relativePath)), `${relativePath} should exist`).toBe(true);
+  }
+  const manifest = JSON.parse(
+    readFileSync(path.join(rootPath, "resource-manifest.json"), "utf8")
+  ) as {
+    schemaVersion: string;
     revision: number;
     approvedRevision: number;
     resources: Array<{ id: string; replacedFrom: string | null; status: string }>;
     handoff: { ready: boolean; missingItems: string[]; nextAction: string };
   };
+  expect(manifest.schemaVersion).toBe("xunlei-agent-workspace-1.0");
+  expect(JSON.parse(await page.locator("pre.workspace-code-preview").innerText())).toEqual(manifest);
+  return manifest;
 }
 
 test("retries the original source and reaches a ready workspace", async () => {
@@ -219,7 +259,7 @@ test("delegates the failed resource to Agent B as an incomplete handoff", async 
 
   await expect(page.getByRole("heading", { name: "等待资源准备完成" })).toBeVisible();
   await expect(page.getByText("已交给 Agent B 处理未完成资源")).toBeVisible();
-  await expect(page.getByText("仍有资源未验证")).toBeVisible();
+  await expect(page.getByText("仍有资源或导出未完成")).toBeVisible();
   await expectMainPanelAtTop("Agent B handoff");
   await expectNoSeriousAccessibilityViolations("Agent B handoff");
   await expectVisualBaseline("agent-b-incomplete-handoff");
@@ -240,4 +280,41 @@ test("delegates the failed resource to Agent B as an incomplete handoff", async 
       })
     ])
   );
+});
+
+test("restores an unfinished failure decision after an application restart", async () => {
+  await startTaskAndWaitForFailure();
+  await page.evaluate(async () => {
+    const bridge = (
+      window as unknown as {
+        xunleiAgent?: { flushTaskPersistence(): Promise<{ ok: true }> };
+      }
+    ).xunleiAgent;
+    await bridge?.flushTaskPersistence();
+  });
+  await electronApp.context().tracing.stop();
+  await electronApp.close();
+
+  await launchApplication();
+  await page.getByRole("button", { name: "执行" }).click();
+  await expect(page.getByRole("heading", { name: "AI Dev Starter 需要人工决策" })).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("CHECKSUM_MISMATCH");
+  await expect(page.getByText("已从 SQLite 恢复未完成任务。")).toBeVisible();
+
+  await page.getByRole("button", { name: "设置" }).click();
+  const restoredRow = page.locator(".settings-row").filter({ hasText: "最近恢复" });
+  await expect(restoredRow).not.toContainText("本次未恢复");
+});
+
+test("rejects expired approval before a controlled download", async () => {
+  await approveInitialTask();
+  await expect(page.getByText("当前审批已失效")).toBeVisible();
+  await expect(page.getByText("必须重新确认计划 r1 后才能继续受控执行。")).toBeVisible();
+  const downloadResult = page
+    .locator("details.agent-tool-result-group")
+    .filter({ hasText: "controlled_download" });
+  await expect(downloadResult).toContainText("当前下载审批已过期");
+  await page.getByRole("button", { name: "重新确认" }).click();
+  await expect(page.getByText("计划 r1 已通过严格验证")).toBeVisible();
+  await expect(page.getByRole("button", { name: "确认下载计划 r1" })).toBeEnabled();
 });

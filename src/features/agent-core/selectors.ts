@@ -70,6 +70,8 @@ export function phaseLabel(phase: AgentPhase) {
     downloading: "受控下载",
     awaiting_failure_action: "等待失败处置",
     verifying: "验证资源",
+    exporting: "导出工作区",
+    awaiting_export_retry: "等待导出重试",
     replanning: "重规划",
     handoff: "工作区交接",
     cancelled: "任务已取消"

@@ -47,6 +47,12 @@ function isAgentAction(value: unknown): value is AgentAction {
         (value.call.input.resourceIds === undefined || isStringArray(value.call.input.resourceIds))
       );
     }
+    if (value.call.name === "export_workspace") {
+      return (
+        typeof value.call.input.taskId === "string" &&
+        typeof value.call.input.revision === "number"
+      );
+    }
     return (
       (value.call.name === "simulate_download" || value.call.name === "controlled_download") &&
       typeof value.call.input.resourceId === "string"

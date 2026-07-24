@@ -2,13 +2,13 @@
 
 ## 1. 报告快照
 
-- 报告日期：2026-07-20；最近更新：2026-07-23
+- 报告日期：2026-07-20；最近更新：2026-07-24
 - 本地目录：`/Users/zhuweiyu/xunlei-ai-task-agent`
 - GitHub 仓库：`https://github.com/yogurt-stack/XL-Agent`
 - 当前主分支最新已合并提交：以 GitHub `main` 最新提交为准
-- 当前产品阶段：比赛可演示的最小垂直 Agent MVP
-- 当前工程边界：真实只读系统画像已接入；远程模型 JSON-only prompt 已合并；Electron 模式已将真实受控下载接入 Runtime、Policy、Tool、IPC、SHA256 校验和失败恢复主流程
-- 尚未接入：安装执行、最终工作区真实写入、SQLite、MCP、插件和真实 Agent B
+- 当前产品阶段：具备真实受控下载、工作区导出和任务恢复能力的垂直 Agent MVP
+- 当前工程边界：Electron 模式已贯通 Runtime、Policy、Tool、IPC、SHA256 校验、原子工作区导出、SQLite 审计和未完成任务恢复
+- 尚未接入：安装执行、数字签名校验、MCP、插件和真实 Agent B；可信资源目录仍使用演示下载域名
 
 本报告用于替代口头进度说明，帮助后续开发按“受控资源准备 Agent”方向继续推进。
 
@@ -57,6 +57,8 @@ waiting_approval
 downloading
 awaiting_failure_action
 verifying
+exporting
+awaiting_export_retry
 replanning
 handoff
 cancelled
@@ -71,6 +73,9 @@ cancelled
 - 审批必须绑定当前 `revision`。
 - 下载失败、版本不匹配、取消必需资源可触发恢复或重规划。
 - 替代计划必须生成新 `revision` 并重新回到 `waiting_approval`。
+- 工作区只能在全部选中资源验证完成且审批仍有效时进入 `exporting`。
+- 导出失败进入 `awaiting_export_retry`，不能误标记为已交接。
+- SQLite 恢复通过 `TASK_STATE_RESTORED` 事件回到状态机；终态任务不会自动恢复。
 - Manifest 由当前 `AgentState` 计算生成，不是固定字符串。
 
 ### 3.3 模型能力
@@ -99,6 +104,7 @@ cancelled
 | `search_trusted_catalog` | 已实现内存查询 | 查询固定可信资源目录 |
 | `simulate_download` | 已实现模拟执行 | 返回模拟下载进度和固定失败 |
 | `controlled_download` | 已接入 Electron 主流程 | Runtime 经 Policy 审批后只向主进程传资源 ID；主进程从可信目录解析并下载 |
+| `export_workspace` | 已接入 Electron 主流程 | 仅对当前已审批 revision 原子导出固定交接文件，不执行安装或任意 Shell |
 
 Policy 当前可以：
 
@@ -109,6 +115,9 @@ Policy 当前可以：
 - 拒绝非当前活动资源下载。
 - 拒绝与用户失败处置选择不一致的模型重规划策略。
 - 下载前检查 `approvedRevision === revision`。
+- Electron 主进程在下载和导出前再次查询 SQLite 审批记录，过期、撤销或缺失时拒绝执行。
+- 普通状态保存不会延长审批有效期；只有用户显式重新确认才会生成新审批。
+- 导出前检查全部选中资源均为 `verified`，且状态机处于 `exporting`。
 - Electron 主进程拒绝未知资源 ID，renderer 无法通过 IPC 提交任意 URL、主机、大小或 SHA256。
 
 ### 3.5 系统画像边界
@@ -175,15 +184,19 @@ CHECKSUM_MISMATCH
 - 替代计划确认入口。
 - 工作区交接页。
 - Manifest、README、RESOURCE_MANIFEST、AGENTS 预览。
+- 真实原子导出 README、RESOURCE_MANIFEST、AGENTS、JSON Manifest 和两份只读 PowerShell 交接脚本。
+- 工作区页读取真实文件，展示绝对目录、字节数和 SHA256，并可请求系统打开已记录目录。
 - 设置页展示远程模型连接状态和系统画像边界。
+- 设置页展示 SQLite 持久化、最近保存和最近恢复状态。
 - 响应式布局和关键页面滚动稳定性修复。
 
 ### 3.9 测试与 CI
 
 已经完成：
 
-- Vitest：7 个测试文件，31 个 Agent Core 测试。
-- Playwright Electron E2E：3 条真实 Electron 恢复链路。
+- Vitest：8 个测试文件，36 个 Agent Core 测试。
+- Playwright Electron E2E：5 条真实 Electron 链路，覆盖三种失败处置、真实文件落盘、应用重启恢复和审批过期。
+- 独立持久化验证：覆盖 SQLite 文件、审批期限、不续期、审计恢复、原子目录提交、冲突拒绝和失败回滚。
 - axe-core：关键页面 serious/critical 无障碍扫描。
 - Linux CI 视觉回归：5 个关键页面基线。
 - GitHub Actions：typecheck、Vitest coverage、Agent Core 验证、模型客户端验证、production build、Electron E2E。
@@ -203,9 +216,9 @@ CHECKSUM_MISMATCH
 | 远程模型 JSON 输出稳定性 | 已完成 | 中文 JSON-only prompt 和连接测试 prompt 已合并并通过 CI |
 | 真实下载器 | 已完成最小主流程接入 | Electron Runtime 经 Policy、Tool 和 IPC 调用主进程受控下载器 |
 | SHA256 / 数字签名真实校验 | 部分完成 | SHA256 与失败恢复已接入主流程；数字签名未开始 |
-| 临时目录与原子文件写入 | 部分完成 | 下载客户端使用受控临时目录和不覆盖写入；最终工作区原子导出未开始 |
-| Manifest / README / 交接包真实导出 | 未开始 | 当前仍是预览 |
-| SQLite 任务恢复 | 未开始 | 等真实执行链路稳定后再做 |
+| 临时目录与原子文件写入 | 已完成 | 下载使用受控临时目录；交接包使用 staging 目录和原子 rename，不覆盖冲突目录 |
+| Manifest / README / 交接包真实导出 | 已完成 | 固定 6 个文件真实落盘，界面读取文件并展示路径、大小和 SHA256 |
+| SQLite 任务恢复 | 已完成 | 保存任务、revision、ToolResult、Policy、恢复上下文和审批；重启恢复未完成任务 |
 | MCP、插件和真实 Agent B | 未开始 | 保持低优先级 |
 
 ## 5. 完成度评估
@@ -214,19 +227,19 @@ CHECKSUM_MISMATCH
 
 | 方向 | 当前完成度 | 说明 |
 | --- | ---: | --- |
-| 高保真比赛 Demo | 90% | 核心流程、失败恢复、交接、测试和视觉稳定性已成型 |
-| Agent Core 协议与状态机 | 88% | 状态、动作、Tool、Policy、验证和审计主链路完整 |
+| 高保真比赛 Demo | 96% | 下载、恢复、真实交接、重启恢复、测试和视觉稳定性已成型 |
+| Agent Core 协议与状态机 | 94% | 状态、动作、Tool、Policy、导出、持久化和恢复主链路完整 |
 | 最小模型驱动闭环 | 78% | 本地模型稳定，远程模型仍需提升结构化输出稳定性 |
-| UI 产品流程 | 82% | 主流程完整，真实历史、配置编辑和真实目录操作缺失 |
+| UI 产品流程 | 90% | 主流程、真实文件状态和目录打开已完成；历史任务浏览和配置编辑仍缺 |
 | 远程 LLM 产品化 | 78% | 连接状态和回退完整，真实端点自动测试与 provider 适配仍缺 |
-| 受控工具执行 | 68% | Electron 主流程已使用受控下载；安装、脚本执行和最终导出仍未接入 |
-| 工作区真实交付 | 30% | 预览完整，但没有真实文件和目录 |
-| 生产可用性 | 22% | 缺少持久化、真实执行、权限审计和发布体系 |
+| 受控工具执行 | 82% | Electron 已接入受控下载和原子导出；安装与脚本执行仍保持禁用 |
+| 工作区真实交付 | 88% | 固定交接包真实落盘并可验证；尚未将下载产物安装或解包为可运行环境 |
+| 生产可用性 | 45% | 已有 SQLite 恢复和审批审计；仍缺真实资源目录、签名验证、发布与升级体系 |
 
 ## 6. 当前主要差距
 
-1. 真实执行能力只完成了下载子链路。
-   Electron renderer 已经通过 `controlled_download` 接入主进程下载和 SHA256 校验，但可信目录仍使用演示域名，安装、工作区导出和 Agent B 仍未真实化。
+1. 真实执行仍限制在下载与交接导出。
+   Electron renderer 已经通过受控 Tool 接入下载、SHA256 校验和工作区原子导出，但可信目录仍使用演示域名，安装、解包、脚本执行和 Agent B 仍未真实化。
 
 2. 远程模型协议仍需 provider 适配增强。
    JSON-only prompt 已合并，但不同模型供应商的字段兼容性、base URL 自动拼接和真实端点自动测试仍未完成。
@@ -237,8 +250,11 @@ CHECKSUM_MISMATCH
 4. 可信资源目录仍是固定 Windows 目标。
    虽然已经能读取真实主机画像，但跨平台资源目录尚未建立。
 
-5. 工作区交付仍是预览。
-   当前没有真实写入 Manifest、README、AGENTS 或脚本文件。
+5. 持久化还没有历史任务管理界面。
+   SQLite 已保存和恢复最新未完成任务，但用户尚不能浏览、归档或删除历史任务；当前也没有数据库迁移版本管理。
+
+6. Electron 依赖需要单独升级。
+   当前 `npm audit` 对 Electron 30 报告 1 个 high 级依赖项，自动修复要求升级到 Electron 43，属于需要单独回归验证的主版本迁移，不在本轮 P4/P5 中直接变更。
 
 ## 7. 下一阶段计划
 
@@ -276,35 +292,41 @@ CHECKSUM_MISMATCH
 
 - 安装软件。
 - 执行下载后的脚本。
-- 写入最终工作区目录。
-- SQLite。
 - MCP 或插件。
 
-### 7.3 第八阶段：真实校验与交接包导出
+### 7.3 已完成：第八阶段真实校验与交接包导出
 
-目标：
+已完成：
 
-- 对下载文件执行 SHA256 校验。（下载客户端已完成）
-- 支持校验失败恢复路径。（已完成）
-- 原子写入 Manifest、README、RESOURCE_MANIFEST 和 AGENTS。
-- 工作区页面从预览升级为真实文件状态。
+- 下载文件 SHA256 校验和校验失败恢复。
+- 仅允许全部选中资源已验证、当前 revision 已审批的任务导出。
+- 在同级 staging 目录写入 6 个固定文件，完成后原子 rename。
+- 已存在的完整同任务 revision 可安全复用；冲突或不完整目录拒绝覆盖。
+- 写入失败删除 staging 目录，不修改既有目标。
+- 工作区页读取真实文件并展示路径、大小和 SHA256。
+- Electron E2E 验证真实目录和文件存在，JSON Manifest 与界面内容一致。
 
-### 7.4 第九阶段：任务恢复与执行审计
+### 7.4 已完成：第九阶段任务恢复与执行审计
 
-目标：
+已完成：
 
-- SQLite 保存任务、revision、ToolResult、Policy 审计和恢复上下文。
-- 应用重启后恢复未完成任务。
-- 增加用户级授权记录和审批有效期。
+- `sql.js` SQLite 保存任务、revision、AgentState、ToolResult、Policy 审计、恢复上下文和工作区导出元数据。
+- 每次状态转换串行写入，数据库文件通过临时文件加 rename 持久化。
+- 应用启动后只恢复最新未完成任务；`handoff`、`cancelled` 和空闲状态不恢复。
+- 恢复动作仍通过状态机事件处理，不由 React 直接修改状态。
+- 用户审批绑定 task/revision，默认 30 分钟有效；普通状态保存不会续期。
+- 主进程在真实下载和导出前再次校验审批，过期后要求用户重新确认。
+- Electron E2E 已验证关闭应用后恢复人工失败决策，以及审批过期后拒绝下载。
 
-### 7.5 后置阶段：MCP、插件和真实 Agent B
+### 7.5 下一阶段：真实资源与生产化边界
 
-只有在真实下载、校验、写入和恢复稳定后，再考虑：
+建议按以下顺序推进：
 
-- MCP 工具接入。
-- 插件化资源来源。
-- 真实 Agent B 执行器。
-- 受控脚本运行。
+1. 将演示下载域名替换为可维护、可版本化的真实可信目录，并补充数字签名验证。
+2. 增加 SQLite schema 版本和迁移机制，以及历史任务浏览/归档。
+3. 增加远程模型 provider 适配和 Base URL 自动拼接。
+4. 设计安装、解包或脚本执行的最小白名单能力；仍需独立审批和沙箱。
+5. 上述边界稳定后，再评估 MCP、插件化来源和真实 Agent B。
 
 ## 8. 必须继续保持的架构约束
 
@@ -317,16 +339,17 @@ CHECKSUM_MISMATCH
 - 所有计划和替代计划必须通过 `planValidation.ts`。
 - 下载 Policy 必须同时满足 `approvedRevision === revision`。
 - API Key 只能保留在 Electron 主进程。
-- 真实下载已接入 renderer 主流程；最终工作区导出完成前继续保持无安装执行、无最终工作区真实写入、无 SQLite、无 MCP、无插件。
+- 真实下载、工作区导出和 SQLite 已接入主流程；继续保持无自动安装、无任意脚本执行、无 MCP、无插件。
 
 ## 9. 结论
 
-项目目前已经超过纯 UI Demo，具备可演示 Agent MVP 的关键要素：模型决策、状态机、受控 Tool、Policy、严格计划验证、失败恢复、交接预览、测试体系和 CI。
+项目目前已经超过纯 UI Demo，具备可演示并可恢复的垂直 Agent MVP 关键要素：模型决策、状态机、受控 Tool、Policy、严格计划验证、失败恢复、真实工作区交接、SQLite 审计、重启恢复、测试体系和 CI。
 
-下一步不应扩展成通用编码 Agent，也不应一次性接入多个真实执行能力。建议按顺序推进：
+本轮 P4/P5 已完成本地实现和集成测试。下一步不应直接扩展成通用编码 Agent，也不应一次性接入多个高风险执行能力。建议按顺序推进：
 
 1. 远程模型 JSON-only prompt 修复。（已完成）
 2. 真实下载器最小受控边界和主流程接入。（已完成）
 3. SHA256 校验和失败恢复。（已完成）
-4. 下一步进入真实工作区文件导出。
-5. 最后考虑持久化、MCP、插件和真实 Agent B。
+4. 真实工作区原子导出。（已完成）
+5. SQLite 任务恢复、审计和审批有效期。（已完成）
+6. 下一步进入真实可信目录、数字签名和持久化 schema 迁移。

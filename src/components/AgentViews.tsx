@@ -32,6 +32,7 @@ import {
 import { catalogById } from "../features/agent-core/catalog";
 import { createResourceManifest } from "../features/agent-core/manifest";
 import type { ModelConnectionState } from "../features/agent-core/modelConnection";
+import type { PersistenceViewState } from "../features/agent-core/useAgentCore";
 import {
   estimatedMinutes,
   groupedToolResults,
@@ -162,7 +163,10 @@ export function AgentHomeView({ state, dispatch, onNavigate }: { state: AgentSta
     "准备可交接的 Python AI 示例项目"
   ];
   const downloadCount = state.resources.filter((resource) => resource.status === "downloading").length;
-  const taskSubmissionLocked = state.phase === "downloading" || state.phase === "verifying";
+  const taskSubmissionLocked =
+    state.phase === "downloading" ||
+    state.phase === "verifying" ||
+    state.phase === "exporting";
 
   return (
     <section className="agent-view agent-home-view">
@@ -289,7 +293,7 @@ export function ResourcePlanView({ state, dispatch, onNavigate }: { state: Agent
 }
 
 export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: { state: AgentState; dispatch: Dispatch; onNavigate: Navigate; modelConnection: ModelConnectionState }) {
-  const isWorking = ["downloading", "awaiting_failure_action", "verifying", "replanning"].includes(state.phase);
+  const isWorking = ["downloading", "awaiting_failure_action", "verifying", "exporting", "replanning"].includes(state.phase);
   const failedResource = state.resources.find((resource) => resource.status === "failed");
   const fallbackResource = failedResource?.fallbackId ? catalogById.get(failedResource.fallbackId) : undefined;
   const failedToolResult = [...state.agentRun.toolResults]
@@ -320,6 +324,9 @@ export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: 
       ) : null}
       {state.phase === "replanning" && state.replanReason ? <section className="replan-status-band"><Loader2 className="spin" size={17} /><div><strong>Agent 正在分析失败上下文</strong><span>模型将按用户选择生成新的可信资源计划。</span></div></section> : null}
       {state.phase === "waiting_approval" && state.replanReason ? <section className="replan-status-band replan-ready"><ClipboardCheck size={17} /><div><strong>替代计划 r{state.revision} 已生成</strong><span>该 revision 尚未获得执行权限。</span></div><button className="btn btn-primary" type="button" onClick={() => onNavigate("plan")}><ShieldCheck size={16} />查看并确认</button></section> : null}
+      {state.phase === "waiting_approval" && !state.replanReason ? <section className="replan-status-band replan-ready"><ShieldCheck size={17} /><div><strong>当前审批已失效</strong><span>必须重新确认计划 r{state.revision} 后才能继续受控执行。</span></div><button className="btn btn-primary" type="button" onClick={() => onNavigate("plan")}>重新确认</button></section> : null}
+      {state.phase === "exporting" ? <section className="replan-status-band"><Loader2 className="spin" size={17} /><div><strong>正在原子生成工作区交接包</strong><span>只有目录完整写入后才会标记为可交接。</span></div></section> : null}
+      {state.phase === "awaiting_export_retry" ? <section className="failure-resolution-panel" role="alert"><div className="failure-resolution-heading"><span><AlertTriangle size={19} /></span><div><small>工作区导出失败</small><h2>交接包需要重新写入</h2></div></div><p>{state.workspace.exportError}</p><div className="failure-actions"><button className="btn btn-primary" type="button" onClick={() => dispatch({ type: "RETRY_WORKSPACE_EXPORT" })}><RefreshCw size={16} />重试导出</button><button className="btn btn-ghost" type="button" onClick={() => onNavigate("workspace")}><FileCode2 size={16} />查看状态</button></div></section> : null}
       <div className="execution-grid">
         <section className="agent-panel">
           <div className="agent-panel-heading"><PackageCheck size={17} /><h2>下载任务</h2></div>
@@ -349,10 +356,12 @@ export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: 
 export function SettingsView({
   modelConnection,
   onTestConnection,
+  persistence,
   state
 }: {
   modelConnection: ModelConnectionState;
   onTestConnection: () => Promise<ModelConnectionState>;
+  persistence: PersistenceViewState;
   state: AgentState;
 }) {
   const meta = modelConnectionMeta[modelConnection.status];
@@ -391,21 +400,67 @@ export function SettingsView({
           <div className="settings-row"><div><strong>Shell 摘要</strong><span>只显示 shell 文件名，不显示完整路径。</span></div><code>{state.hostProfile?.defaultShell ?? "pending"}</code></div>
           <div className="settings-row"><div><strong>脱敏策略</strong><span>不采集用户名、主机名、Home 路径、环境变量或完整 shell 路径。</span></div><code>PII blocked</code></div>
         </section>
+        <section className="settings-section">
+          <div className="settings-section-heading"><ListChecks size={17} /><div><h2>任务恢复与审计</h2><span>Electron 主进程使用 SQLite 保存任务、ToolResult、Policy 和审批记录。</span></div></div>
+          <div className="settings-row"><div><strong>持久化状态</strong><span>{persistence.error ?? "任务状态在每次状态转换后保存。"}</span></div><code>{persistence.status}</code></div>
+          <div className="settings-row"><div><strong>最近保存</strong><span>保存内容包含恢复上下文和当前 revision。</span></div><code>{persistence.lastSavedAt ? new Date(persistence.lastSavedAt).toLocaleString("zh-CN") : "尚未保存"}</code></div>
+          <div className="settings-row"><div><strong>最近恢复</strong><span>只自动恢复未完成任务；已交接或取消任务不会自动恢复。</span></div><code>{persistence.restoredAt ? new Date(persistence.restoredAt).toLocaleString("zh-CN") : "本次未恢复"}</code></div>
+        </section>
       </div>
     </section>
   );
 }
 
-export function WorkspaceView({ state }: { state: AgentState }) {
+export function WorkspaceView({
+  dispatch,
+  onOpenWorkspace,
+  onReadFile,
+  state
+}: {
+  dispatch: Dispatch;
+  onOpenWorkspace: () => Promise<{ ok: true } | { ok: false; error: string }>;
+  onReadFile: (relativePath: string) => Promise<
+    | { ok: true; content: string }
+    | { ok: false; error: { code: string; message: string; retriable: boolean } }
+  >;
+  state: AgentState;
+}) {
   const [previewFile, setPreviewFile] = useState("resource-manifest.json");
   const manifest = useMemo(() => JSON.stringify(createResourceManifest(state), null, 2), [state]);
   const missing = requiredMissingResources(state);
-  const preview = previewFile === "resource-manifest.json" ? manifest : previewFile === "README.md" ? "# AI Dev Workspace\n\n1. 运行 scripts/bootstrap.ps1\n2. 运行 scripts/verify-environment.ps1" : previewFile === "RESOURCE_MANIFEST.md" ? `# Resource Manifest r${state.revision}\n\n所有资源均由可信目录生成。` : "# AGENTS.md\n\n后续 Agent 读取 resource-manifest.json、日志和下一步动作。";
+  const [preview, setPreview] = useState(manifest);
+
+  useEffect(() => {
+    let active = true;
+    if (!state.workspace.ready) {
+      setPreview(
+        previewFile === "resource-manifest.json"
+          ? manifest
+          : "该文件尚未真实导出；当前仅显示任务交接预览。"
+      );
+      return () => {
+        active = false;
+      };
+    }
+    setPreview("正在读取真实工作区文件…");
+    void onReadFile(previewFile).then((result) => {
+      if (!active) return;
+      setPreview(result.ok ? result.content : `${result.error.code}: ${result.error.message}`);
+    });
+    return () => {
+      active = false;
+    };
+  }, [manifest, onReadFile, previewFile, state.workspace.generatedAt, state.workspace.ready]);
+
+  const selectedFileRecord = state.workspace.fileRecords.find(
+    (file) => file.relativePath === previewFile
+  );
   return (
     <section className="agent-view workspace-view">
-      <div className="agent-page-heading"><div><span>工作区交接</span><h1>{state.workspace.ready ? "交接包已就绪" : "等待资源准备完成"}</h1></div><p>{state.systemProfile.workspaceRoot}</p></div>
+      <div className="agent-page-heading"><div><span>工作区交接</span><h1>{state.workspace.ready ? "交接包已就绪" : state.workspace.exportStatus === "failed" ? "交接包导出失败" : "等待资源准备完成"}</h1></div><p>{state.workspace.rootPath ?? state.systemProfile.workspaceRoot}</p></div>
       {state.agentRun.status === "delegated" ? <section className="agent-b-handoff-notice"><Bot size={19} /><div><strong>已交给 Agent B 处理未完成资源</strong><span>当前 Agent 已保留任务目标、失败原因、资源状态和计划 revision；工作区尚未标记为可用。</span></div></section> : null}
-      <div className="workspace-agent-grid"><section className="agent-panel"><div className="agent-panel-heading"><FileCode2 size={17} /><h2>文件清单</h2></div><div className="workspace-file-buttons">{state.workspace.files.map((file) => <button className={previewFile === file ? "file-selected" : ""} key={file} type="button" onClick={() => setPreviewFile(file)}>{file === "resource-manifest.json" ? <FileJson2 size={15} /> : <FileText size={15} />}{file}</button>)}</div></section><section className="agent-panel"><div className="agent-panel-heading"><FileText size={17} /><h2>{previewFile} 预览</h2></div><pre className="workspace-code-preview">{preview}</pre></section><section className="agent-panel"><div className="agent-panel-heading"><Bot size={17} /><h2>Agent 交接面板</h2></div><div className="handoff-list"><span><strong>目标</strong>{state.task || "尚未输入任务"}</span><span><strong>资源状态</strong>{state.workspace.ready ? "已验证，可交接" : "仍有资源未验证"}</span><span><strong>缺失项</strong>{missing.length ? missing.map((resource) => resource.name).join("、") : "无"}</span><span><strong>下一步</strong>{state.workspace.nextAction}</span></div><button className="btn btn-ghost" disabled type="button" title="纯前端内存模拟不会创建本地目录"><FolderOpen size={16} />打开本地工作目录</button></section></div>
+      {state.workspace.exportStatus === "failed" ? <section className="failure-resolution-panel" role="alert"><p>{state.workspace.exportError}</p><button className="btn btn-primary" type="button" onClick={() => dispatch({ type: "RETRY_WORKSPACE_EXPORT" })}><RefreshCw size={16} />重试导出</button></section> : null}
+      <div className="workspace-agent-grid"><section className="agent-panel"><div className="agent-panel-heading"><FileCode2 size={17} /><h2>文件清单</h2></div><div className="workspace-file-buttons">{state.workspace.files.map((file) => { const record = state.workspace.fileRecords.find((item) => item.relativePath === file); return <button className={previewFile === file ? "file-selected" : ""} key={file} type="button" onClick={() => setPreviewFile(file)}>{file === "resource-manifest.json" ? <FileJson2 size={15} /> : <FileText size={15} />}{file}{record ? <small>{record.bytesWritten} B</small> : null}</button>; })}</div></section><section className="agent-panel"><div className="agent-panel-heading"><FileText size={17} /><h2>{previewFile} {state.workspace.ready ? "真实文件" : "预览"}</h2></div>{selectedFileRecord ? <small className="agent-empty-copy">SHA256 {selectedFileRecord.sha256}</small> : null}<pre className="workspace-code-preview">{preview}</pre></section><section className="agent-panel"><div className="agent-panel-heading"><Bot size={17} /><h2>Agent 交接面板</h2></div><div className="handoff-list"><span><strong>目标</strong>{state.task || "尚未输入任务"}</span><span><strong>资源状态</strong>{state.workspace.ready ? "已验证并真实落盘" : "仍有资源或导出未完成"}</span><span><strong>缺失项</strong>{missing.length ? missing.map((resource) => resource.name).join("、") : "无"}</span><span><strong>下一步</strong>{state.workspace.nextAction}</span></div><button className="btn btn-ghost" disabled={!state.workspace.ready} type="button" onClick={() => void onOpenWorkspace()}><FolderOpen size={16} />打开本地工作目录</button></section></div>
     </section>
   );
 }

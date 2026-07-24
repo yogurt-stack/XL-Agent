@@ -10,11 +10,50 @@ import type {
   PolicyDecision,
   SimulatedDownloadOutput,
   SystemProfileToolOutput,
-  ToolResult
+  ToolResult,
+  WorkspaceExportOutput,
+  WorkspaceExportResult
 } from "./types";
 
 export type SystemProfileReader = () => Promise<SystemProfileToolOutput> | SystemProfileToolOutput;
-export type ControlledDownloadRunner = (resourceId: string) => Promise<ControlledDownloadResult>;
+export type ControlledDownloadRunner = (request: {
+  resourceId: string;
+  taskId: string;
+  revision: number;
+}) => Promise<ControlledDownloadResult>;
+export type WorkspaceExportRunner = (request: {
+  taskId: string;
+  revision: number;
+}) => Promise<WorkspaceExportResult>;
+
+const simulatedWorkspaceFiles = [
+  "README.md",
+  "RESOURCE_MANIFEST.md",
+  "AGENTS.md",
+  "resource-manifest.json",
+  "scripts/bootstrap.ps1",
+  "scripts/verify-environment.ps1"
+];
+
+export const simulatedWorkspaceExport: WorkspaceExportRunner = async ({
+  taskId,
+  revision
+}) => ({
+  ok: true,
+  output: {
+    taskId,
+    revision,
+    rootPath: `/virtual/xunlei-agent/${taskId}/revision-${revision}`,
+    generatedAt: `mock-session-revision-${revision}`,
+    reusedExisting: false,
+    files: simulatedWorkspaceFiles.map((relativePath) => ({
+      relativePath,
+      absolutePath: `/virtual/xunlei-agent/${taskId}/revision-${revision}/${relativePath}`,
+      bytesWritten: 1,
+      sha256: "0".repeat(64)
+    }))
+  }
+});
 
 function mockTimestamp(state: AgentState, suffix: string) {
   return `mock-step-${state.agentRun.step}-${suffix}`;
@@ -92,11 +131,42 @@ function isValidControlledDownloadOutput(
   );
 }
 
+function isValidWorkspaceExportOutput(
+  value: unknown,
+  taskId: string,
+  revision: number
+): value is WorkspaceExportOutput {
+  if (typeof value !== "object" || value === null) return false;
+  const output = value as Record<string, unknown>;
+  if (
+    output.taskId !== taskId ||
+    output.revision !== revision ||
+    typeof output.rootPath !== "string" ||
+    typeof output.generatedAt !== "string" ||
+    typeof output.reusedExisting !== "boolean" ||
+    !Array.isArray(output.files)
+  ) {
+    return false;
+  }
+  return output.files.every((file) => {
+    if (typeof file !== "object" || file === null) return false;
+    const record = file as Record<string, unknown>;
+    return (
+      typeof record.relativePath === "string" &&
+      typeof record.absolutePath === "string" &&
+      typeof record.bytesWritten === "number" &&
+      typeof record.sha256 === "string"
+    );
+  });
+}
+
 /** 执行只读系统画像、可信目录查询和下载相关受控工具。 */
 export class InMemoryAgentToolExecutor implements AgentToolExecutor {
   constructor(
     private readonly readSystemProfile: SystemProfileReader = createSystemProfileToolOutput,
-    private readonly controlledDownload?: ControlledDownloadRunner
+    private readonly controlledDownload?: ControlledDownloadRunner,
+    private readonly workspaceExport: WorkspaceExportRunner | undefined =
+      controlledDownload ? undefined : simulatedWorkspaceExport
   ) {}
 
   async execute(call: AgentToolCall, state: AgentState): Promise<ToolResult> {
@@ -156,7 +226,11 @@ export class InMemoryAgentToolExecutor implements AgentToolExecutor {
       }
 
       try {
-        const result = await this.controlledDownload(resource.id);
+        const result = await this.controlledDownload({
+          resourceId: resource.id,
+          taskId: state.taskId,
+          revision: state.revision
+        });
         if (result.ok === false) {
           return errorResult(
             call,
@@ -182,6 +256,72 @@ export class InMemoryAgentToolExecutor implements AgentToolExecutor {
           state,
           "CONTROLLED_DOWNLOAD_BRIDGE_ERROR",
           error instanceof Error ? error.message : "Electron 受控下载桥接调用失败。",
+          true
+        );
+      }
+    }
+
+    if (call.name === "export_workspace") {
+      if (
+        state.phase !== "exporting" ||
+        state.workspace.exportStatus !== "exporting" ||
+        call.input.taskId !== state.taskId ||
+        call.input.revision !== state.revision ||
+        state.approvedRevision !== state.revision ||
+        state.resources.some(
+          (resource) => resource.selected && resource.status !== "verified"
+        )
+      ) {
+        return errorResult(
+          call,
+          state,
+          "WORKSPACE_EXPORT_NOT_AUTHORIZED",
+          "只有当前已审批 revision 的全部选中资源通过验证后才能导出工作区。",
+          false
+        );
+      }
+      if (!this.workspaceExport) {
+        return errorResult(
+          call,
+          state,
+          "WORKSPACE_EXPORT_UNAVAILABLE",
+          "当前运行环境没有提供 Electron 工作区导出桥接。",
+          false
+        );
+      }
+      try {
+        const result = await this.workspaceExport(call.input);
+        if (result.ok === false) {
+          return errorResult(
+            call,
+            state,
+            result.error.code,
+            result.error.message,
+            result.error.retriable
+          );
+        }
+        if (
+          !isValidWorkspaceExportOutput(
+            result.output,
+            state.taskId,
+            state.revision
+          )
+        ) {
+          return errorResult(
+            call,
+            state,
+            "WORKSPACE_EXPORT_INVALID_RESPONSE",
+            "Electron 工作区导出桥接返回了非法结果。",
+            true
+          );
+        }
+        return successResult(call, state, result.output);
+      } catch (error) {
+        return errorResult(
+          call,
+          state,
+          "WORKSPACE_EXPORT_BRIDGE_ERROR",
+          error instanceof Error ? error.message : "Electron 工作区导出桥接调用失败。",
           true
         );
       }
@@ -259,6 +399,31 @@ export class DefaultAgentPolicy implements AgentPolicy {
           outcome: "allow",
           risk: "low",
           reason: "只读工具可以自动执行。"
+        };
+      }
+
+      if (call.name === "export_workspace") {
+        const selectedResourcesVerified = state.resources.every(
+          (resource) => !resource.selected || resource.status === "verified"
+        );
+        if (
+          state.phase !== "exporting" ||
+          state.workspace.exportStatus !== "pending" ||
+          call.input.taskId !== state.taskId ||
+          call.input.revision !== state.revision ||
+          state.approvedRevision !== state.revision ||
+          !selectedResourcesVerified
+        ) {
+          return {
+            outcome: "deny",
+            risk: "high",
+            reason: "工作区导出要求当前 revision 已审批且全部选中资源已验证。"
+          };
+        }
+        return {
+          outcome: "allow",
+          risk: "medium",
+          reason: "工作区导出仅写入受控目录，并使用原子目录替换。"
         };
       }
 

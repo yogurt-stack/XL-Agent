@@ -81,6 +81,49 @@ type ControlledDownloadResult =
       };
     };
 
+type TaskPersistenceResult =
+  | { ok: true; savedAt: string }
+  | {
+      ok: false;
+      error: { code: string; message: string; retriable: boolean };
+    };
+
+type TaskRestoreResult =
+  | {
+      ok: true;
+      restored: null | {
+        state: unknown;
+        approval: { valid: boolean; expiresAt: string | null };
+        savedAt: string;
+      };
+    }
+  | {
+      ok: false;
+      error: { code: string; message: string; retriable: boolean };
+    };
+
+type WorkspaceExportResult =
+  | {
+      ok: true;
+      output: {
+        taskId: string;
+        revision: number;
+        rootPath: string;
+        generatedAt: string;
+        reusedExisting: boolean;
+        files: Array<{
+          relativePath: string;
+          absolutePath: string;
+          bytesWritten: number;
+          sha256: string;
+        }>;
+      };
+    }
+  | {
+      ok: false;
+      error: { code: string; message: string; retriable: boolean };
+    };
+
 contextBridge.exposeInMainWorld("xunleiAgent", {
   getAppInfo: () => ipcRenderer.invoke("app:getInfo") as Promise<AppInfo>,
   readSystemProfile: () =>
@@ -91,6 +134,34 @@ contextBridge.exposeInMainWorld("xunleiAgent", {
     ipcRenderer.invoke("agent:testModelConnection") as Promise<ModelDecisionIpcResult>,
   requestModelDecision: (context: unknown) =>
     ipcRenderer.invoke("agent:modelDecision", context) as Promise<ModelDecisionIpcResult>,
-  controlledDownload: (resourceId: string) =>
-    ipcRenderer.invoke("agent:controlledDownload", { resourceId }) as Promise<ControlledDownloadResult>
+  controlledDownload: (request: {
+    resourceId: string;
+    taskId: string;
+    revision: number;
+  }) =>
+    ipcRenderer.invoke("agent:controlledDownload", request) as Promise<ControlledDownloadResult>,
+  saveTaskState: (state: unknown) =>
+    ipcRenderer.invoke("agent:saveTaskState", state) as Promise<TaskPersistenceResult>,
+  loadTaskState: () =>
+    ipcRenderer.invoke("agent:loadTaskState") as Promise<TaskRestoreResult>,
+  flushTaskPersistence: () =>
+    ipcRenderer.invoke("agent:flushTaskPersistence") as Promise<{ ok: true }>,
+  exportWorkspace: (request: { taskId: string; revision: number }) =>
+    ipcRenderer.invoke("agent:exportWorkspace", request) as Promise<WorkspaceExportResult>,
+  readWorkspaceFile: (request: {
+    taskId: string;
+    revision: number;
+    relativePath: string;
+  }) =>
+    ipcRenderer.invoke("agent:readWorkspaceFile", request) as Promise<
+      | { ok: true; content: string }
+      | {
+          ok: false;
+          error: { code: string; message: string; retriable: boolean };
+        }
+    >,
+  openWorkspace: (request: { taskId: string; revision: number }) =>
+    ipcRenderer.invoke("agent:openWorkspace", request) as Promise<
+      { ok: true } | { ok: false; error: string }
+    >
 });

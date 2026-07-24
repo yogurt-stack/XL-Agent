@@ -160,4 +160,45 @@ describe("agent state machine", () => {
     expect(delegated.agentRun.status).toBe("delegated");
     expect(delegated.workspace.ready).toBe(false);
   });
+
+  it("requires fresh approval for export and resumes without an empty download queue", () => {
+    const approved = transition(createWaitingApprovalState(), {
+      type: "APPROVE_PLAN",
+      revision: 1
+    });
+    const exporting: AgentState = {
+      ...approved,
+      phase: "exporting",
+      activeResourceId: null,
+      resources: approved.resources.map((resource) =>
+        resource.selected ? { ...resource, status: "verified" } : resource
+      ),
+      workspace: {
+        ...approved.workspace,
+        exportStatus: "pending"
+      }
+    };
+
+    const expired = transition(exporting, {
+      type: "DOWNLOAD_APPROVAL_EXPIRED",
+      reason: "工作区导出审批已过期。"
+    });
+    expect(expired).toMatchObject({
+      phase: "waiting_approval",
+      approvedRevision: null,
+      activeResourceId: null,
+      workspace: { ready: false, exportStatus: "pending" }
+    });
+
+    const reapproved = transition(expired, {
+      type: "APPROVE_PLAN",
+      revision: 1
+    });
+    expect(reapproved).toMatchObject({
+      phase: "exporting",
+      approvedRevision: 1,
+      activeResourceId: null,
+      workspace: { exportStatus: "pending" }
+    });
+  });
 });

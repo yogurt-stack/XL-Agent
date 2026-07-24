@@ -7,6 +7,8 @@ export type AgentPhase =
   | "downloading"
   | "awaiting_failure_action"
   | "verifying"
+  | "exporting"
+  | "awaiting_export_retry"
   | "replanning"
   | "handoff"
   | "cancelled";
@@ -169,9 +171,21 @@ export type WorkspaceHandoff = {
   generatedAt?: string;
   files: string[];
   nextAction: string;
+  exportStatus: "not_started" | "pending" | "exporting" | "ready" | "failed";
+  rootPath?: string;
+  fileRecords: WorkspaceFileRecord[];
+  exportError?: string;
+};
+
+export type WorkspaceFileRecord = {
+  relativePath: string;
+  absolutePath: string;
+  bytesWritten: number;
+  sha256: string;
 };
 
 export type AgentState = {
+  taskId: string;
   phase: AgentPhase;
   revision: number;
   task: string;
@@ -198,7 +212,8 @@ export type AgentToolName =
   | "read_system_profile"
   | "search_trusted_catalog"
   | "simulate_download"
-  | "controlled_download";
+  | "controlled_download"
+  | "export_workspace";
 
 export type AgentToolCall =
   | {
@@ -226,6 +241,14 @@ export type AgentToolCall =
       name: "controlled_download";
       input: {
         resourceId: string;
+      };
+    }
+  | {
+      callId: string;
+      name: "export_workspace";
+      input: {
+        taskId: string;
+        revision: number;
       };
     };
 
@@ -301,6 +324,19 @@ export type ControlledDownloadResult =
   | { ok: true; output: ControlledDownloadOutput }
   | { ok: false; error: ControlledDownloadError };
 
+export type WorkspaceExportOutput = {
+  taskId: string;
+  revision: number;
+  rootPath: string;
+  generatedAt: string;
+  reusedExisting: boolean;
+  files: WorkspaceFileRecord[];
+};
+
+export type WorkspaceExportResult =
+  | { ok: true; output: WorkspaceExportOutput }
+  | { ok: false; error: ControlledDownloadError };
+
 export type ModelContext = {
   state: AgentState;
   step: number;
@@ -360,7 +396,7 @@ export type AgentRunState = {
 };
 
 export type AgentEvent =
-  | { type: "SUBMIT_TASK"; task: string }
+  | { type: "SUBMIT_TASK"; task: string; taskId?: string }
   | { type: "ROUTE_RESOLVED"; route: string }
   | { type: "ANSWER_CLARIFICATION"; questionId: string; answer: string }
   | { type: "SKIP_CLARIFICATION"; questionId: string }
@@ -369,9 +405,15 @@ export type AgentEvent =
   | { type: "APPROVE_PLAN"; revision: number }
   | { type: "DOWNLOAD_PROGRESS"; resourceId: string; progress: number }
   | { type: "DOWNLOAD_FAILED"; resourceId: string; reason: string }
+  | { type: "DOWNLOAD_APPROVAL_EXPIRED"; reason: string }
   | { type: "RESOLVE_DOWNLOAD_FAILURE"; action: FailureResolutionAction }
   | { type: "REPLAN_GENERATED"; strategy: ReplanStrategy }
   | { type: "VERIFY_RESOURCES"; versionMismatchResourceId?: string }
+  | { type: "WORKSPACE_EXPORT_STARTED" }
+  | { type: "WORKSPACE_EXPORT_COMPLETED"; output: WorkspaceExportOutput }
+  | { type: "WORKSPACE_EXPORT_FAILED"; reason: string }
+  | { type: "RETRY_WORKSPACE_EXPORT" }
+  | { type: "TASK_STATE_RESTORED"; state: AgentState; approvalValid: boolean }
   | { type: "MODEL_DECISION_RECORDED"; decision: ModelDecision }
   | { type: "MODEL_POLICY_RECORDED"; actionId: string; decision: PolicyDecision }
   | { type: "MODEL_TOOL_COMPLETED"; result: ToolResult }

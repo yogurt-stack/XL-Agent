@@ -1,6 +1,7 @@
 import type {
   ControlledDownloadResult,
-  HostSystemProfile
+  HostSystemProfile,
+  WorkspaceExportResult
 } from "../features/agent-core/types";
 
 export type XunleiAppInfo = {
@@ -62,7 +63,52 @@ declare global {
       getModelConnectionInfo: () => Promise<ModelConnectionInfoIpcResult>;
       testModelConnection: () => Promise<ModelDecisionIpcResult>;
       requestModelDecision: (context: unknown) => Promise<ModelDecisionIpcResult>;
-      controlledDownload: (resourceId: string) => Promise<ControlledDownloadResult>;
+      controlledDownload: (request: {
+        resourceId: string;
+        taskId: string;
+        revision: number;
+      }) => Promise<ControlledDownloadResult>;
+      saveTaskState: (state: unknown) => Promise<
+        | { ok: true; savedAt: string }
+        | {
+            ok: false;
+            error: { code: string; message: string; retriable: boolean };
+          }
+      >;
+      loadTaskState: () => Promise<
+        | {
+            ok: true;
+            restored: null | {
+              state: unknown;
+              approval: { valid: boolean; expiresAt: string | null };
+              savedAt: string;
+            };
+          }
+        | {
+            ok: false;
+            error: { code: string; message: string; retriable: boolean };
+          }
+      >;
+      flushTaskPersistence: () => Promise<{ ok: true }>;
+      exportWorkspace: (request: {
+        taskId: string;
+        revision: number;
+      }) => Promise<WorkspaceExportResult>;
+      readWorkspaceFile: (request: {
+        taskId: string;
+        revision: number;
+        relativePath: string;
+      }) => Promise<
+        | { ok: true; content: string }
+        | {
+            ok: false;
+            error: { code: string; message: string; retriable: boolean };
+          }
+      >;
+      openWorkspace: (request: {
+        taskId: string;
+        revision: number;
+      }) => Promise<{ ok: true } | { ok: false; error: string }>;
     };
   }
 }

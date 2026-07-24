@@ -282,6 +282,7 @@ function hasRequiredSelection(resources: PlannedResource[]) {
  */
 export function createInitialAgentState(): AgentState {
   return {
+    taskId: "unassigned",
     phase: "intake",
     revision: 0,
     task: "",
@@ -299,7 +300,9 @@ export function createInitialAgentState(): AgentState {
     workspace: {
       ready: false,
       files: handoffFiles,
-      nextAction: "等待任务输入。"
+      nextAction: "等待任务输入。",
+      exportStatus: "not_started",
+      fileRecords: []
     },
     planExplanation: null,
     taskRequirements: null,
@@ -338,16 +341,30 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
 
     case "SUBMIT_TASK": {
       const task = event.task.trim();
-      if (!task || state.phase === "downloading" || state.phase === "verifying") return state;
+      if (
+        !task ||
+        state.phase === "downloading" ||
+        state.phase === "verifying" ||
+        state.phase === "exporting"
+      ) {
+        return state;
+      }
       const initialState = createInitialAgentState();
 
       return withLog(
         {
           ...initialState,
+          taskId: event.taskId ?? `local-task-${state.logs.length + 1}`,
           task,
           phase: "routing",
           agentRun: { ...initialState.agentRun, status: "thinking" },
-          workspace: { ready: false, files: handoffFiles, nextAction: "等待路由判断。" }
+          workspace: {
+            ready: false,
+            files: handoffFiles,
+            nextAction: "等待路由判断。",
+            exportStatus: "not_started",
+            fileRecords: []
+          }
         },
         "info",
         "收到任务，正在依据 Windows 11 x64 系统画像执行路由判断。"
@@ -665,10 +682,15 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         );
       }
       const prepared = prepareDownloads(state.resources);
+      const resourcesReadyForExport =
+        state.resources.some((resource) => resource.selected) &&
+        state.resources.every(
+          (resource) => !resource.selected || resource.status === "verified"
+        );
       return withLog(
         {
           ...state,
-          phase: "downloading",
+          phase: resourcesReadyForExport ? "exporting" : "downloading",
           resources: prepared.resources,
           activeResourceId: prepared.activeResourceId,
           replanReason: null,
@@ -677,10 +699,19 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
           planValidation: currentPlanValidation,
           approvedRevision: state.revision,
           agentRun: { ...state.agentRun, step: 0, status: "executing" },
-          workspace: { ...state.workspace, nextAction: "等待资源下载和验证完成。" }
+          workspace: {
+            ...state.workspace,
+            exportStatus: resourcesReadyForExport ? "pending" : state.workspace.exportStatus,
+            exportError: undefined,
+            nextAction: resourcesReadyForExport
+              ? "审批已更新，等待重新导出工作区交接包。"
+              : "等待资源下载和验证完成。"
+          }
         },
         "success",
-        `用户确认资源计划 r${state.revision}，开始受控下载。`
+        resourcesReadyForExport
+          ? `用户重新确认资源计划 r${state.revision}，继续导出工作区。`
+          : `用户确认资源计划 r${state.revision}，开始受控下载。`
       );
     }
 
@@ -714,6 +745,48 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       if (state.phase !== "downloading" || state.activeResourceId !== event.resourceId) return state;
       return enterFailureResolution(state, event.resourceId, event.reason);
 
+    case "DOWNLOAD_APPROVAL_EXPIRED":
+      if (
+        state.phase !== "downloading" &&
+        state.phase !== "exporting" &&
+        state.phase !== "awaiting_export_retry"
+      ) {
+        return state;
+      }
+      return withLog(
+        {
+          ...state,
+          phase: "waiting_approval",
+          approvedRevision: null,
+          activeResourceId: null,
+          resources: state.resources.map((resource) =>
+            resource.selected &&
+            resource.status !== "downloaded" &&
+            resource.status !== "verified"
+              ? {
+                  ...resource,
+                  status: "pending" as ResourceStatus,
+                  progress: 0,
+                  failureReason: undefined
+                }
+              : resource
+          ),
+          agentRun: { ...state.agentRun, status: "waiting_approval" },
+          workspace: {
+            ...state.workspace,
+            ready: false,
+            exportStatus:
+              state.phase === "exporting" || state.phase === "awaiting_export_retry"
+                ? "pending"
+                : state.workspace.exportStatus,
+            exportError: undefined,
+            nextAction: "执行审批已过期，请重新确认当前 revision。"
+          }
+        },
+        "warning",
+        event.reason
+      );
+
     case "RESOLVE_DOWNLOAD_FAILURE": {
       if (state.phase !== "awaiting_failure_action") return state;
       const failedResource = state.resources.find((resource) => resource.status === "failed");
@@ -727,9 +800,10 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
             agentRun: { ...state.agentRun, status: "delegated" },
             workspace: {
               ready: false,
-              generatedAt: `mock-delegation-revision-${state.revision}`,
               files: handoffFiles,
-              nextAction: `Agent B 处理 ${failedResource.name}：${failedResource.failureReason ?? "下载失败"}`
+              nextAction: `Agent B 处理 ${failedResource.name}：${failedResource.failureReason ?? "下载失败"}`,
+              exportStatus: "not_started",
+              fileRecords: []
             }
           },
           "warning",
@@ -807,23 +881,127 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       return withLog(
         {
           ...state,
-          phase: "handoff",
+          phase: "exporting",
           resources: state.resources.map((resource) =>
             resource.selected && resource.status === "downloaded"
               ? { ...resource, status: "verified" as ResourceStatus }
               : resource
           ),
           workspace: {
-            ready: true,
-            generatedAt: `mock-session-revision-${state.revision}`,
+            ready: false,
             files: handoffFiles,
-            nextAction: "阅读 README.md，再执行 scripts/bootstrap.ps1。"
+            nextAction: "正在原子写入工作区交接包。",
+            exportStatus: "pending",
+            fileRecords: []
+          },
+          agentRun: { ...state.agentRun, status: "executing" }
+        },
+        "success",
+        "资源验证通过，开始生成真实工作区交接包。"
+      );
+    }
+
+    case "WORKSPACE_EXPORT_STARTED":
+      if (state.phase !== "exporting") return state;
+      return {
+        ...state,
+        workspace: {
+          ...state.workspace,
+          exportStatus: "exporting",
+          exportError: undefined
+        }
+      };
+
+    case "WORKSPACE_EXPORT_COMPLETED":
+      if (
+        state.phase !== "exporting" ||
+        event.output.taskId !== state.taskId ||
+        event.output.revision !== state.revision
+      ) {
+        return state;
+      }
+      return withLog(
+        {
+          ...state,
+          phase: "handoff",
+          workspace: {
+            ready: true,
+            generatedAt: event.output.generatedAt,
+            files: event.output.files.map((file) => file.relativePath),
+            nextAction: "阅读 README.md，再执行 scripts/bootstrap.ps1。",
+            exportStatus: "ready",
+            rootPath: event.output.rootPath,
+            fileRecords: event.output.files,
+            exportError: undefined
           },
           agentRun: { ...state.agentRun, status: "complete" }
         },
         "success",
-        "验证通过，已生成工作区交接包。"
+        `工作区交接包已原子写入 ${event.output.rootPath}。`
       );
+
+    case "WORKSPACE_EXPORT_FAILED":
+      if (state.phase !== "exporting") return state;
+      return withLog(
+        {
+          ...state,
+          phase: "awaiting_export_retry",
+          workspace: {
+            ...state.workspace,
+            ready: false,
+            exportStatus: "failed",
+            exportError: event.reason,
+            nextAction: "检查磁盘权限或目标目录后重试工作区导出。"
+          },
+          agentRun: { ...state.agentRun, status: "failed" }
+        },
+        "error",
+        `工作区交接包导出失败：${event.reason}`
+      );
+
+    case "RETRY_WORKSPACE_EXPORT":
+      if (state.phase !== "awaiting_export_retry") return state;
+      return withLog(
+        {
+          ...state,
+          phase: "exporting",
+          workspace: {
+            ...state.workspace,
+            exportStatus: "pending",
+            exportError: undefined,
+            nextAction: "正在重试原子写入工作区交接包。"
+          },
+          agentRun: { ...state.agentRun, status: "executing" }
+        },
+        "info",
+        "用户请求重试工作区交接包导出。"
+      );
+
+    case "TASK_STATE_RESTORED": {
+      if (state.phase !== "intake" || !event.state.task.trim()) return state;
+      const restored =
+        event.state.phase === "exporting"
+          ? {
+              ...event.state,
+              workspace: {
+                ...event.state.workspace,
+                exportStatus: "pending" as const,
+                exportError: undefined
+              }
+            }
+          : event.state;
+      if (
+        !event.approvalValid &&
+        (restored.phase === "downloading" ||
+          restored.phase === "exporting" ||
+          restored.phase === "awaiting_export_retry")
+      ) {
+        return transition(restored, {
+          type: "DOWNLOAD_APPROVAL_EXPIRED",
+          reason: "恢复任务时发现执行审批已过期，请重新确认当前 revision。"
+        });
+      }
+      return withLog(restored, "info", "已从 SQLite 恢复未完成任务。");
     }
 
     case "CANCEL_TASK":

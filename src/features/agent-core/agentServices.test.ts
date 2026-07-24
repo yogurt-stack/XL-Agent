@@ -24,6 +24,22 @@ function createApprovedState() {
   return transition(createWaitingApprovalState(), { type: "APPROVE_PLAN", revision: 1 });
 }
 
+function createExportingState(exportStatus: "pending" | "exporting" = "pending"): AgentState {
+  const approved = createApprovedState();
+  return {
+    ...approved,
+    phase: "exporting",
+    activeResourceId: null,
+    resources: approved.resources.map((resource) =>
+      resource.selected ? { ...resource, status: "verified" } : resource
+    ),
+    workspace: {
+      ...approved.workspace,
+      exportStatus
+    }
+  };
+}
+
 describe("default agent policy", () => {
   const policy = new DefaultAgentPolicy();
 
@@ -132,6 +148,28 @@ describe("default agent policy", () => {
       outcome: "deny",
       risk: "high"
     });
+  });
+
+  it("allows workspace export only for the verified current revision", () => {
+    const exporting = createExportingState();
+    const action: AgentAction = {
+      actionId: "workspace-export",
+      type: "call_tool",
+      purpose: "Export the approved workspace.",
+      call: {
+        callId: "workspace-export",
+        name: "export_workspace",
+        input: { taskId: exporting.taskId, revision: exporting.revision }
+      }
+    };
+
+    expect(policy.evaluate(action, exporting)).toMatchObject({
+      outcome: "allow",
+      risk: "medium"
+    });
+    expect(
+      policy.evaluate(action, { ...exporting, approvedRevision: null })
+    ).toMatchObject({ outcome: "deny", risk: "high" });
   });
 });
 
@@ -256,7 +294,7 @@ describe("in-memory agent tool executor", () => {
     const activeResource = approved.resources.find(
       (resource) => resource.id === approved.activeResourceId
     )!;
-    const toolsWithBridge = new InMemoryAgentToolExecutor(undefined, async (resourceId) => ({
+    const toolsWithBridge = new InMemoryAgentToolExecutor(undefined, async ({ resourceId }) => ({
       ok: true,
       output: {
         resourceId,
@@ -337,6 +375,49 @@ describe("in-memory agent tool executor", () => {
     expect(result).toMatchObject({
       status: "error",
       error: { code: "CHECKSUM_MISMATCH", retriable: true }
+    });
+  });
+
+  it("exports a verified approved workspace through the injected bridge", async () => {
+    const exporting = createExportingState("exporting");
+    const toolsWithExporter = new InMemoryAgentToolExecutor(
+      undefined,
+      undefined,
+      async ({ taskId, revision }) => ({
+        ok: true,
+        output: {
+          taskId,
+          revision,
+          rootPath: `/tmp/${taskId}/revision-${revision}`,
+          generatedAt: "test-static",
+          reusedExisting: false,
+          files: [
+            {
+              relativePath: "resource-manifest.json",
+              absolutePath: `/tmp/${taskId}/revision-${revision}/resource-manifest.json`,
+              bytesWritten: 42,
+              sha256: "a".repeat(64)
+            }
+          ]
+        }
+      })
+    );
+    const result = await toolsWithExporter.execute(
+      {
+        callId: "workspace-export",
+        name: "export_workspace",
+        input: { taskId: exporting.taskId, revision: exporting.revision }
+      },
+      exporting
+    );
+
+    expect(result).toMatchObject({
+      status: "success",
+      tool: "export_workspace",
+      output: {
+        taskId: exporting.taskId,
+        revision: exporting.revision
+      }
     });
   });
 });

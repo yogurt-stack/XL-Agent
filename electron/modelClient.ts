@@ -29,6 +29,7 @@ ModelDecision 顶层结构必须包含：
 - "search_trusted_catalog"
 - "simulate_download"
 - "controlled_download"
+- "export_workspace"
 
 字段名、action.type、工具名、strategy 值必须使用上述英文原值，不要翻译。
 
@@ -85,6 +86,11 @@ resourceIds 可以省略，但 query 必须存在。
 如果 call.name 是 "controlled_download"，input 必须包含：
 {
   "resourceId": "string"
+}
+如果 call.name 是 "export_workspace"，input 必须包含：
+{
+  "taskId": "string",
+  "revision": 1
 }
 
 当 action.type 是 "finish" 时，action 必须包含：

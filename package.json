@@ -15,22 +15,25 @@
     "verify:agent-core": "node scripts/verify-agent-core.mjs",
     "verify:electron-renderer": "npm run build && electron scripts/verify-electron-renderer.cjs",
     "verify:download-client": "node scripts/verify-download-client.mjs",
+    "verify:persistence": "node scripts/verify-persistence.mjs",
     "verify:model-client": "node scripts/verify-model-client.mjs",
     "verify:production-build": "npm run build && node scripts/verify-production-build.mjs",
-    "verify:ci": "npm run typecheck && npm run test:coverage && npm run verify:agent-core && npm run verify:model-client && npm run verify:download-client && npm run verify:production-build",
+    "verify:ci": "npm run typecheck && npm run test:coverage && npm run verify:agent-core && npm run verify:model-client && npm run verify:download-client && npm run verify:persistence && npm run verify:production-build",
     "preview": "npm run build && electron ."
   },
   "dependencies": {
     "dotenv": "^17.4.2",
     "lucide-react": "^0.468.0",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "sql.js": "^1.14.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
     "@types/node": "^20.11.30",
     "@types/react": "^18.2.66",
     "@types/react-dom": "^18.2.22",
+    "@types/sql.js": "^1.4.11",
     "@vitejs/plugin-react-swc": "^3.11.0",
     "@vitest/coverage-v8": "^3.2.7",
     "axe-core": "^4.12.1",

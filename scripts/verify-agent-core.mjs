@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputDir = path.join(tmpdir(), "xunlei-agent-core-verify");
 const tscBin = path.join(root, "node_modules", ".bin", process.platform === "win32" ? "tsc.cmd" : "tsc");
-const coreFiles = ["types.ts", "catalog.ts", "taskRequirements.ts", "planValidation.ts", "machine.ts", "interfaces.ts", "agentServices.ts", "mockServices.ts", "localRuleModel.ts", "modelConnection.ts", "remoteModel.ts", "runtime.ts", "manifest.ts"].map((file) =>
+const coreFiles = ["types.ts", "catalog.ts", "taskRequirements.ts", "planValidation.ts", "machine.ts", "interfaces.ts", "agentServices.ts", "mockServices.ts", "localRuleModel.ts", "modelConnection.ts", "remoteModel.ts", "runtime.ts", "manifest.ts", "persistence.ts"].map((file) =>
   path.join("src", "features", "agent-core", file)
 );
 

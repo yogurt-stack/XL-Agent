@@ -20,7 +20,8 @@ import type {
   AgentToolCall,
   AgentToolName,
   ControlledDownloadOutput,
-  SimulatedDownloadOutput
+  SimulatedDownloadOutput,
+  WorkspaceExportOutput
 } from "./types";
 
 export type RuntimeDownloadTool = Extract<
@@ -39,6 +40,7 @@ export type AgentRuntimeDependencies = {
   initialState?: AgentState;
   stepDelayMs?: number;
   downloadTool?: RuntimeDownloadTool;
+  createTaskId?: () => string;
 };
 
 export class AgentRuntime implements AgentRuntimePort {
@@ -51,11 +53,15 @@ export class AgentRuntime implements AgentRuntimePort {
   private toolStepRunning = false;
   private readonly stepDelayMs: number;
   private readonly downloadTool: RuntimeDownloadTool;
+  private readonly createTaskId: () => string;
 
   constructor(private readonly dependencies: AgentRuntimeDependencies) {
     this.state = dependencies.initialState ?? createInitialAgentState();
     this.stepDelayMs = dependencies.stepDelayMs ?? 420;
     this.downloadTool = dependencies.downloadTool ?? "simulate_download";
+    this.createTaskId =
+      dependencies.createTaskId ??
+      (() => `task-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
   }
 
   getState() {
@@ -64,7 +70,11 @@ export class AgentRuntime implements AgentRuntimePort {
 
   dispatch(event: AgentEvent) {
     this.invalidatePendingWork();
-    this.applyEvent(event);
+    this.applyEvent(
+      event.type === "SUBMIT_TASK" && !event.taskId
+        ? { ...event, taskId: this.createTaskId() }
+        : event
+    );
     this.drive();
     return this.state;
   }
@@ -123,6 +133,16 @@ export class AgentRuntime implements AgentRuntimePort {
       return;
     }
 
+    if (this.state.phase === "exporting" && this.state.workspace.exportStatus === "pending") {
+      const version = this.workVersion;
+      this.cancelScheduledStep = this.dependencies.scheduler.schedule(async () => {
+        this.cancelScheduledStep = null;
+        if (!this.started || version !== this.workVersion) return;
+        await this.runWorkspaceExportToolStep(version);
+      }, this.stepDelayMs);
+      return;
+    }
+
     const event = this.nextAutomaticEvent();
     if (!event) return;
 
@@ -147,7 +167,12 @@ export class AgentRuntime implements AgentRuntimePort {
         state: this.state,
         step: this.state.agentRun.step,
         maxSteps: this.state.agentRun.maxSteps,
-        availableTools: ["read_system_profile", "search_trusted_catalog", this.downloadTool],
+        availableTools: [
+          "read_system_profile",
+          "search_trusted_catalog",
+          this.downloadTool,
+          "export_workspace"
+        ],
         toolResults: this.state.agentRun.toolResults
       });
       if (!this.isCurrentWork(version)) return;
@@ -254,6 +279,16 @@ export class AgentRuntime implements AgentRuntimePort {
       this.applyEvent({ type: "MODEL_TOOL_COMPLETED", result });
 
       if (result.status === "error") {
+        if (
+          result.error?.code === "APPROVAL_EXPIRED" ||
+          result.error?.code === "APPROVAL_NOT_FOUND"
+        ) {
+          this.applyEvent({
+            type: "DOWNLOAD_APPROVAL_EXPIRED",
+            reason: result.error.message
+          });
+          return;
+        }
         if (result.error?.retriable) {
           this.applyEvent({
             type: "DOWNLOAD_FAILED",
@@ -290,6 +325,74 @@ export class AgentRuntime implements AgentRuntimePort {
           progress: result.output.progress
         });
       }
+    } finally {
+      this.toolStepRunning = false;
+      if (this.isCurrentWork(version)) this.drive();
+    }
+  }
+
+  private async runWorkspaceExportToolStep(version: number) {
+    const callId = `workspace-export-${this.state.taskId}-r${this.state.revision}`;
+    const action: Extract<AgentAction, { type: "call_tool" }> = {
+      actionId: `runtime-${callId}`,
+      type: "call_tool",
+      purpose: "原子写入用户已审批并完成校验的工作区交接包。",
+      call: {
+        callId,
+        name: "export_workspace",
+        input: {
+          taskId: this.state.taskId,
+          revision: this.state.revision
+        }
+      }
+    };
+
+    this.toolStepRunning = true;
+    try {
+      const policyDecision = this.dependencies.policy.evaluate(action, this.state);
+      this.applyEvent({
+        type: "MODEL_POLICY_RECORDED",
+        actionId: action.actionId,
+        decision: policyDecision
+      });
+      if (policyDecision.outcome !== "allow") {
+        this.applyEvent({ type: "WORKSPACE_EXPORT_FAILED", reason: policyDecision.reason });
+        return;
+      }
+
+      this.applyEvent({ type: "WORKSPACE_EXPORT_STARTED" });
+      const result = await this.dependencies.tools.execute(action.call, this.state);
+      if (!this.isCurrentWork(version)) return;
+      this.applyEvent({ type: "MODEL_TOOL_COMPLETED", result });
+      if (result.status === "error") {
+        if (
+          result.error?.code === "APPROVAL_EXPIRED" ||
+          result.error?.code === "APPROVAL_NOT_FOUND"
+        ) {
+          this.applyEvent({
+            type: "DOWNLOAD_APPROVAL_EXPIRED",
+            reason: result.error.message
+          });
+          return;
+        }
+        this.applyEvent({
+          type: "WORKSPACE_EXPORT_FAILED",
+          reason: result.error?.message ?? "工作区导出工具执行失败。"
+        });
+        return;
+      }
+      if (
+        !isWorkspaceExportOutput(result.output) ||
+        result.output.taskId !== this.state.taskId ||
+        result.output.revision !== this.state.revision
+      ) {
+        this.applyEvent({
+          type: "WORKSPACE_EXPORT_FAILED",
+          reason: "工作区导出工具返回了非法结果。"
+        });
+        return;
+      }
+      this.applyEvent({ type: "WORKSPACE_EXPORT_COMPLETED", output: result.output });
     } finally {
       this.toolStepRunning = false;
       if (this.isCurrentWork(version)) this.drive();
@@ -343,6 +446,19 @@ function isControlledDownloadOutput(value: unknown): value is ControlledDownload
     typeof output.sha256 === "string" &&
     typeof output.tempFilePath === "string" &&
     typeof output.elapsedMs === "number"
+  );
+}
+
+function isWorkspaceExportOutput(value: unknown): value is WorkspaceExportOutput {
+  if (typeof value !== "object" || value === null) return false;
+  const output = value as Record<string, unknown>;
+  return (
+    typeof output.taskId === "string" &&
+    typeof output.revision === "number" &&
+    typeof output.rootPath === "string" &&
+    typeof output.generatedAt === "string" &&
+    typeof output.reusedExisting === "boolean" &&
+    Array.isArray(output.files)
   );
 }
 

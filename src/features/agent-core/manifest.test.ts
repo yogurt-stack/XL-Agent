@@ -28,7 +28,23 @@ describe("resource manifest", () => {
         resource.selected ? { ...resource, status: "downloaded", progress: 100 } : resource
       )
     };
-    const handoff = transition(verifying, { type: "VERIFY_RESOURCES" });
+    const exporting = transition(verifying, { type: "VERIFY_RESOURCES" });
+    const handoff = transition(exporting, {
+      type: "WORKSPACE_EXPORT_COMPLETED",
+      output: {
+        taskId: exporting.taskId,
+        revision: exporting.revision,
+        rootPath: "/tmp/workspace",
+        generatedAt: "2026-07-24T00:00:00.000Z",
+        reusedExisting: false,
+        files: exporting.workspace.files.map((relativePath) => ({
+          relativePath,
+          absolutePath: `/tmp/workspace/${relativePath}`,
+          bytesWritten: 1,
+          sha256: "0".repeat(64)
+        }))
+      }
+    });
     const manifest = createResourceManifest(handoff);
 
     expect(manifest).toMatchObject({
