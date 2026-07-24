@@ -3,6 +3,9 @@ const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
 const testApiKey = "renderer-smoke-secret";
+const expectedElectronMajor = Number(
+  require(path.join(root, "package.json")).devDependencies.electron.match(/\d+/)?.[0]
+);
 
 ipcMain.handle("agent:modelConnectionInfo", () => ({
   ok: true,
@@ -224,11 +227,18 @@ app.whenReady().then(async () => {
     `);
 
     if (result.title !== "迅雷 AI Task Agent") throw new Error("Production renderer title is incorrect.");
+    if (Number(process.versions.electron.split(".")[0]) !== expectedElectronMajor) {
+      throw new Error(
+        `Electron major mismatch: expected ${expectedElectronMajor}, received ${process.versions.electron}.`
+      );
+    }
     if (!result.settingsVisible || !result.modelVisible || !result.remoteAvailable || !result.strictPlanApproved) {
       throw new Error("Renderer smoke assertions failed.");
     }
     if (result.bodyText.includes(testApiKey)) throw new Error("Renderer exposed the API key.");
-    console.log("Electron renderer passed: settings, strict plan approval and safe metadata verified");
+    console.log(
+      `Electron ${process.versions.electron} renderer passed: settings, strict plan approval and safe metadata verified`
+    );
   } catch (error) {
     console.error(error);
     exitCode = 1;

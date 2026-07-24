@@ -44,6 +44,18 @@ export type TaskStoreOptions = {
   now?: () => number;
 };
 
+export const TASK_STORE_SCHEMA_VERSION = 1;
+
+export type TaskStoreSchemaInfo = {
+  version: number;
+  supportedVersion: number;
+  migrations: Array<{
+    version: number;
+    name: string;
+    appliedAt: string;
+  }>;
+};
+
 const terminalPhases = new Set(["intake", "handoff", "cancelled"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -110,6 +122,110 @@ function asNumber(value: SqlValue | undefined) {
   return typeof value === "number" ? value : null;
 }
 
+type SchemaMigration = {
+  version: number;
+  name: string;
+  up(database: Database): void;
+};
+
+const schemaMigrations: SchemaMigration[] = [
+  {
+    version: 1,
+    name: "initial-task-persistence",
+    up(database) {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS task_snapshots (
+          task_id TEXT PRIMARY KEY,
+          phase TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          approved_revision INTEGER,
+          state_json TEXT NOT NULL,
+          tool_results_json TEXT NOT NULL,
+          policy_audit_json TEXT NOT NULL,
+          recovery_context_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS approval_records (
+          task_id TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          actor TEXT NOT NULL,
+          approved_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          status TEXT NOT NULL,
+          PRIMARY KEY (task_id, revision)
+        );
+        CREATE TABLE IF NOT EXISTS workspace_exports (
+          task_id TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          root_path TEXT NOT NULL,
+          output_json TEXT NOT NULL,
+          exported_at TEXT NOT NULL,
+          PRIMARY KEY (task_id, revision)
+        );
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          version INTEGER PRIMARY KEY,
+          name TEXT NOT NULL,
+          applied_at TEXT NOT NULL
+        );
+      `);
+    }
+  }
+];
+
+function readSchemaVersion(database: Database) {
+  const row = firstRow(database, "PRAGMA user_version");
+  return row ? asNumber(row.user_version) ?? 0 : 0;
+}
+
+function migrateSchema(database: Database, appliedAt: string) {
+  const definitionsAreSequential =
+    schemaMigrations.length === TASK_STORE_SCHEMA_VERSION &&
+    schemaMigrations.every(
+      (migration, index) => migration.version === index + 1
+    );
+  if (!definitionsAreSequential) {
+    throw new Error(
+      `SQLite task store migrations must define every version from v1 to v${TASK_STORE_SCHEMA_VERSION}.`
+    );
+  }
+
+  database.run("PRAGMA foreign_keys = ON");
+  const fromVersion = readSchemaVersion(database);
+  if (fromVersion > TASK_STORE_SCHEMA_VERSION) {
+    throw new Error(
+      `SQLite task store schema v${fromVersion} is newer than supported v${TASK_STORE_SCHEMA_VERSION}.`
+    );
+  }
+
+  const appliedVersions: number[] = [];
+  for (const migration of schemaMigrations) {
+    if (migration.version <= fromVersion) continue;
+    database.run("BEGIN IMMEDIATE");
+    try {
+      migration.up(database);
+      database.run(
+        `INSERT OR REPLACE INTO schema_migrations (version, name, applied_at)
+         VALUES (?, ?, ?)`,
+        [migration.version, migration.name, appliedAt]
+      );
+      database.run(`PRAGMA user_version = ${migration.version}`);
+      database.run("COMMIT");
+      appliedVersions.push(migration.version);
+    } catch (error) {
+      database.run("ROLLBACK");
+      throw error;
+    }
+  }
+
+  const toVersion = readSchemaVersion(database);
+  if (toVersion !== TASK_STORE_SCHEMA_VERSION) {
+    throw new Error(
+      `SQLite task store migration stopped at v${toVersion}; expected v${TASK_STORE_SCHEMA_VERSION}.`
+    );
+  }
+  return { fromVersion, toVersion, appliedVersions };
+}
+
 export class TaskStore {
   private operationQueue: Promise<unknown> = Promise.resolve();
 
@@ -132,42 +248,18 @@ export class TaskStore {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     const database = data ? new SQL.Database(data) : new SQL.Database();
-    database.run(`
-      PRAGMA foreign_keys = ON;
-      CREATE TABLE IF NOT EXISTS task_snapshots (
-        task_id TEXT PRIMARY KEY,
-        phase TEXT NOT NULL,
-        revision INTEGER NOT NULL,
-        approved_revision INTEGER,
-        state_json TEXT NOT NULL,
-        tool_results_json TEXT NOT NULL,
-        policy_audit_json TEXT NOT NULL,
-        recovery_context_json TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS approval_records (
-        task_id TEXT NOT NULL,
-        revision INTEGER NOT NULL,
-        actor TEXT NOT NULL,
-        approved_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        status TEXT NOT NULL,
-        PRIMARY KEY (task_id, revision)
-      );
-      CREATE TABLE IF NOT EXISTS workspace_exports (
-        task_id TEXT NOT NULL,
-        revision INTEGER NOT NULL,
-        root_path TEXT NOT NULL,
-        output_json TEXT NOT NULL,
-        exported_at TEXT NOT NULL,
-        PRIMARY KEY (task_id, revision)
-      );
-    `);
-    const store = new TaskStore(database, {
+    const resolvedOptions = {
       databasePath: options.databasePath,
       approvalTtlMs: options.approvalTtlMs ?? 30 * 60 * 1000,
       now: options.now ?? Date.now
-    });
+    };
+    try {
+      migrateSchema(database, new Date(resolvedOptions.now()).toISOString());
+    } catch (error) {
+      database.close();
+      throw error;
+    }
+    const store = new TaskStore(database, resolvedOptions);
     await store.persist();
     return store;
   }
@@ -410,6 +502,35 @@ export class TaskStore {
       return outputJson
         ? (JSON.parse(outputJson) as WorkspaceExportOutput)
         : null;
+    });
+  }
+
+  async getSchemaInfo(): Promise<TaskStoreSchemaInfo> {
+    return this.enqueue(() => {
+      const statement = this.database.prepare(
+        `SELECT version, name, applied_at
+         FROM schema_migrations
+         ORDER BY version`
+      );
+      const migrations: TaskStoreSchemaInfo["migrations"] = [];
+      try {
+        while (statement.step()) {
+          const row = statement.getAsObject();
+          const version = asNumber(row.version);
+          const name = asString(row.name);
+          const appliedAt = asString(row.applied_at);
+          if (version !== null && name && appliedAt) {
+            migrations.push({ version, name, appliedAt });
+          }
+        }
+      } finally {
+        statement.free();
+      }
+      return {
+        version: readSchemaVersion(this.database),
+        supportedVersion: TASK_STORE_SCHEMA_VERSION,
+        migrations
+      };
     });
   }
 

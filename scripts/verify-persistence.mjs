@@ -5,7 +5,8 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
-  rmSync
+  rmSync,
+  writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -42,7 +43,12 @@ const compilation = spawnSync(
 if (compilation.status !== 0) process.exit(compilation.status ?? 1);
 
 const require = createRequire(import.meta.url);
-const { TaskStore } = require(path.join(outputDir, "taskStore.js"));
+const {
+  TaskStore,
+  TASK_STORE_SCHEMA_VERSION
+} = require(path.join(outputDir, "taskStore.js"));
+const initSqlJs = require("sql.js/dist/sql-asm.js");
+const SQL = await initSqlJs();
 const {
   exportWorkspace,
   toWorkspaceExportError
@@ -222,6 +228,17 @@ try {
     approvalTtlMs: 1_000,
     now: () => nowMs
   });
+  const freshSchema = await store.getSchemaInfo();
+  assert(
+    freshSchema.version === TASK_STORE_SCHEMA_VERSION &&
+      freshSchema.supportedVersion === TASK_STORE_SCHEMA_VERSION,
+    "Fresh task stores must be migrated to the current schema version"
+  );
+  assert(
+    freshSchema.migrations.length === 1 &&
+      freshSchema.migrations[0].name === "initial-task-persistence",
+    "Fresh task stores must record the initial schema migration"
+  );
   await store.saveSnapshot(exportSnapshot);
   const activeApproval = await store.hasValidApproval(
     exportSnapshot.taskId,
@@ -297,8 +314,61 @@ try {
     "Completed handoff tasks must not auto-restore"
   );
   await reopened.close();
+
+  const legacyDatabasePath = path.join(verifyRoot, "legacy-agent-tasks.sqlite");
+  const legacyDatabase = new SQL.Database(readFileSync(databasePath));
+  legacyDatabase.run(`
+    PRAGMA user_version = 0;
+    DROP TABLE schema_migrations;
+  `);
+  writeFileSync(legacyDatabasePath, legacyDatabase.export());
+  legacyDatabase.close();
+
+  const migratedLegacyStore = await TaskStore.open({
+    databasePath: legacyDatabasePath,
+    approvalTtlMs: 1_000,
+    now: () => nowMs
+  });
+  const migratedSchema = await migratedLegacyStore.getSchemaInfo();
+  assert(
+    migratedSchema.version === TASK_STORE_SCHEMA_VERSION &&
+      migratedSchema.migrations.some(
+        (migration) => migration.version === TASK_STORE_SCHEMA_VERSION
+      ),
+    "An unversioned legacy database must migrate to the current schema"
+  );
+  assert(
+    (await migratedLegacyStore.getTaskState(exportSnapshot.taskId))?.taskId ===
+      exportSnapshot.taskId,
+    "Legacy schema migration must preserve existing task data"
+  );
+  await migratedLegacyStore.close();
+
+  const futureDatabasePath = path.join(verifyRoot, "future-agent-tasks.sqlite");
+  const futureDatabase = new SQL.Database(readFileSync(legacyDatabasePath));
+  futureDatabase.run(
+    `PRAGMA user_version = ${TASK_STORE_SCHEMA_VERSION + 1}`
+  );
+  writeFileSync(futureDatabasePath, futureDatabase.export());
+  futureDatabase.close();
+
+  let futureSchemaRejected = false;
+  try {
+    const unsupportedStore = await TaskStore.open({
+      databasePath: futureDatabasePath
+    });
+    await unsupportedStore.close();
+  } catch (error) {
+    futureSchemaRejected =
+      error instanceof Error &&
+      error.message.includes("newer than supported");
+  }
+  assert(
+    futureSchemaRejected,
+    "A database from a newer application version must be rejected without downgrade"
+  );
 } finally {
   rmSync(verifyRoot, { force: true, recursive: true });
 }
 
-console.log("Persistence passed: atomic workspace export, SQLite recovery, audit data and approval expiry verified");
+console.log("Persistence passed: atomic export, SQLite schema migration, recovery, audit and approval expiry verified");
