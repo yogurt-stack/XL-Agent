@@ -2,7 +2,7 @@
 
 一个基于 Electron + React + TypeScript + Vite 的桌面端高保真交互 Demo。
 
-它模拟“用户用自然语言描述目标，Agent 路由并澄清需求，生成可信资源计划，经用户确认后模拟下载、验证、重规划并生成可交接工作区”的流程。当前会由 Electron 主进程只读采集脱敏主机画像；所有资源、下载进度、失败重试和 Manifest 仍在前端内存中模拟，不会真实下载或写入文件。默认本地模型不发起网络请求；只有显式配置可选远程 LLM 时才会由 Electron 主进程访问指定 HTTPS 端点。
+它实现“用户用自然语言描述目标，Agent 路由并澄清需求，生成可信资源计划，经用户确认后受控下载、验证、重规划并生成可交接工作区”的流程。Electron 主进程负责只读采集脱敏主机画像、可信资源下载、工作区原子导出和 SQLite 任务持久化；renderer 不能直接访问 Node、文件系统或数据库。默认本地模型不发起网络请求；只有显式配置可选远程 LLM 时才会由 Electron 主进程访问指定 HTTPS 端点。
 
 ## 技术栈
 
@@ -20,6 +20,8 @@
 - Electron 主进程只读采集脱敏主机画像，不暴露用户名、主机名、Home 路径、环境变量或完整 shell 路径
 - ToolResult 按工具聚合、错误自动展开和键盘可达的执行日志
 - 基于任务能力、依赖、目标系统、来源、授权和 revision 的严格计划验证
+- 基于 SQLite 的任务快照、审批记录和工作区导出记录
+- 只读历史任务列表与详情查阅，不影响当前 Agent 状态机
 
 ## 启动
 
@@ -59,9 +61,9 @@ npm run test:coverage
 
 覆盖率产物写入 `coverage/`，不会进入版本管理。现有 `verify:*` 脚本在正式测试迁移完成前继续作为综合回归基线。
 
-当前正式测试按职责覆盖严格计划验证、状态机 revision 审批、Policy/Tool 边界、系统画像契约、Runtime 下载失败恢复以及成功或未完成的 Manifest 交接。每类规则使用独立测试文件，便于直接定位回归所在层级。
+当前正式测试按职责覆盖严格计划验证、状态机 revision 审批、Policy/Tool 边界、系统画像契约、Runtime 下载失败恢复、历史任务返回值校验以及成功或未完成的 Manifest 交接。每类规则使用独立测试文件，便于直接定位回归所在层级。
 
-Electron 端到端测试使用 production renderer、真实 preload 和本地规则模型，覆盖首页到交接以及三个失败处置按钮：
+Electron 端到端测试使用 production renderer、真实 preload、本地规则模型和临时 SQLite，覆盖首页到交接、三个失败处置按钮、重启恢复、审批过期和历史任务查阅：
 
 ```bash
 npm run test:e2e
@@ -74,7 +76,7 @@ E2E 固定单 worker 运行，显式禁用远程模型配置，并向真实 Elec
 GitHub Actions 会在推送到 `main`、针对 `main` 的 Pull Request 以及手动触发时运行两个独立 Job：
 
 - `quality`：类型检查、Vitest 覆盖率、Agent Core、模型客户端和 production build。
-- `electron-e2e`：在 Linux Xvfb 环境中运行三个 Electron 失败恢复场景、无障碍扫描和五个视觉基线比较。
+- `electron-e2e`：在 Linux Xvfb 环境中运行 Electron 状态机、恢复、历史查阅、无障碍扫描和五个视觉基线比较。
 
 本地可以运行与快速质量门禁相同的命令：
 
@@ -119,6 +121,19 @@ npm run verify:electron-renderer
 
 当前可信目录仍只覆盖 Windows 11 x64 目标资源，因此计划校验继续使用锁定的 Windows 目标画像。真实主机画像用于证明只读采集和脱敏边界，不会把当前 macOS/Linux 运行机直接变成资源计划目标。
 
+## SQLite 与历史任务
+
+Electron 主进程使用 `sql.js` 将任务数据写入 `agent-tasks.sqlite`。默认位置是 Electron `userData` 目录，也可通过 `XL_AGENT_TASK_STORE_PATH` 指定绝对路径。当前 schema v1 包含：
+
+- `task_snapshots`：每个 task ID 最近一次完整状态快照。
+- `approval_records`：按 task ID 和 revision 保存的本地用户审批。
+- `workspace_exports`：按 task ID 和 revision 保存的工作区导出结果。
+- `schema_migrations`：数据库迁移版本和执行记录。
+
+侧边栏“历史”页面会按最近保存时间倒序读取任务，显示最新阶段、资源进度、审批、工作区导出、模型/工具审计和运行日志。该页面只有查询权限，不会恢复旧快照、切换当前任务、删除数据或触发模型与工具。
+
+历史任务在当前版本中表示“每个任务的最新快照”，不是每次状态转换的完整事件流。实现与后续边界见 [`docs/task-history-implementation-plan-2026-07-25.md`](docs/task-history-implementation-plan-2026-07-25.md)。
+
 ## Agent Runtime 接口
 
 React 不再自行维护计时器或自动状态流转；它只订阅 `AgentRuntime` 的状态并派发用户事件。运行时接口位于 `src/features/agent-core/interfaces.ts`，固定 Mock 实现位于 `mockServices.ts`。
@@ -150,6 +165,7 @@ xunlei-ai-task-agent/
   src/
     components/
     features/agent-core/
+    features/task-history/
     styles/
     types/
     App.tsx

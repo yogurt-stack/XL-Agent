@@ -102,6 +102,59 @@ type TaskRestoreResult =
       error: { code: string; message: string; retriable: boolean };
     };
 
+type TaskHistorySummary = {
+  taskId: string;
+  task: string;
+  phase: string;
+  revision: number;
+  approvedRevision: number | null;
+  updatedAt: string;
+  resourceCount: number;
+  verifiedResourceCount: number;
+  workspaceReady: boolean;
+  hasErrors: boolean;
+};
+
+type TaskHistoryDetail = {
+  summary: TaskHistorySummary;
+  state: unknown;
+  approvals: Array<{
+    taskId: string;
+    revision: number;
+    actor: "local-user";
+    approvedAt: string;
+    expiresAt: string;
+    status: "active" | "expired" | "revoked";
+  }>;
+  workspaceExports: Array<{
+    taskId: string;
+    revision: number;
+    rootPath: string;
+    generatedAt: string;
+    reusedExisting: boolean;
+    files: Array<{
+      relativePath: string;
+      absolutePath: string;
+      bytesWritten: number;
+      sha256: string;
+    }>;
+  }>;
+};
+
+type TaskHistoryError = {
+  code: "TASK_HISTORY_INVALID_REQUEST" | "TASK_HISTORY_READ_FAILED";
+  message: string;
+  retriable: boolean;
+};
+
+type TaskHistoryListResult =
+  | { ok: true; history: TaskHistorySummary[] }
+  | { ok: false; error: TaskHistoryError };
+
+type TaskHistoryDetailResult =
+  | { ok: true; detail: TaskHistoryDetail | null }
+  | { ok: false; error: TaskHistoryError };
+
 type WorkspaceExportResult =
   | {
       ok: true;
@@ -144,6 +197,10 @@ contextBridge.exposeInMainWorld("xunleiAgent", {
     ipcRenderer.invoke("agent:saveTaskState", state) as Promise<TaskPersistenceResult>,
   loadTaskState: () =>
     ipcRenderer.invoke("agent:loadTaskState") as Promise<TaskRestoreResult>,
+  listTaskHistory: (limit = 50) =>
+    ipcRenderer.invoke("agent:listTaskHistory", { limit }) as Promise<TaskHistoryListResult>,
+  getTaskHistoryDetail: (taskId: string) =>
+    ipcRenderer.invoke("agent:getTaskHistoryDetail", { taskId }) as Promise<TaskHistoryDetailResult>,
   flushTaskPersistence: () =>
     ipcRenderer.invoke("agent:flushTaskPersistence") as Promise<{ ok: true }>,
   exportWorkspace: (request: { taskId: string; revision: number }) =>

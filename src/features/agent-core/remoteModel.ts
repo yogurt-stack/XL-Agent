@@ -90,7 +90,31 @@ export class RemoteLlmModelRuntime implements ModelRuntime {
   constructor(private readonly transport: RemoteModelTransport) {}
 
   async decide(context: ModelContext): Promise<ModelDecision> {
-    return parseRemoteDecision(await this.transport.requestDecision(context));
+    const decision = parseRemoteDecision(
+      await this.transport.requestDecision(context)
+    );
+    const action = decision.action;
+    const readOnlyToolName =
+      action.type === "call_tool" &&
+      (action.call.name === "read_system_profile" ||
+        action.call.name === "search_trusted_catalog")
+        ? action.call.name
+        : null;
+    const repeatedReadOnlyTool =
+      readOnlyToolName !== null &&
+      context.toolResults.some(
+        (result) =>
+          result.tool === readOnlyToolName &&
+          result.status === "success"
+      );
+    if (repeatedReadOnlyTool) {
+      throw new ModelConnectionRequestError({
+        code: "MODEL_INVALID_DECISION",
+        message: `远程模型重复调用已成功的 ${readOnlyToolName}，已切换本地规则模型继续规划。`,
+        retriable: true
+      });
+    }
+    return decision;
   }
 }
 

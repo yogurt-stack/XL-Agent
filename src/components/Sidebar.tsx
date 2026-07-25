@@ -3,13 +3,21 @@ import {
   ClipboardCheck,
   DownloadCloud,
   Home,
+  History,
   ListChecks,
   Settings,
   Zap
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
-export type AppView = "home" | "clarification" | "plan" | "execution" | "workspace" | "settings";
+export type AppView =
+  | "home"
+  | "clarification"
+  | "plan"
+  | "execution"
+  | "workspace"
+  | "history"
+  | "settings";
 
 type AvailableNavItem = {
   key: AppView;
@@ -26,6 +34,7 @@ const navItems: NavItem[] = [
   { key: "plan", label: "计划", icon: ListChecks, available: true },
   { key: "execution", label: "执行", icon: DownloadCloud, available: true },
   { key: "workspace", label: "工作区", icon: FolderKanban, available: true },
+  { key: "history", label: "历史", icon: History, available: true },
   { key: "settings", label: "设置", icon: Settings, available: true }
 ];
 

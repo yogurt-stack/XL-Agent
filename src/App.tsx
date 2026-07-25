@@ -9,7 +9,9 @@ import {
   WorkspaceView
 } from "./components/AgentViews";
 import { Sidebar, type AppView } from "./components/Sidebar";
+import { TaskHistoryView } from "./components/TaskHistoryView";
 import { useAgentCore } from "./features/agent-core/useAgentCore";
+import { useTaskHistory } from "./features/task-history/useTaskHistory";
 
 export function App() {
   const {
@@ -18,10 +20,12 @@ export function App() {
     modelConnectionState,
     persistenceState,
     testModelConnection,
+    retryTaskLocally,
     readWorkspaceFile,
     openWorkspace
   } = useAgentCore();
   const [activeView, setActiveView] = useState<AppView>("home");
+  const historyState = useTaskHistory(activeView === "history");
   const mainPanelRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
@@ -37,10 +41,11 @@ export function App() {
       <AgentTopBar modelConnection={modelConnectionState} state={state} />
       <main className="main-panel" ref={mainPanelRef}>
         {activeView === "home" && <AgentHomeView dispatch={dispatch} state={state} onNavigate={setActiveView} />}
-        {activeView === "clarification" && <ClarificationView dispatch={dispatch} state={state} onNavigate={setActiveView} />}
+        {activeView === "clarification" && <ClarificationView dispatch={dispatch} state={state} onNavigate={setActiveView} onRetryLocally={retryTaskLocally} />}
         {activeView === "plan" && <ResourcePlanView dispatch={dispatch} state={state} onNavigate={setActiveView} />}
         {activeView === "execution" && <ExecutionView dispatch={dispatch} state={state} onNavigate={setActiveView} modelConnection={modelConnectionState} />}
         {activeView === "workspace" && <WorkspaceView dispatch={dispatch} onOpenWorkspace={openWorkspace} onReadFile={readWorkspaceFile} state={state} />}
+        {activeView === "history" && <TaskHistoryView historyState={historyState} />}
         {activeView === "settings" && <SettingsView modelConnection={modelConnectionState} onTestConnection={testModelConnection} persistence={persistenceState} state={state} />}
       </main>
     </div>

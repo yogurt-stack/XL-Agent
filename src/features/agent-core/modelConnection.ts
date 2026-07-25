@@ -19,6 +19,7 @@ export type ModelConnectionErrorCode =
   | "MODEL_INVALID_RESPONSE"
   | "MODEL_INVALID_JSON"
   | "MODEL_INVALID_DECISION"
+  | "MODEL_LOCAL_OVERRIDE"
   | "MODEL_UNKNOWN_ERROR";
 
 export type ModelConnectionError = {
@@ -196,6 +197,24 @@ export class ModelConnectionController {
           this.state.status === "checking" ||
           this.state.status === "remote_available")
     );
+  }
+
+  useLocalModel(
+    message = "用户选择使用本地规则模型重新开始任务。"
+  ) {
+    this.operationVersion += 1;
+    this.update({
+      ...this.state,
+      status: "fallback_local",
+      activeProvider: "local-rule",
+      error: {
+        code: "MODEL_LOCAL_OVERRIDE",
+        message,
+        retriable: true
+      },
+      lastCheckedAt: this.now()
+    });
+    return this.state;
   }
 
   recordRemoteSuccess(decision: ModelDecision) {

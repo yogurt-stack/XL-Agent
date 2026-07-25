@@ -1,6 +1,7 @@
 import { trustedCatalog } from "./catalog";
 import type { AgentPolicy, AgentToolExecutor } from "./interfaces";
 import { createSystemProfileToolOutput } from "./systemProfile";
+import { resourceIdsForTask } from "./taskRequirements";
 import type {
   AgentAction,
   AgentState,
@@ -34,6 +35,53 @@ const simulatedWorkspaceFiles = [
   "scripts/bootstrap.ps1",
   "scripts/verify-environment.ps1"
 ];
+
+const catalogSearchStopWords = new Set([
+  "11",
+  "ai",
+  "and",
+  "development",
+  "environment",
+  "for",
+  "resource",
+  "resources",
+  "tool",
+  "tools",
+  "windows",
+  "x64"
+]);
+
+function catalogSearchTokens(query: string) {
+  return query
+    .normalize("NFKC")
+    .toLowerCase()
+    .split(/[^\p{Letter}\p{Number}.+#-]+/u)
+    .filter(
+      (token) =>
+        token.length >= 2 &&
+        !catalogSearchStopWords.has(token)
+    );
+}
+
+function matchesCatalogQuery(
+  resource: (typeof trustedCatalog)[number],
+  queryTokens: string[]
+) {
+  if (queryTokens.length === 0) return false;
+  const searchable = [
+    resource.id,
+    resource.name,
+    resource.version,
+    resource.source,
+    resource.purpose,
+    resource.recommendation,
+    ...resource.provides
+  ]
+    .join(" ")
+    .normalize("NFKC")
+    .toLowerCase();
+  return queryTokens.some((token) => searchable.includes(token));
+}
 
 export const simulatedWorkspaceExport: WorkspaceExportRunner = async ({
   taskId,
@@ -186,12 +234,15 @@ export class InMemoryAgentToolExecutor implements AgentToolExecutor {
 
     if (call.name === "search_trusted_catalog") {
       const requestedIds = new Set(call.input.resourceIds ?? []);
-      const query = call.input.query.toLowerCase();
-      const resources = trustedCatalog.filter((resource) =>
-        requestedIds.size > 0
-          ? requestedIds.has(resource.id)
-          : `${resource.name} ${resource.purpose} ${resource.recommendation}`.toLowerCase().includes(query)
-      );
+      const plannedIds = new Set(resourceIdsForTask(state));
+      const queryTokens = catalogSearchTokens(call.input.query);
+      const resources = trustedCatalog.filter((resource) => {
+        if (requestedIds.size > 0) return requestedIds.has(resource.id);
+        if (resource.sourceTrust === "trusted-mirror") return false;
+        return plannedIds.size > 0
+          ? plannedIds.has(resource.id)
+          : matchesCatalogQuery(resource, queryTokens);
+      });
       return successResult(call, state, resources);
     }
 

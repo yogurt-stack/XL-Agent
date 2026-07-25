@@ -8,18 +8,15 @@ import type {
   ToolResult
 } from "./types";
 
-import { inferLocalTaskIntent } from "./taskRequirements";
+import {
+  inferLocalTaskIntent,
+  resourceIdsForTaskIntent
+} from "./taskRequirements";
 import type { LocalTaskIntent } from "./types";
 
 export { inferLocalTaskIntent } from "./taskRequirements";
 
 type SupportedLocalIntent = Exclude<LocalTaskIntent, "ambiguous">;
-
-const resourceIdsByIntent: Record<SupportedLocalIntent, string[]> = {
-  "python-ai": ["python-312", "vscode", "git", "sample-project"],
-  "fullstack-ai": ["python-312", "vscode", "git", "node-lts", "sample-project"],
-  "base-development": ["vscode", "git"]
-};
 
 const intentLabels: Record<SupportedLocalIntent, string> = {
   "python-ai": "Python AI 开发环境",
@@ -72,20 +69,6 @@ function createDecision(context: ModelContext, action: AgentAction, explanation:
 function workloadAnswerFrom(state: AgentState) {
   const answer = state.answers["primary-workload"];
   return answer === "skipped" ? undefined : answer;
-}
-
-function resourceIdsForIntent(intent: SupportedLocalIntent, state: AgentState) {
-  const resourceIds = [...resourceIdsByIntent[intent]];
-  if (intent === "python-ai" && state.answers["python-scope"] === "同时准备 Node.js") {
-    resourceIds.splice(3, 0, "node-lts");
-  }
-  if (intent === "fullstack-ai" && state.answers["fullstack-scope"] === "只准备全栈工具链") {
-    return resourceIds.filter((resourceId) => resourceId !== "sample-project");
-  }
-  if (intent === "base-development" && state.answers["base-editor"] === "仅 Git 命令行") {
-    return ["git"];
-  }
-  return resourceIds;
 }
 
 /**
@@ -189,7 +172,7 @@ export class LocalRuleModelRuntime implements ModelRuntime {
       );
     }
 
-    const resourceIds = resourceIdsForIntent(intent, state);
+    const resourceIds = resourceIdsForTaskIntent(intent, state.answers);
     if (!hasSuccessfulResult(context.toolResults, "search_trusted_catalog")) {
       return createDecision(
         context,

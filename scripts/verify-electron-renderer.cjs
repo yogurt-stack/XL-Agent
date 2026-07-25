@@ -6,6 +6,7 @@ const testApiKey = "renderer-smoke-secret";
 const expectedElectronMajor = Number(
   require(path.join(root, "package.json")).devDependencies.electron.match(/\d+/)?.[0]
 );
+let latestTaskState = null;
 
 ipcMain.handle("agent:modelConnectionInfo", () => ({
   ok: true,
@@ -78,14 +79,65 @@ ipcMain.handle("agent:controlledDownload", (_event, input) => ({
   }
 }));
 
-ipcMain.handle("agent:saveTaskState", () => ({
-  ok: true,
-  savedAt: "2026-07-24T00:00:00.000Z"
-}));
+ipcMain.handle("agent:saveTaskState", (_event, state) => {
+  latestTaskState = state;
+  return {
+    ok: true,
+    savedAt: "2026-07-24T00:00:00.000Z"
+  };
+});
 
 ipcMain.handle("agent:loadTaskState", () => ({
   ok: true,
   restored: null
+}));
+
+ipcMain.handle("agent:listTaskHistory", () => ({
+  ok: true,
+  history: latestTaskState
+    ? [
+        {
+          taskId: latestTaskState.taskId,
+          task: latestTaskState.task,
+          phase: latestTaskState.phase,
+          revision: latestTaskState.revision,
+          approvedRevision: latestTaskState.approvedRevision,
+          updatedAt: "2026-07-24T00:00:00.000Z",
+          resourceCount: latestTaskState.resources.length,
+          verifiedResourceCount: latestTaskState.resources.filter(
+            (resource) => resource.status === "verified"
+          ).length,
+          workspaceReady: latestTaskState.workspace.ready,
+          hasErrors: latestTaskState.logs.some((entry) => entry.level === "error")
+        }
+      ]
+    : []
+}));
+
+ipcMain.handle("agent:getTaskHistoryDetail", (_event, input) => ({
+  ok: true,
+  detail:
+    latestTaskState?.taskId === input.taskId
+      ? {
+          summary: {
+            taskId: latestTaskState.taskId,
+            task: latestTaskState.task,
+            phase: latestTaskState.phase,
+            revision: latestTaskState.revision,
+            approvedRevision: latestTaskState.approvedRevision,
+            updatedAt: "2026-07-24T00:00:00.000Z",
+            resourceCount: latestTaskState.resources.length,
+            verifiedResourceCount: latestTaskState.resources.filter(
+              (resource) => resource.status === "verified"
+            ).length,
+            workspaceReady: latestTaskState.workspace.ready,
+            hasErrors: latestTaskState.logs.some((entry) => entry.level === "error")
+          },
+          state: latestTaskState,
+          approvals: [],
+          workspaceExports: []
+        }
+      : null
 }));
 
 ipcMain.handle("agent:flushTaskPersistence", () => ({ ok: true }));
@@ -214,13 +266,26 @@ app.whenReady().then(async () => {
           () => document.body.innerText.includes("执行监控"),
           "Approval did not navigate to the execution state."
         );
+        const strictPlanApproved = document.body.innerText.includes("执行监控");
+
+        const historyButton = [...document.querySelectorAll("button")]
+          .find((button) => button.textContent?.trim() === "历史");
+        if (!historyButton) throw new Error("History navigation button is missing.");
+        historyButton.click();
+        await waitFor(
+          () => document.body.innerText.includes("SQLite 只读记录") &&
+            document.body.innerText.includes("准备 Python 机器学习环境") &&
+            document.body.innerText.includes("模型与工具审计"),
+          "Persisted task history did not render."
+        );
 
         return {
           title: document.title,
           settingsVisible: settingsVisibleBeforeTask,
           modelVisible: modelVisibleBeforeTask,
           remoteAvailable: remoteAvailableBeforeTask,
-          strictPlanApproved: document.body.innerText.includes("执行监控"),
+          strictPlanApproved,
+          historyVisible: document.body.innerText.includes("SQLite 只读记录"),
           bodyText: document.body.innerText
         };
       })()
@@ -232,12 +297,12 @@ app.whenReady().then(async () => {
         `Electron major mismatch: expected ${expectedElectronMajor}, received ${process.versions.electron}.`
       );
     }
-    if (!result.settingsVisible || !result.modelVisible || !result.remoteAvailable || !result.strictPlanApproved) {
+    if (!result.settingsVisible || !result.modelVisible || !result.remoteAvailable || !result.strictPlanApproved || !result.historyVisible) {
       throw new Error("Renderer smoke assertions failed.");
     }
     if (result.bodyText.includes(testApiKey)) throw new Error("Renderer exposed the API key.");
     console.log(
-      `Electron ${process.versions.electron} renderer passed: settings, strict plan approval and safe metadata verified`
+      `Electron ${process.versions.electron} renderer passed: settings, strict plan approval, history and safe metadata verified`
     );
   } catch (error) {
     console.error(error);

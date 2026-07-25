@@ -224,6 +224,41 @@ describe("in-memory agent tool executor", () => {
     ]);
   });
 
+  it("returns a complete primary-resource bundle for a full-stack natural-language query", async () => {
+    const state: AgentState = {
+      ...createInitialAgentState(),
+      phase: "planning",
+      task: "帮我准备一个 Windows 下的 AI 开发环境",
+      answers: {
+        "primary-workload": "全栈 AI 应用"
+      }
+    };
+    const result = await tools.execute(
+      {
+        callId: "fullstack-catalog",
+        name: "search_trusted_catalog",
+        input: {
+          query: "Windows 11 AI development environment full stack"
+        }
+      },
+      state
+    );
+
+    expect(result.status).toBe("success");
+    expect(result.output).toEqual([
+      expect.objectContaining({ id: "python-312" }),
+      expect.objectContaining({ id: "vscode" }),
+      expect.objectContaining({ id: "git" }),
+      expect.objectContaining({ id: "node-lts" }),
+      expect.objectContaining({ id: "sample-project" })
+    ]);
+    expect(
+      (result.output as Array<{ sourceTrust: string }>).some(
+        (resource) => resource.sourceTrust === "trusted-mirror"
+      )
+    ).toBe(false);
+  });
+
   it("uses an injected host profile reader without changing the locked target profile", async () => {
     const state = createInitialAgentState();
     const injectedTools = new InMemoryAgentToolExecutor(() => createSystemProfileToolOutput(linuxHostProfile));

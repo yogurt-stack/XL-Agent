@@ -1,5 +1,13 @@
 import type { AgentState, LocalTaskIntent, ResourceCapability, TaskRequirements } from "./types";
 
+type SupportedLocalIntent = Exclude<LocalTaskIntent, "ambiguous">;
+
+const resourceIdsByIntent: Record<SupportedLocalIntent, string[]> = {
+  "python-ai": ["python-312", "vscode", "git", "sample-project"],
+  "fullstack-ai": ["python-312", "vscode", "git", "node-lts", "sample-project"],
+  "base-development": ["vscode", "git"]
+};
+
 function includesAny(text: string, keywords: string[]) {
   return keywords.some((keyword) => text.includes(keyword));
 }
@@ -25,6 +33,39 @@ export function inferLocalTaskIntent(task: string, workloadAnswer?: string): Loc
     return "base-development";
   }
   return "ambiguous";
+}
+
+/**
+ * 将已识别的任务意图转换为可信目录中的主来源资源候选。
+ * 该映射同时供本地模型和目录搜索使用，避免两条规划路径产生不同资源组合。
+ */
+export function resourceIdsForTaskIntent(
+  intent: LocalTaskIntent,
+  answers: AgentState["answers"]
+) {
+  if (intent === "ambiguous") return [];
+  const resourceIds = [...resourceIdsByIntent[intent]];
+  if (intent === "python-ai" && answers["python-scope"] === "同时准备 Node.js") {
+    resourceIds.splice(3, 0, "node-lts");
+  }
+  if (intent === "fullstack-ai" && answers["fullstack-scope"] === "只准备全栈工具链") {
+    return resourceIds.filter((resourceId) => resourceId !== "sample-project");
+  }
+  if (intent === "base-development" && answers["base-editor"] === "仅 Git 命令行") {
+    return ["git"];
+  }
+  return resourceIds;
+}
+
+export function resourceIdsForTask(
+  state: Pick<AgentState, "task" | "answers">
+) {
+  const workloadAnswer = state.answers["primary-workload"];
+  const intent = inferLocalTaskIntent(
+    state.task,
+    workloadAnswer === "skipped" ? undefined : workloadAnswer
+  );
+  return resourceIdsForTaskIntent(intent, state.answers);
 }
 
 function uniqueCapabilities(capabilities: ResourceCapability[]) {

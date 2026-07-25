@@ -46,7 +46,16 @@ import { getActiveClarification } from "../features/agent-core/machine";
 import type { AgentEvent, AgentState, ResourceCapability, ResourceStatus } from "../features/agent-core/types";
 
 type Dispatch = (event: AgentEvent) => AgentState;
-type Navigate = (view: "home" | "clarification" | "plan" | "execution" | "workspace" | "settings") => void;
+type Navigate = (
+  view:
+    | "home"
+    | "clarification"
+    | "plan"
+    | "execution"
+    | "workspace"
+    | "history"
+    | "settings"
+) => void;
 
 const statusMeta: Record<ResourceStatus, { label: string; className: string }> = {
   pending: { label: "待确认", className: "status-muted" },
@@ -213,9 +222,61 @@ export function AgentHomeView({ state, dispatch, onNavigate }: { state: AgentSta
   );
 }
 
-export function ClarificationView({ state, dispatch, onNavigate }: { state: AgentState; dispatch: Dispatch; onNavigate: Navigate }) {
+export function ClarificationView({
+  state,
+  dispatch,
+  onNavigate,
+  onRetryLocally
+}: {
+  state: AgentState;
+  dispatch: Dispatch;
+  onNavigate: Navigate;
+  onRetryLocally: () => AgentState;
+}) {
   const question = getActiveClarification(state);
   if (!question) {
+    if (state.phase === "cancelled") {
+      const failureMessage =
+        [...state.logs].reverse().find((entry) => entry.level === "error")
+          ?.message ?? "模型规划已停止，请选择恢复方式。";
+      return (
+        <section className="agent-view clarification-view">
+          <section className="failure-resolution-panel" role="alert">
+            <div className="failure-resolution-heading">
+              <span><AlertTriangle size={19} /></span>
+              <div>
+                <small>模型规划已停止</small>
+                <h2>资源计划未能在安全步数内生成</h2>
+              </div>
+            </div>
+            <p>{failureMessage}</p>
+            <div className="failure-resolution-meta">
+              <span>当前阶段<strong>已停止</strong></span>
+              <span>模型步骤<strong>{state.agentRun.step}/{state.agentRun.maxSteps}</strong></span>
+              <span>计划 revision<strong>r{state.revision}</strong></span>
+            </div>
+            <div className="failure-actions">
+              <button className="btn btn-primary" type="button" onClick={() => onRetryLocally()}>
+                <RefreshCw size={16} />使用本地模型重新开始
+              </button>
+              <button
+                className="btn btn-ghost"
+                type="button"
+                onClick={() => {
+                  dispatch({ type: "RESET" });
+                  onNavigate("home");
+                }}
+              >
+                返回首页
+              </button>
+            </div>
+            <small className="failure-resolution-note">
+              本地重试仍会重新生成计划并要求你确认，不会自动下载资源。
+            </small>
+          </section>
+        </section>
+      );
+    }
     if (state.phase === "waiting_approval") {
       return (
         <section className="agent-view">

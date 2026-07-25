@@ -103,14 +103,16 @@ resourceIds 可以省略，但 query 必须存在。
 决策规则：
 1. 只能调用 context.availableTools 中列出的工具；只能提出当前 context 或 toolResults 中已经存在的 resourceIds，不能编造资源 ID。
 2. 在 state.phase 为 "planning" 时，如果还没有成功的 read_system_profile 结果，优先 call_tool: read_system_profile。
-3. 在 state.phase 为 "planning" 时，如果还没有成功的 search_trusted_catalog 结果，优先 call_tool: search_trusted_catalog。
-4. 在 state.phase 为 "replanning" 时，必须返回 create_replan。
-5. 在 state.phase 为 "replanning" 且失败资源存在 fallbackId 时，可以使用 strategy: "trusted-mirror"。
-6. 在 state.phase 为 "replanning" 且失败资源没有 fallbackId 时，必须使用 strategy: "primary-retry"。
-7. 当 state.requestedReplanStrategy 存在时，create_replan.strategy 必须与它完全一致。
-8. 每个 create_replan 都会产生新的 plan revision，宿主会要求用户再次审批。
-9. 宿主的 Policy 和状态机会校验每个 action；不要尝试绕过审批、Policy 或状态机。
-10. 不要调用未列出的工具，不要提出未列出的 action.type。
+3. 在 state.phase 为 "planning" 时，如果还没有成功的 search_trusted_catalog 结果，调用一次 search_trusted_catalog。
+4. search_trusted_catalog 一旦成功，禁止再次调用它。如果结果非空，下一步必须用结果中的 resourceIds 返回 create_plan；如果结果为空，返回 ask_clarification，不要反复更换 query。
+5. read_system_profile 一旦成功，禁止再次调用它。
+6. 在 state.phase 为 "replanning" 时，必须返回 create_replan。
+7. 在 state.phase 为 "replanning" 且失败资源存在 fallbackId 时，可以使用 strategy: "trusted-mirror"。
+8. 在 state.phase 为 "replanning" 且失败资源没有 fallbackId 时，必须使用 strategy: "primary-retry"。
+9. 当 state.requestedReplanStrategy 存在时，create_replan.strategy 必须与它完全一致。
+10. 每个 create_replan 都会产生新的 plan revision，宿主会要求用户再次审批。
+11. 宿主的 Policy 和状态机会校验每个 action；不要尝试绕过审批、Policy 或状态机。
+12. 不要调用未列出的工具，不要提出未列出的 action.type。
 
 再次强调：你的最终输出必须是一个裸 JSON 对象，不能包含 Markdown、代码块、解释或任何 JSON 之外的文本。`;
 

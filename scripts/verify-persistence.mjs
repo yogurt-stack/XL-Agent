@@ -277,6 +277,52 @@ try {
     exportSnapshot.revision
   );
   assert(renewedApproval.valid, "Explicit reapproval must create a fresh active approval");
+
+  nowMs += 100;
+  const newerTerminalSnapshot = createSnapshot({
+    taskId: "task-history-newer",
+    task: "已取消的历史任务",
+    phase: "cancelled",
+    approvedRevision: null
+  });
+  await store.saveSnapshot(newerTerminalSnapshot);
+  const taskHistory = await store.listTaskHistory();
+  assert(
+    taskHistory.length === 2 &&
+      taskHistory[0].taskId === newerTerminalSnapshot.taskId &&
+      taskHistory[1].taskId === exportSnapshot.taskId,
+    "Task history must return the latest snapshot for each task in descending update order"
+  );
+  assert(
+    taskHistory[1].resourceCount === 1 &&
+      taskHistory[1].verifiedResourceCount === 1,
+    "Task history summaries must derive resource verification counts"
+  );
+  assert(
+    (await store.listTaskHistory(1))[0].taskId === newerTerminalSnapshot.taskId,
+    "Task history limit must restrict the result set"
+  );
+  const historyDetail = await store.getTaskHistoryDetail(exportSnapshot.taskId);
+  assert(
+    historyDetail?.state.taskId === exportSnapshot.taskId &&
+      historyDetail.approvals.length === 1 &&
+      historyDetail.workspaceExports[0]?.rootPath === firstExport.rootPath,
+    "Task history detail must include the latest state, approvals and workspace exports"
+  );
+  assert(
+    (await store.getTaskHistoryDetail("task-does-not-exist")) === null,
+    "Unknown history task IDs must return null"
+  );
+  let invalidHistoryLimitRejected = false;
+  try {
+    await store.listTaskHistory(101);
+  } catch {
+    invalidHistoryLimitRejected = true;
+  }
+  assert(
+    invalidHistoryLimitRejected,
+    "Task history must reject limits outside the safe range"
+  );
   await store.close();
 
   assert(
@@ -371,4 +417,4 @@ try {
   rmSync(verifyRoot, { force: true, recursive: true });
 }
 
-console.log("Persistence passed: atomic export, SQLite schema migration, recovery, audit and approval expiry verified");
+console.log("Persistence passed: atomic export, SQLite schema migration, recovery, history, audit and approval expiry verified");

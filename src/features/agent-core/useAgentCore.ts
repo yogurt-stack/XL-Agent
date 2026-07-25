@@ -174,6 +174,16 @@ export function useAgentCore() {
   }, [runtime]);
 
   const testModelConnection = useCallback(() => modelConnection.testConnection(), [modelConnection]);
+  const retryTaskLocally = useCallback(() => {
+    const task = runtime.getState().task.trim();
+    modelConnection.useLocalModel(
+      "远程规划未在安全步数内生成计划，本次重试已切换本地规则模型。"
+    );
+    runtime.dispatch({ type: "RESET" });
+    return task
+      ? runtime.dispatch({ type: "SUBMIT_TASK", task })
+      : runtime.getState();
+  }, [modelConnection, runtime]);
 
   useEffect(() => {
     let disposed = false;
@@ -239,6 +249,7 @@ export function useAgentCore() {
     modelConnectionState,
     persistenceState,
     testModelConnection,
+    retryTaskLocally,
     flushPersistence: services.flushPersistence,
     readWorkspaceFile: services.readWorkspaceFile,
     openWorkspace: services.openWorkspace

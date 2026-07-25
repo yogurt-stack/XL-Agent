@@ -318,3 +318,30 @@ test("rejects expired approval before a controlled download", async () => {
   await expect(page.getByText("计划 r1 已通过严格验证")).toBeVisible();
   await expect(page.getByRole("button", { name: "确认下载计划 r1" })).toBeEnabled();
 });
+
+test("shows persisted task history without changing the active task", async () => {
+  await startTaskAndWaitForFailure();
+  await page.evaluate(async () => {
+    const bridge = (
+      window as unknown as {
+        xunleiAgent?: { flushTaskPersistence(): Promise<{ ok: true }> };
+      }
+    ).xunleiAgent;
+    await bridge?.flushTaskPersistence();
+  });
+
+  await page.getByRole("button", { name: "历史" }).click();
+  await expect(page.getByRole("heading", { name: "历史任务" })).toBeVisible();
+  await expect(page.getByRole("button", { name: /准备 Python 机器学习环境/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "准备 Python 机器学习环境" })).toBeVisible();
+  await expect(page.getByText("等待失败处置", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "资源快照" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "审批记录" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "模型与工具审计" })).toBeVisible();
+  await expect(page.locator(".history-resource-row").filter({ hasText: "AI Dev Starter" })).toBeVisible();
+  await expectNoSeriousAccessibilityViolations("task history");
+
+  await page.getByRole("button", { name: "执行" }).click();
+  await expect(page.getByRole("heading", { name: "AI Dev Starter 需要人工决策" })).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("CHECKSUM_MISMATCH");
+});

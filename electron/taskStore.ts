@@ -38,6 +38,26 @@ export type RestoredTask = {
   savedAt: string;
 };
 
+export type TaskHistorySummary = {
+  taskId: string;
+  task: string;
+  phase: string;
+  revision: number;
+  approvedRevision: number | null;
+  updatedAt: string;
+  resourceCount: number;
+  verifiedResourceCount: number;
+  workspaceReady: boolean;
+  hasErrors: boolean;
+};
+
+export type TaskHistoryDetail = {
+  summary: TaskHistorySummary;
+  state: PersistedAgentState;
+  approvals: ApprovalRecord[];
+  workspaceExports: WorkspaceExportOutput[];
+};
+
 export type TaskStoreOptions = {
   databasePath: string;
   approvalTtlMs?: number;
@@ -120,6 +140,56 @@ function asString(value: SqlValue | undefined) {
 
 function asNumber(value: SqlValue | undefined) {
   return typeof value === "number" ? value : null;
+}
+
+function parseJson(value: string | null): unknown {
+  if (!value) return null;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function isWorkspaceExportOutput(value: unknown): value is WorkspaceExportOutput {
+  return (
+    isRecord(value) &&
+    typeof value.taskId === "string" &&
+    Number.isInteger(value.revision) &&
+    typeof value.rootPath === "string" &&
+    typeof value.generatedAt === "string" &&
+    typeof value.reusedExisting === "boolean" &&
+    Array.isArray(value.files)
+  );
+}
+
+function stateHasErrors(state: PersistedAgentState) {
+  return (
+    state.resources.some((resource) => resource.status === "failed") ||
+    state.logs.some(
+      (entry) => isRecord(entry) && entry.level === "error"
+    )
+  );
+}
+
+function taskHistorySummary(
+  state: PersistedAgentState,
+  updatedAt: string
+): TaskHistorySummary {
+  return {
+    taskId: state.taskId,
+    task: state.task,
+    phase: state.phase,
+    revision: state.revision,
+    approvedRevision: state.approvedRevision,
+    updatedAt,
+    resourceCount: state.resources.length,
+    verifiedResourceCount: state.resources.filter(
+      (resource) => resource.status === "verified"
+    ).length,
+    workspaceReady: state.workspace.ready,
+    hasErrors: stateHasErrors(state)
+  };
 }
 
 type SchemaMigration = {
@@ -372,15 +442,11 @@ export class TaskStore {
     });
   }
 
-  private approvalRecord(taskId: string, revision: number): ApprovalRecord | null {
-    const row = firstRow(
-      this.database,
-      `SELECT task_id, revision, actor, approved_at, expires_at, status
-       FROM approval_records
-       WHERE task_id = ? AND revision = ?`,
-      [taskId, revision]
-    );
-    if (!row) return null;
+  private approvalRecordFromRow(
+    row: ParamsObject,
+    fallbackTaskId: string,
+    fallbackRevision: number
+  ): ApprovalRecord | null {
     const expiresAt = asString(row.expires_at);
     const storedStatus = asString(row.status);
     if (!expiresAt || !storedStatus) return null;
@@ -388,8 +454,8 @@ export class TaskStore {
       storedStatus === "active" &&
       Date.parse(expiresAt) <= this.options.now();
     return {
-      taskId: asString(row.task_id) ?? taskId,
-      revision: asNumber(row.revision) ?? revision,
+      taskId: asString(row.task_id) ?? fallbackTaskId,
+      revision: asNumber(row.revision) ?? fallbackRevision,
       actor: "local-user",
       approvedAt: asString(row.approved_at) ?? "",
       expiresAt,
@@ -399,6 +465,18 @@ export class TaskStore {
           ? "revoked"
           : "active"
     };
+  }
+
+  private approvalRecord(taskId: string, revision: number): ApprovalRecord | null {
+    const row = firstRow(
+      this.database,
+      `SELECT task_id, revision, actor, approved_at, expires_at, status
+       FROM approval_records
+       WHERE task_id = ? AND revision = ?`,
+      [taskId, revision]
+    );
+    if (!row) return null;
+    return this.approvalRecordFromRow(row, taskId, revision);
   }
 
   async getApproval(taskId: string, revision: number) {
@@ -440,7 +518,7 @@ export class TaskStore {
       if (!row) return null;
       const stateJson = asString(row.state_json);
       if (!stateJson) return null;
-      const state = JSON.parse(stateJson) as unknown;
+      const state = parseJson(stateJson);
       if (!isPersistedAgentState(state)) return null;
       const approval = this.approvalRecord(state.taskId, state.revision);
       return {
@@ -463,8 +541,99 @@ export class TaskStore {
       );
       const stateJson = row ? asString(row.state_json) : null;
       if (!stateJson) return null;
-      const state = JSON.parse(stateJson) as unknown;
+      const state = parseJson(stateJson);
       return isPersistedAgentState(state) ? state : null;
+    });
+  }
+
+  async listTaskHistory(limit = 50): Promise<TaskHistorySummary[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error("Task history limit must be an integer from 1 to 100.");
+    }
+    return this.enqueue(() => {
+      const statement = this.database.prepare(
+        `SELECT state_json, updated_at
+         FROM task_snapshots
+         ORDER BY updated_at DESC
+         LIMIT ?`
+      );
+      const history: TaskHistorySummary[] = [];
+      try {
+        statement.bind([limit]);
+        while (statement.step()) {
+          const row = statement.getAsObject();
+          const state = parseJson(asString(row.state_json));
+          const updatedAt = asString(row.updated_at);
+          if (isPersistedAgentState(state) && updatedAt) {
+            history.push(taskHistorySummary(state, updatedAt));
+          }
+        }
+      } finally {
+        statement.free();
+      }
+      return history;
+    });
+  }
+
+  async getTaskHistoryDetail(taskId: string): Promise<TaskHistoryDetail | null> {
+    return this.enqueue(() => {
+      const snapshotRow = firstRow(
+        this.database,
+        `SELECT state_json, updated_at
+         FROM task_snapshots
+         WHERE task_id = ?`,
+        [taskId]
+      );
+      const state = parseJson(
+        snapshotRow ? asString(snapshotRow.state_json) : null
+      );
+      const updatedAt = snapshotRow ? asString(snapshotRow.updated_at) : null;
+      if (!isPersistedAgentState(state) || !updatedAt) return null;
+
+      const approvals: ApprovalRecord[] = [];
+      const approvalStatement = this.database.prepare(
+        `SELECT task_id, revision, actor, approved_at, expires_at, status
+         FROM approval_records
+         WHERE task_id = ?
+         ORDER BY revision DESC`
+      );
+      try {
+        approvalStatement.bind([taskId]);
+        while (approvalStatement.step()) {
+          const row = approvalStatement.getAsObject();
+          const revision = asNumber(row.revision);
+          if (revision === null) continue;
+          const approval = this.approvalRecordFromRow(row, taskId, revision);
+          if (approval) approvals.push(approval);
+        }
+      } finally {
+        approvalStatement.free();
+      }
+
+      const workspaceExports: WorkspaceExportOutput[] = [];
+      const exportStatement = this.database.prepare(
+        `SELECT output_json
+         FROM workspace_exports
+         WHERE task_id = ?
+         ORDER BY revision DESC`
+      );
+      try {
+        exportStatement.bind([taskId]);
+        while (exportStatement.step()) {
+          const row = exportStatement.getAsObject();
+          const output = parseJson(asString(row.output_json));
+          if (isWorkspaceExportOutput(output)) workspaceExports.push(output);
+        }
+      } finally {
+        exportStatement.free();
+      }
+
+      return {
+        summary: taskHistorySummary(state, updatedAt),
+        state,
+        approvals,
+        workspaceExports
+      };
     });
   }
 

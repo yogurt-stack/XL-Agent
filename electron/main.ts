@@ -133,11 +133,7 @@ function getWorkspaceRoot() {
 function getTaskRevisionInput(value: unknown) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const input = value as Record<string, unknown>;
-  const taskId =
-    typeof input.taskId === "string" &&
-    /^[a-z0-9][a-z0-9._-]{0,127}$/i.test(input.taskId)
-      ? input.taskId
-      : null;
+  const taskId = getTaskId(input.taskId);
   const revision =
     typeof input.revision === "number" &&
     Number.isSafeInteger(input.revision) &&
@@ -145,6 +141,27 @@ function getTaskRevisionInput(value: unknown) {
       ? input.revision
       : null;
   return taskId && revision ? { taskId, revision } : null;
+}
+
+function getTaskId(value: unknown) {
+  return typeof value === "string" &&
+    /^[a-z0-9][a-z0-9._-]{0,127}$/i.test(value)
+    ? value
+    : null;
+}
+
+function getTaskHistoryLimit(value: unknown) {
+  if (value === undefined) return 50;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const limit = (value as Record<string, unknown>).limit;
+  return typeof limit === "number" &&
+    Number.isSafeInteger(limit) &&
+    limit >= 1 &&
+    limit <= 100
+    ? limit
+    : null;
 }
 
 function fixtureDownload(
@@ -342,6 +359,67 @@ ipcMain.handle("agent:loadTaskState", async () => {
       error: {
         code: "TASK_PERSISTENCE_READ_FAILED",
         message: error instanceof Error ? error.message : "SQLite 任务状态读取失败。",
+        retriable: true
+      }
+    };
+  }
+});
+
+ipcMain.handle("agent:listTaskHistory", async (_event, input: unknown) => {
+  const limit = getTaskHistoryLimit(input);
+  if (limit === null) {
+    return {
+      ok: false as const,
+      error: {
+        code: "TASK_HISTORY_INVALID_REQUEST",
+        message: "历史任务列表请求的 limit 必须是 1 到 100 之间的整数。",
+        retriable: false
+      }
+    };
+  }
+  try {
+    return {
+      ok: true as const,
+      history: await (await getTaskStore()).listTaskHistory(limit)
+    };
+  } catch {
+    return {
+      ok: false as const,
+      error: {
+        code: "TASK_HISTORY_READ_FAILED",
+        message: "SQLite 历史任务列表读取失败。",
+        retriable: true
+      }
+    };
+  }
+});
+
+ipcMain.handle("agent:getTaskHistoryDetail", async (_event, input: unknown) => {
+  const taskId =
+    typeof input === "object" && input !== null && !Array.isArray(input)
+      ? getTaskId((input as Record<string, unknown>).taskId)
+      : null;
+  if (!taskId) {
+    return {
+      ok: false as const,
+      error: {
+        code: "TASK_HISTORY_INVALID_REQUEST",
+        message: "历史任务详情请求缺少合法的 taskId。",
+        retriable: false
+      }
+    };
+  }
+  try {
+    return {
+      ok: true as const,
+      detail: await (await getTaskStore()).getTaskHistoryDetail(taskId)
+    };
+  } catch {
+    return {
+      ok: false as const,
+      error: {
+        code: "TASK_HISTORY_READ_FAILED",
+        message: "SQLite 历史任务详情读取失败。",
         retriable: true
       }
     };
