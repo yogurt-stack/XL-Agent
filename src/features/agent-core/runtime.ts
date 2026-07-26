@@ -10,6 +10,7 @@ import type {
   AgentVerifier
 } from "./interfaces";
 import { DefaultAgentPolicy, InMemoryAgentToolExecutor } from "./agentServices";
+import { parseModelDecision } from "./agentSchemas";
 import { LocalRuleModelRuntime } from "./localRuleModel";
 import { createInitialAgentState, transition } from "./machine";
 import { MockVerifier, FixedWindowsPlanner, FixedWindowsRouter } from "./mockServices";
@@ -106,8 +107,36 @@ export class AgentRuntime implements AgentRuntimePort {
     if (!this.started || this.cancelScheduledStep || this.modelStepRunning || this.toolStepRunning) return;
 
     if (
+      this.state.phase === "planning" &&
+      this.state.taskRequirements === null &&
+      this.dependencies.router.resolveRequirements
+    ) {
+      const requirements =
+        this.dependencies.router.resolveRequirements(this.state);
+      if (requirements) {
+        this.applyEvent({
+          type: "TASK_REQUIREMENTS_RESOLVED",
+          requirements
+        });
+      }
+    }
+
+    if (this.state.phase === "routing") {
+      const event = this.dependencies.router.route(this.state);
+      if (!event) return;
+      const version = this.workVersion;
+      this.cancelScheduledStep = this.dependencies.scheduler.schedule(() => {
+        this.cancelScheduledStep = null;
+        if (!this.started || version !== this.workVersion) return;
+        this.applyEvent(event);
+        this.drive();
+      }, this.stepDelayMs);
+      return;
+    }
+
+    if (
       this.dependencies.model &&
-      (this.state.phase === "routing" || this.state.phase === "planning" || this.state.phase === "replanning")
+      (this.state.phase === "planning" || this.state.phase === "replanning")
     ) {
       if (this.state.agentRun.step >= this.state.agentRun.maxSteps) {
         this.applyEvent({ type: "MODEL_STEP_LIMIT_REACHED" });
@@ -163,7 +192,7 @@ export class AgentRuntime implements AgentRuntimePort {
 
     this.modelStepRunning = true;
     try {
-      const decision = await model.decide({
+      const decision = parseModelDecision(await model.decide({
         state: this.state,
         step: this.state.agentRun.step,
         maxSteps: this.state.agentRun.maxSteps,
@@ -174,7 +203,7 @@ export class AgentRuntime implements AgentRuntimePort {
           "export_workspace"
         ],
         toolResults: this.state.agentRun.toolResults
-      });
+      }));
       if (!this.isCurrentWork(version)) return;
 
       this.applyEvent({ type: "MODEL_DECISION_RECORDED", decision });
@@ -405,7 +434,6 @@ export class AgentRuntime implements AgentRuntimePort {
 
   private nextAutomaticEvent(): AgentEvent | null {
     const { phase } = this.state;
-    if (phase === "routing") return this.dependencies.router.route(this.state);
     if (phase === "planning") return this.dependencies.planner.createPlan(this.state);
     if (phase === "replanning") return this.dependencies.planner.createReplan(this.state);
     if (phase === "verifying") return this.dependencies.verifier.verify(this.state);
@@ -441,6 +469,7 @@ function isControlledDownloadOutput(value: unknown): value is ControlledDownload
   const output = value as Record<string, unknown>;
   return (
     typeof output.resourceId === "string" &&
+    typeof output.fileName === "string" &&
     typeof output.urlHost === "string" &&
     typeof output.bytesWritten === "number" &&
     typeof output.sha256 === "string" &&

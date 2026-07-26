@@ -13,6 +13,7 @@ export type ControlledDownloadRequest = {
 
 export type ControlledDownloadOutput = {
   resourceId: string;
+  fileName: string;
   urlHost: string;
   bytesWritten: number;
   sha256: string;
@@ -99,6 +100,37 @@ function maxBytesFromMb(maxSizeMb: number) {
 function sanitizeResourceId(resourceId: string) {
   const safe = resourceId.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 80);
   return safe || "resource";
+}
+
+function sanitizeFileName(value: string, resourceId: string) {
+  const baseName = path.basename(value)
+    .normalize("NFKC")
+    .replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/g, "-")
+    .replace(/^\.+/, "")
+    .slice(0, 160);
+  return baseName || `${sanitizeResourceId(resourceId)}.download`;
+}
+
+function responseFileName(
+  response: Response,
+  parsedUrl: URL,
+  resourceId: string
+) {
+  const disposition = response.headers.get("content-disposition") ?? "";
+  const encodedMatch = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  const plainMatch = disposition.match(/filename="?([^";]+)"?/i);
+  const candidate =
+    encodedMatch?.[1] ??
+    plainMatch?.[1] ??
+    path.basename(parsedUrl.pathname) ??
+    "";
+  let decoded = candidate;
+  try {
+    decoded = decodeURIComponent(candidate);
+  } catch {
+    decoded = candidate;
+  }
+  return sanitizeFileName(decoded, resourceId);
 }
 
 function normalizeExpectedSha256(expectedSha256: string) {
@@ -191,13 +223,15 @@ export async function downloadTrustedResource(
     );
   }
 
-  const tempFilePath = path.join(
+  const fileName = responseFileName(response, parsedUrl, request.resourceId);
+  const artifactRoot = path.join(
     tempRoot,
-    `${sanitizeResourceId(request.resourceId)}-${createId()}.download`
+    `${sanitizeResourceId(request.resourceId)}-${createId()}`
   );
+  const tempFilePath = path.join(artifactRoot, fileName);
 
   try {
-    await mkdir(tempRoot, { recursive: true });
+    await mkdir(artifactRoot, { recursive: true });
     await writeFile(tempFilePath, buffer, { flag: "wx" });
   } catch {
     throw downloadError("DOWNLOAD_WRITE_FAILED", "下载文件写入临时目录失败。", true);
@@ -205,6 +239,7 @@ export async function downloadTrustedResource(
 
   return {
     resourceId: request.resourceId,
+    fileName,
     urlHost: parsedUrl.host,
     bytesWritten: buffer.byteLength,
     sha256: actualSha256,

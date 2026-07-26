@@ -2,95 +2,78 @@ const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
+const { createMockAgentRuntime } = require(
+  path.join(root, "dist-electron", "src", "features", "agent-core", "runtime.js")
+);
+const { LocalRuleModelRuntime } = require(
+  path.join(root, "dist-electron", "src", "features", "agent-core", "localRuleModel.js")
+);
 const testApiKey = "renderer-smoke-secret";
 const expectedElectronMajor = Number(
   require(path.join(root, "package.json")).devDependencies.electron.match(/\d+/)?.[0]
 );
-let latestTaskState = null;
+const runtime = createMockAgentRuntime(new LocalRuleModelRuntime());
+let latestTaskState = runtime.getState();
+let modelConnection = {
+  status: "configured",
+  activeProvider: "local-rule",
+  configured: true,
+  endpointHost: "models.example.test",
+  model: "renderer-smoke-model",
+  lastCheckedAt: null
+};
 
-ipcMain.handle("agent:modelConnectionInfo", () => ({
-  ok: true,
-  info: {
-    configured: true,
-    endpointHost: "models.example.test",
-    model: "renderer-smoke-model"
+const runtimeSnapshot = () => ({
+  state: runtime.getState(),
+  modelConnection,
+  persistence: {
+    status: "ready",
+    restoredAt: null,
+    lastSavedAt: latestTaskState.taskId === "unassigned"
+      ? null
+      : "2026-07-24T00:00:00.000Z",
+    error: null
   }
-}));
-
-ipcMain.handle("agent:readSystemProfile", () => ({
-  ok: true,
-  profile: {
-    platform: "linux",
-    platformLabel: "Linux",
-    architecture: "x64",
-    release: "renderer-smoke",
-    cpuCount: 4,
-    totalMemoryGb: 8,
-    defaultShell: "sh",
-    collectedBy: "electron-main",
-    collectedAt: "renderer-smoke-static",
-    privacy: {
-      hostname: false,
-      username: false,
-      homeDirectory: false,
-      environment: false,
-      shellPath: false
-    }
-  }
-}));
-
-ipcMain.handle("agent:testModelConnection", () => ({
-  ok: true,
-  decision: {
-    decisionId: "renderer-connection-test",
-    model: "renderer-smoke-model",
-    explanation: "Connection test succeeded.",
-    action: {
-      actionId: "renderer-connection-test",
-      type: "finish",
-      summary: "Connection test succeeded."
-    }
-  }
-}));
-
-ipcMain.handle("agent:modelDecision", () => ({
-  ok: false,
-  error: {
-    code: "MODEL_NETWORK_ERROR",
-    message: "Renderer smoke intentionally exercises the local fallback.",
-    retriable: true
-  }
-}));
-
-ipcMain.handle("agent:controlledDownload", (_event, input) => ({
-  ok: true,
-  output: {
-    resourceId: input.resourceId,
-    urlHost: "downloads.xunlei.example",
-    bytesWritten: 7,
-    sha256: {
-      "python-312": "7b16d7f7610a4c9ebdb31d2b2ed7b0e0c3c9f681d7b9f2d4545cbf88d07a8c3a",
-      vscode: "59e5dd4db0c2dfaa6c03f4a9f98e1c8f0e16e0c2d2c0993c88f0ab622c91f4f2",
-      git: "c2d4519d06c2d6d0fb8a44d9d93e6b95c51ef4e9871d5ceaf3c11ac4e0db0c4b",
-      "sample-project": "b4a0f36f2cc8f5c7d09ea6d0f9f0de58b79b631aa6a5a8b09f9f0a8e2a4c7d1b"
-    }[input.resourceId],
-    tempFilePath: `/tmp/${input.resourceId}.download`,
-    elapsedMs: 1
-  }
-}));
-
-ipcMain.handle("agent:saveTaskState", (_event, state) => {
-  latestTaskState = state;
-  return {
-    ok: true,
-    savedAt: "2026-07-24T00:00:00.000Z"
-  };
 });
 
-ipcMain.handle("agent:loadTaskState", () => ({
+const broadcastRuntimeSnapshot = () => {
+  const snapshot = runtimeSnapshot();
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send("agent:runtimeSnapshot", snapshot);
+  }
+};
+
+runtime.subscribe((state) => {
+  latestTaskState = state;
+  broadcastRuntimeSnapshot();
+});
+runtime.start();
+
+ipcMain.handle("agent:getRuntimeSnapshot", () => ({
   ok: true,
-  restored: null
+  snapshot: runtimeSnapshot()
 }));
+
+ipcMain.handle("agent:dispatchUserEvent", (_event, input) => {
+  runtime.dispatch(input);
+  return { ok: true, snapshot: runtimeSnapshot() };
+});
+
+ipcMain.handle("agent:retryTaskLocally", () => ({
+  ok: true,
+  snapshot: runtimeSnapshot()
+}));
+
+ipcMain.handle("agent:testModelConnection", () => {
+  modelConnection = {
+    ...modelConnection,
+    status: "remote_available",
+    activeProvider: "remote-llm",
+    lastCheckedAt: "2026-07-24T00:00:00.000Z"
+  };
+  broadcastRuntimeSnapshot();
+  return { ok: true, snapshot: runtimeSnapshot() };
+});
 
 ipcMain.handle("agent:listTaskHistory", () => ({
   ok: true,
@@ -142,28 +125,9 @@ ipcMain.handle("agent:getTaskHistoryDetail", (_event, input) => ({
 
 ipcMain.handle("agent:flushTaskPersistence", () => ({ ok: true }));
 
-ipcMain.handle("agent:exportWorkspace", (_event, input) => ({
-  ok: true,
-  output: {
-    taskId: input.taskId,
-    revision: input.revision,
-    rootPath: `/tmp/${input.taskId}/revision-${input.revision}`,
-    generatedAt: "2026-07-24T00:00:00.000Z",
-    reusedExisting: false,
-    files: [
-      {
-        relativePath: "resource-manifest.json",
-        absolutePath: `/tmp/${input.taskId}/revision-${input.revision}/resource-manifest.json`,
-        bytesWritten: 80,
-        sha256: "a".repeat(64)
-      }
-    ]
-  }
-}));
-
 ipcMain.handle("agent:readWorkspaceFile", () => ({
   ok: true,
-  content: JSON.stringify({ schemaVersion: "xunlei-agent-workspace-1.0" }, null, 2)
+  content: JSON.stringify({ schemaVersion: "xunlei-agent-workspace-2.0" }, null, 2)
 }));
 
 ipcMain.handle("agent:openWorkspace", () => ({ ok: true }));
@@ -172,7 +136,7 @@ app.whenReady().then(async () => {
   const window = new BrowserWindow({
     show: false,
     webPreferences: {
-      preload: path.join(root, "dist-electron", "preload.js"),
+      preload: path.join(root, "dist-electron", "electron", "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true

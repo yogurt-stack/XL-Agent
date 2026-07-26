@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { createResourceManifest } from "./manifest";
 import { createInitialAgentState, transition } from "./machine";
+import { ExtensibleAgentRouter } from "./router";
 import type { AgentState } from "./types";
 
 function createApprovedPlan(): AgentState {
   let state = createInitialAgentState();
   state = transition(state, { type: "SUBMIT_TASK", task: "准备 Windows AI 环境" });
-  state = transition(state, { type: "ROUTE_RESOLVED", route: "windows-ai-development" });
+  state = transition(state, new ExtensibleAgentRouter().route(state)!);
   state = transition(state, {
     type: "ANSWER_CLARIFICATION",
     questionId: "primary-workload",
@@ -48,7 +49,7 @@ describe("resource manifest", () => {
     const manifest = createResourceManifest(handoff);
 
     expect(manifest).toMatchObject({
-      schemaVersion: "agent-core-demo-1.0",
+      schemaVersion: "xunlei-agent-workspace-2.0",
       revision: 1,
       approvedRevision: 1,
       handoff: { ready: true, missingItems: [] }

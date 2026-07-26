@@ -1,4 +1,5 @@
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
@@ -159,7 +160,7 @@ async function openCompletedWorkspace() {
   await expect(page.getByText("已验证并真实落盘")).toBeVisible();
   await expectMainPanelAtTop("ready workspace");
   await expect(page.locator("pre.workspace-code-preview")).toContainText(
-    "xunlei-agent-workspace-1.0"
+    "xunlei-agent-workspace-2.0"
   );
   const rootPath = await page.locator(".workspace-view .agent-page-heading > p").innerText();
   const expectedFiles = [
@@ -180,10 +181,35 @@ async function openCompletedWorkspace() {
     schemaVersion: string;
     revision: number;
     approvedRevision: number;
-    resources: Array<{ id: string; replacedFrom: string | null; status: string }>;
-    handoff: { ready: boolean; missingItems: string[]; nextAction: string };
+    resources: Array<{
+      id: string;
+      replacedFrom: string | null;
+      status: string;
+      selected: boolean;
+      artifact: null | {
+        relativePath: string;
+        sha256: string;
+        verificationStatus: string;
+      };
+    }>;
+    handoff: {
+      ready: boolean;
+      files: string[];
+      missingItems: string[];
+      nextAction: string;
+    };
   };
-  expect(manifest.schemaVersion).toBe("xunlei-agent-workspace-1.0");
+  expect(manifest.schemaVersion).toBe("xunlei-agent-workspace-2.0");
+  for (const resource of manifest.resources.filter((item) => item.selected)) {
+    expect(resource.artifact, `${resource.id} should have a copied artifact`).not.toBeNull();
+    const artifactPath = path.join(rootPath, resource.artifact!.relativePath);
+    expect(existsSync(artifactPath), resource.artifact!.relativePath).toBe(true);
+    expect(
+      createHash("sha256").update(readFileSync(artifactPath)).digest("hex")
+    ).toBe(resource.artifact!.sha256);
+    expect(manifest.handoff.files).toContain(resource.artifact!.relativePath);
+  }
+  expect(JSON.stringify(manifest)).not.toContain("tempFilePath");
   expect(JSON.parse(await page.locator("pre.workspace-code-preview").innerText())).toEqual(manifest);
   return manifest;
 }
@@ -231,9 +257,9 @@ test("switches to the trusted fallback and records its provenance", async () => 
   await page.getByRole("button", { name: "查看并确认" }).click();
   await expectNoSeriousAccessibilityViolations("replacement plan");
   await expectMainPanelAtTop("trusted replacement plan");
-  await expect(page.getByRole("heading", { name: "AI Dev Starter Mirror", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "AI Dev Starter Alternate Route", exact: true })).toBeVisible();
   await expect(page.getByText("替代 sample-project")).toBeVisible();
-  const replacementDetails = page.locator(".agent-resource-row").filter({ hasText: "AI Dev Starter Mirror" }).locator(".resource-plan-details");
+  const replacementDetails = page.locator(".agent-resource-row").filter({ hasText: "AI Dev Starter Alternate Route" }).locator(".resource-plan-details");
   await expect(replacementDetails).toBeVisible();
   const replacementDetailsBounds = await replacementDetails.boundingBox();
   expect(replacementDetailsBounds?.width).toBeGreaterThan(800);

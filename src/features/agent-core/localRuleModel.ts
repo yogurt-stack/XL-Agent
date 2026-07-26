@@ -10,6 +10,7 @@ import type {
 
 import {
   inferLocalTaskIntent,
+  resourceIdsForCapabilities,
   resourceIdsForTaskIntent
 } from "./taskRequirements";
 import type { LocalTaskIntent } from "./types";
@@ -135,6 +136,81 @@ export class LocalRuleModelRuntime implements ModelRuntime {
           }
         },
         "生成资源计划前需要读取固定系统画像。"
+      );
+    }
+
+    if (state.routeDecision?.status === "needs_links") {
+      const resourceIds = state.routeDecision.resourceIds;
+      if (!hasSuccessfulResult(context.toolResults, "search_trusted_catalog")) {
+        return createDecision(
+          context,
+          {
+            actionId: createActionId(context, "linked-resources"),
+            type: "call_tool",
+            purpose: "按用户明确提供并由 Provider 解析的链接读取可信资源元数据。",
+            call: {
+              callId: `local-call-${context.step}-linked-resources`,
+              name: "search_trusted_catalog",
+              input: {
+                query: "用户明确提供的可信链接资源",
+                resourceIds
+              }
+            }
+          },
+          "needs_links 路由不推荐新资源，只解析用户已经提供的可信链接。"
+        );
+      }
+      return createDecision(
+        context,
+        {
+          actionId: createActionId(context, "linked-plan"),
+          type: "create_plan",
+          resourceIds,
+          explanation: "计划只包含用户明确提供且已由可信来源 Provider 精确解析的资源。"
+        },
+        "可信链接元数据已读取，可以生成不含额外推荐项的基础资源计划。"
+      );
+    }
+
+    if (state.taskRequirements?.intent.startsWith("skill:")) {
+      const inferredIntent = inferLocalTaskIntent(
+        state.task,
+        workloadAnswerFrom(state)
+      );
+      const resourceIds =
+        inferredIntent === "ambiguous"
+          ? resourceIdsForCapabilities(
+              state.taskRequirements.requiredCapabilities
+            )
+          : resourceIdsForTaskIntent(inferredIntent, state.answers);
+      if (!hasSuccessfulResult(context.toolResults, "search_trusted_catalog")) {
+        return createDecision(
+          context,
+          {
+            actionId: createActionId(context, "domain-skill-catalog"),
+            type: "call_tool",
+            purpose: `查询${state.taskRequirements.label}所需的可信资源。`,
+            call: {
+              callId: `local-call-${context.step}-domain-skill-catalog`,
+              name: "search_trusted_catalog",
+              input: {
+                query: state.taskRequirements.label,
+                resourceIds
+              }
+            }
+          },
+          `Domain Skill 已定义必需能力，需要先核对可信来源 Provider。`
+        );
+      }
+      return createDecision(
+        context,
+        {
+          actionId: createActionId(context, "domain-skill-plan"),
+          type: "create_plan",
+          resourceIds,
+          explanation: `根据 ${state.taskRequirements.label} Domain Skill 的能力需求生成资源组合。`
+        },
+        "Domain Skill 需求和可信目录查询已经完成，可以生成计划。"
       );
     }
 

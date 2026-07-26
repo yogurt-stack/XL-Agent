@@ -1,16 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { InMemoryAgentToolExecutor } from "./agentServices";
-import { LocalRuleModelRuntime } from "./localRuleModel";
-import {
-  ModelConnectionController,
-  ModelConnectionRequestError,
-  toModelConnectionError
-} from "./modelConnection";
-import { FallbackModelRuntime, parseRemoteDecision, RemoteLlmModelRuntime } from "./remoteModel";
-import { isRestorableAgentState } from "./persistence";
-import { createMockAgentRuntime } from "./runtime";
-import { createSystemProfileToolOutput, isHostSystemProfile } from "./systemProfile";
-import type { AgentEvent, AgentState } from "./types";
+import { createInitialAgentState } from "./machine";
+import type { ModelConnectionState } from "./modelConnection";
+import type { AgentRuntimeSnapshot } from "./runtimeBridge";
+import type { AgentState, AgentUserEvent } from "./types";
 
 export type PersistenceViewState = {
   status: "browser_only" | "loading" | "ready" | "error";
@@ -19,229 +11,157 @@ export type PersistenceViewState = {
   error: string | null;
 };
 
-function createRendererAgentServices() {
-  const localModel = new LocalRuleModelRuntime();
-  const electronBridge = window.xunleiAgent;
-  const modelConnection = new ModelConnectionController(
-    electronBridge
-      ? {
-          async getConnectionInfo() {
-            const result = await electronBridge.getModelConnectionInfo();
-            if (!result.ok) throw new ModelConnectionRequestError(result.error);
-            return result.info;
-          },
-          async testConnection() {
-            const result = await electronBridge.testModelConnection();
-            if (!result.ok) return result;
-            try {
-              parseRemoteDecision(result.decision);
-              return { ok: true };
-            } catch (error) {
-              return { ok: false, error: toModelConnectionError(error) };
-            }
-          }
-        }
-      : undefined
-  );
-
-  if (!electronBridge) {
-    return {
-      runtime: createMockAgentRuntime(localModel),
-      modelConnection,
-      persistState: async (_state: AgentState) => null,
-      restoreRuntime: async () => null,
-      flushPersistence: async () => undefined,
-      readWorkspaceFile: async () => ({
-        ok: false as const,
+function createInitialModelConnectionState(
+  bridgeAvailable: boolean
+): ModelConnectionState {
+  return bridgeAvailable
+    ? {
+        status: "checking",
+        activeProvider: "local-rule",
+        configured: false,
+        endpointHost: null,
+        model: null,
+        lastCheckedAt: null
+      }
+    : {
+        status: "unconfigured",
+        activeProvider: "local-rule",
+        configured: false,
+        endpointHost: null,
+        model: null,
+        lastCheckedAt: null,
         error: {
-          code: "ELECTRON_BRIDGE_UNAVAILABLE",
-          message: "浏览器模式没有真实工作区文件。",
+          code: "MODEL_BRIDGE_UNAVAILABLE",
+          message: "当前页面没有 Electron Main Agent Runtime 桥接。",
           retriable: false
         }
-      }),
-      openWorkspace: async () => ({
-        ok: false as const,
-        error: "浏览器模式没有真实工作区目录。"
-      })
-    };
-  }
-
-  let persistenceQueue: Promise<unknown> = Promise.resolve();
-  const waitForPersistence = () => persistenceQueue;
-  const persistState = (state: AgentState) => {
-    if (state.phase === "intake" || state.taskId === "unassigned" || !state.task) {
-      return Promise.resolve(null);
-    }
-    const operation = persistenceQueue
-      .catch(() => undefined)
-      .then(async () => {
-        const result = await electronBridge.saveTaskState(state);
-        if (!result.ok) throw new Error(result.error.message);
-        return result.savedAt;
-      });
-    persistenceQueue = operation;
-    return operation;
-  };
-
-  const tools = new InMemoryAgentToolExecutor(
-    async () => {
-      const result = await electronBridge.readSystemProfile();
-      if (!result.ok) throw new Error(result.error.message);
-      if (!isHostSystemProfile(result.profile)) {
-        throw new Error("Electron 返回了非法系统画像。");
-      }
-      return createSystemProfileToolOutput(result.profile);
-    },
-    async (request) => {
-      await waitForPersistence();
-      return electronBridge.controlledDownload(request);
-    },
-    async (request) => {
-      await waitForPersistence();
-      return electronBridge.exportWorkspace(request);
-    }
-  );
-
-  const remoteModel = new RemoteLlmModelRuntime({
-    async requestDecision(context) {
-      const result = await electronBridge.requestModelDecision(context);
-      if (!result.ok) throw new ModelConnectionRequestError(result.error);
-      return result.decision;
-    }
-  });
-  const fallbackModel = new FallbackModelRuntime(remoteModel, localModel, {
-    shouldAttemptPrimary: () => modelConnection.shouldAttemptRemote(),
-    onPrimarySuccess: (decision) => modelConnection.recordRemoteSuccess(decision),
-    onPrimaryFailure: (error) => modelConnection.recordFallback(error)
-  });
-  const runtime = createMockAgentRuntime(
-    fallbackModel,
-    tools,
-    "controlled_download"
-  );
-  return {
-    runtime,
-    modelConnection,
-    persistState,
-    async restoreRuntime() {
-      const result = await electronBridge.loadTaskState();
-      if (!result.ok) throw new Error(result.error.message);
-      if (!result.restored) return null;
-      if (!isRestorableAgentState(result.restored.state)) {
-        throw new Error("SQLite 返回了不兼容或损坏的 AgentState。");
-      }
-      runtime.dispatch({
-        type: "TASK_STATE_RESTORED",
-        state: result.restored.state,
-        approvalValid: result.restored.approval.valid
-      });
-      return result.restored.savedAt;
-    },
-    async flushPersistence() {
-      await waitForPersistence().catch(() => undefined);
-      await electronBridge.flushTaskPersistence();
-    },
-    readWorkspaceFile: (relativePath: string) =>
-      electronBridge.readWorkspaceFile({
-        taskId: runtime.getState().taskId,
-        revision: runtime.getState().revision,
-        relativePath
-      }),
-    openWorkspace: () =>
-      electronBridge.openWorkspace({
-        taskId: runtime.getState().taskId,
-        revision: runtime.getState().revision
-      })
-  };
+      };
 }
 
+/**
+ * Renderer 的 Agent 视图适配器。
+ *
+ * 这里不再创建模型、状态机、Policy 或 Tool。所有状态转换都通过
+ * contextBridge 派发到 Electron Main，并以 Main 广播的快照为唯一事实源。
+ */
 export function useAgentCore() {
-  const servicesRef = useRef<ReturnType<typeof createRendererAgentServices>>();
-  if (!servicesRef.current) servicesRef.current = createRendererAgentServices();
-  const services = servicesRef.current;
-  const { runtime, modelConnection } = services;
-  const [state, setState] = useState(() => runtime.getState());
-  const [modelConnectionState, setModelConnectionState] = useState(() => modelConnection.getState());
-  const [persistenceState, setPersistenceState] = useState<PersistenceViewState>(() => ({
-    status: window.xunleiAgent ? "loading" : "browser_only",
-    restoredAt: null,
-    lastSavedAt: null,
-    error: null
-  }));
+  const bridge = window.xunleiAgent;
+  const stateRef = useRef<AgentState>(createInitialAgentState());
+  const [state, setState] = useState(stateRef.current);
+  const [modelConnectionState, setModelConnectionState] = useState(
+    () => createInitialModelConnectionState(Boolean(bridge))
+  );
+  const [persistenceState, setPersistenceState] = useState<PersistenceViewState>(
+    () => ({
+      status: bridge ? "loading" : "browser_only",
+      restoredAt: null,
+      lastSavedAt: null,
+      error: bridge ? null : "浏览器模式不运行 Agent Runtime。"
+    })
+  );
 
-  const dispatch = useCallback((event: AgentEvent) => {
-    return runtime.dispatch(event);
-  }, [runtime]);
+  const applySnapshot = useCallback((snapshot: AgentRuntimeSnapshot) => {
+    stateRef.current = snapshot.state;
+    setState(snapshot.state);
+    setModelConnectionState(snapshot.modelConnection);
+    setPersistenceState(snapshot.persistence);
+  }, []);
 
-  const testModelConnection = useCallback(() => modelConnection.testConnection(), [modelConnection]);
-  const retryTaskLocally = useCallback(() => {
-    const task = runtime.getState().task.trim();
-    modelConnection.useLocalModel(
-      "远程规划未在安全步数内生成计划，本次重试已切换本地规则模型。"
-    );
-    runtime.dispatch({ type: "RESET" });
-    return task
-      ? runtime.dispatch({ type: "SUBMIT_TASK", task })
-      : runtime.getState();
-  }, [modelConnection, runtime]);
-
-  useEffect(() => {
-    let disposed = false;
-    const unsubscribe = runtime.subscribe((nextState) => {
-      setState(nextState);
-      void services.persistState(nextState).then(
-        (savedAt) => {
-          if (!disposed && savedAt) {
-            setPersistenceState((current) => ({
-              ...current,
-              status: "ready",
-              lastSavedAt: savedAt,
-              error: null
-            }));
-          }
-        },
-        (error) => {
-          if (!disposed) {
-            setPersistenceState((current) => ({
-              ...current,
-              status: "error",
-              error: error instanceof Error ? error.message : "SQLite 写入失败。"
-            }));
-          }
-        }
-      );
-    });
-    const unsubscribeModelConnection = modelConnection.subscribe(setModelConnectionState);
-    void modelConnection.initialize();
-    void services.restoreRuntime().then(
-      (restoredAt) => {
-        if (disposed) return;
-        setState(runtime.getState());
-        setPersistenceState((current) => ({
-          ...current,
-          status: window.xunleiAgent ? "ready" : "browser_only",
-          restoredAt,
-          error: null
-        }));
-        runtime.start();
-      },
-      (error) => {
-        if (disposed) return;
+  const dispatch = useCallback(
+    async (event: AgentUserEvent) => {
+      if (!bridge) return stateRef.current;
+      const result = await bridge.dispatchAgentEvent(event);
+      if (result.ok) {
+        applySnapshot(result.snapshot);
+      } else {
         setPersistenceState((current) => ({
           ...current,
           status: "error",
-          error: error instanceof Error ? error.message : "SQLite 恢复失败。"
+          error: `${result.error.code}: ${result.error.message}`
         }));
-        runtime.start();
       }
-    );
+      return stateRef.current;
+    },
+    [applySnapshot, bridge]
+  );
+
+  const testModelConnection = useCallback(async () => {
+    if (!bridge) return modelConnectionState;
+    const result = await bridge.testModelConnection();
+    if (result.ok) applySnapshot(result.snapshot);
+    return result.ok ? result.snapshot.modelConnection : modelConnectionState;
+  }, [applySnapshot, bridge, modelConnectionState]);
+
+  const retryTaskLocally = useCallback(async () => {
+    if (!bridge) return stateRef.current;
+    const result = await bridge.retryTaskLocally();
+    if (result.ok) applySnapshot(result.snapshot);
+    return stateRef.current;
+  }, [applySnapshot, bridge]);
+
+  const flushPersistence = useCallback(async () => {
+    if (bridge) await bridge.flushTaskPersistence();
+  }, [bridge]);
+
+  const readWorkspaceFile = useCallback(
+    async (relativePath: string) => {
+      if (!bridge) {
+        return {
+          ok: false as const,
+          error: {
+            code: "ELECTRON_BRIDGE_UNAVAILABLE",
+            message: "浏览器模式没有真实工作区文件。",
+            retriable: false
+          }
+        };
+      }
+      return bridge.readWorkspaceFile({
+        taskId: stateRef.current.taskId,
+        revision: stateRef.current.revision,
+        relativePath
+      });
+    },
+    [bridge]
+  );
+
+  const openWorkspace = useCallback(async () => {
+    if (!bridge) {
+      return {
+        ok: false as const,
+        error: "浏览器模式没有真实工作区目录。"
+      };
+    }
+    return bridge.openWorkspace({
+      taskId: stateRef.current.taskId,
+      revision: stateRef.current.revision
+    });
+  }, [bridge]);
+
+  useEffect(() => {
+    if (!bridge) return;
+    let disposed = false;
+    const unsubscribe = bridge.onAgentRuntimeSnapshot((snapshot) => {
+      if (!disposed) applySnapshot(snapshot);
+    });
+
+    void bridge.getAgentRuntimeSnapshot().then((result) => {
+      if (disposed) return;
+      if (result.ok) {
+        applySnapshot(result.snapshot);
+      } else {
+        setPersistenceState((current) => ({
+          ...current,
+          status: "error",
+          error: `${result.error.code}: ${result.error.message}`
+        }));
+      }
+    });
+
     return () => {
       disposed = true;
       unsubscribe();
-      unsubscribeModelConnection();
-      runtime.stop();
     };
-  }, [modelConnection, runtime, services]);
+  }, [applySnapshot, bridge]);
 
   return {
     state,
@@ -250,8 +170,8 @@ export function useAgentCore() {
     persistenceState,
     testModelConnection,
     retryTaskLocally,
-    flushPersistence: services.flushPersistence,
-    readWorkspaceFile: services.readWorkspaceFile,
-    openWorkspace: services.openWorkspace
+    flushPersistence,
+    readWorkspaceFile,
+    openWorkspace
   };
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createInitialAgentState, transition } from "./machine";
+import { ExtensibleAgentRouter } from "./router";
 import { createSystemProfileToolOutput } from "./systemProfile";
 import type { AgentState, HostSystemProfile } from "./types";
 
@@ -25,7 +26,7 @@ const linuxHostProfile: HostSystemProfile = {
 function createWaitingApprovalState(): AgentState {
   let state = createInitialAgentState();
   state = transition(state, { type: "SUBMIT_TASK", task: "准备 Windows AI 环境" });
-  state = transition(state, { type: "ROUTE_RESOLVED", route: "windows-ai-development" });
+  state = transition(state, new ExtensibleAgentRouter().route(state)!);
   state = transition(state, {
     type: "ANSWER_CLARIFICATION",
     questionId: "primary-workload",

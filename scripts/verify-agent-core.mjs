@@ -1,12 +1,11 @@
 import { createRequire } from "node:module";
 import { rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const outputDir = path.join(tmpdir(), "xunlei-agent-core-verify");
+const outputDir = path.join(root, "node_modules", ".cache", "xunlei-agent-core-verify");
 const tscBin = path.join(root, "node_modules", ".bin", process.platform === "win32" ? "tsc.cmd" : "tsc");
 const coreFiles = ["types.ts", "catalog.ts", "taskRequirements.ts", "planValidation.ts", "machine.ts", "interfaces.ts", "agentServices.ts", "mockServices.ts", "localRuleModel.ts", "modelConnection.ts", "remoteModel.ts", "runtime.ts", "manifest.ts", "persistence.ts"].map((file) =>
   path.join("src", "features", "agent-core", file)
@@ -296,7 +295,7 @@ const directSend = (event) => {
   primaryOnlyState = transition(primaryOnlyState, event);
 };
 directSend({ type: "SUBMIT_TASK", task: "准备 Windows AI 环境" });
-directSend({ type: "ROUTE_RESOLVED", route: "windows-ai-development" });
+directSend(new FixedWindowsRouter().route(primaryOnlyState));
 directSend({ type: "ANSWER_CLARIFICATION", questionId: "primary-workload", answer: "Python AI 开发" });
 directSend({ type: "SKIP_CLARIFICATION", questionId: "mirror-policy" });
 directSend({ type: "PLAN_GENERATED" });
@@ -538,9 +537,9 @@ modelRuntime.dispatch({
 });
 await runModelUntil("waiting_approval");
 assert(modelState.resources.some((resource) => resource.id === "node-lts"), "Runtime plan must include Node.js");
-assert(modelState.agentRun.step === 4, "Known task must produce four model decisions");
+assert(modelState.agentRun.step === 3, "Deterministic routing plus planning must produce three model decisions");
 assert(modelState.agentRun.toolResults.length === 2, "Runtime must record both read-only tool results");
-assert(modelState.agentRun.policyAudit.length === 4, "Runtime must audit every model action");
+assert(modelState.agentRun.policyAudit.length === 3, "Runtime must audit every model action");
 
 modelRuntime.dispatch({ type: "APPROVE_PLAN", revision: modelState.revision });
 await runModelUntil("awaiting_failure_action");
@@ -684,7 +683,7 @@ ambiguousRuntime.dispatch({
   answer: "仅 Python AI"
 });
 await runAmbiguousUntil("waiting_approval");
-assert(ambiguousState.agentRun.step === 5, "Ambiguous task must finish planning within five model steps");
+assert(ambiguousState.agentRun.step === 4, "Ambiguous task must finish planning within four model steps after deterministic routing");
 
 const limitState = createInitialAgentState();
 const limitRuntime = new AgentRuntime({
@@ -697,7 +696,7 @@ const limitRuntime = new AgentRuntime({
   policy: new DefaultAgentPolicy(),
   initialState: {
     ...limitState,
-    phase: "routing",
+    phase: "planning",
     task: "准备 Python AI 环境",
     agentRun: { ...limitState.agentRun, step: 6, status: "thinking" }
   },

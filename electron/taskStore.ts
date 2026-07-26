@@ -6,6 +6,7 @@ import type {
   WorkspaceExportOutput,
   WorkspaceSnapshot
 } from "./workspaceExporter";
+import type { DownloadArtifactRecord } from "./downloadArtifacts";
 
 export type PersistedAgentState = WorkspaceSnapshot & {
   activeResourceId: string | null;
@@ -56,6 +57,7 @@ export type TaskHistoryDetail = {
   state: PersistedAgentState;
   approvals: ApprovalRecord[];
   workspaceExports: WorkspaceExportOutput[];
+  downloadArtifacts: DownloadArtifactRecord[];
 };
 
 export type TaskStoreOptions = {
@@ -64,7 +66,7 @@ export type TaskStoreOptions = {
   now?: () => number;
 };
 
-export const TASK_STORE_SCHEMA_VERSION = 1;
+export const TASK_STORE_SCHEMA_VERSION = 2;
 
 export type TaskStoreSchemaInfo = {
   version: number;
@@ -76,7 +78,7 @@ export type TaskStoreSchemaInfo = {
   }>;
 };
 
-const terminalPhases = new Set(["intake", "handoff", "cancelled"]);
+const terminalPhases = new Set(["intake", "unsupported", "handoff", "cancelled"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -163,6 +165,57 @@ function isWorkspaceExportOutput(value: unknown): value is WorkspaceExportOutput
   );
 }
 
+function isDownloadArtifactRecord(
+  value: unknown
+): value is DownloadArtifactRecord {
+  return (
+    isRecord(value) &&
+    typeof value.taskId === "string" &&
+    /^[a-z0-9][a-z0-9._-]{0,127}$/i.test(value.taskId) &&
+    Number.isSafeInteger(value.revision) &&
+    (value.revision as number) > 0 &&
+    typeof value.resourceId === "string" &&
+    /^[a-z0-9][a-z0-9._-]{0,79}$/i.test(value.resourceId) &&
+    typeof value.fileName === "string" &&
+    value.fileName === path.basename(value.fileName) &&
+    value.fileName !== "." &&
+    value.fileName !== ".." &&
+    typeof value.sourceHost === "string" &&
+    value.sourceHost.length > 0 &&
+    typeof value.tempFilePath === "string" &&
+    path.isAbsolute(value.tempFilePath) &&
+    Number.isSafeInteger(value.bytesWritten) &&
+    (value.bytesWritten as number) >= 0 &&
+    typeof value.sha256 === "string" &&
+    /^[a-f0-9]{64}$/i.test(value.sha256) &&
+    typeof value.expectedSha256 === "string" &&
+    /^[a-f0-9]{64}$/i.test(value.expectedSha256) &&
+    (value.verificationStatus === "verified" ||
+      value.verificationStatus === "test-fixture") &&
+    typeof value.verifiedAt === "string" &&
+    Number.isFinite(Date.parse(value.verifiedAt))
+  );
+}
+
+function downloadArtifactFromRow(
+  row: ParamsObject
+): DownloadArtifactRecord | null {
+  const candidate = {
+    taskId: asString(row.task_id),
+    revision: asNumber(row.revision),
+    resourceId: asString(row.resource_id),
+    fileName: asString(row.file_name),
+    sourceHost: asString(row.source_host),
+    tempFilePath: asString(row.temp_file_path),
+    bytesWritten: asNumber(row.bytes_written),
+    sha256: asString(row.sha256),
+    expectedSha256: asString(row.expected_sha256),
+    verificationStatus: asString(row.verification_status),
+    verifiedAt: asString(row.verified_at)
+  };
+  return isDownloadArtifactRecord(candidate) ? candidate : null;
+}
+
 function stateHasErrors(state: PersistedAgentState) {
   return (
     state.resources.some((resource) => resource.status === "failed") ||
@@ -237,6 +290,30 @@ const schemaMigrations: SchemaMigration[] = [
           name TEXT NOT NULL,
           applied_at TEXT NOT NULL
         );
+      `);
+    }
+  },
+  {
+    version: 2,
+    name: "verified-download-artifacts",
+    up(database) {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS download_artifacts (
+          task_id TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          resource_id TEXT NOT NULL,
+          file_name TEXT NOT NULL,
+          source_host TEXT NOT NULL,
+          temp_file_path TEXT NOT NULL,
+          bytes_written INTEGER NOT NULL,
+          sha256 TEXT NOT NULL,
+          expected_sha256 TEXT NOT NULL,
+          verification_status TEXT NOT NULL,
+          verified_at TEXT NOT NULL,
+          PRIMARY KEY (task_id, revision, resource_id)
+        );
+        CREATE INDEX IF NOT EXISTS download_artifacts_task_revision
+          ON download_artifacts (task_id, revision);
       `);
     }
   }
@@ -424,6 +501,46 @@ export class TaskStore {
                OR approval_records.expires_at <= excluded.approved_at`,
             [state.taskId, state.revision, savedAt, expiresAt]
           );
+          for (const resource of state.resources) {
+            if (
+              !resource.selected ||
+              (resource.status !== "downloaded" &&
+                resource.status !== "verified")
+            ) {
+              continue;
+            }
+            const previousArtifact = firstRow(
+              this.database,
+              `SELECT file_name, source_host, temp_file_path, bytes_written,
+                      sha256, expected_sha256, verification_status, verified_at
+               FROM download_artifacts
+               WHERE task_id = ? AND resource_id = ? AND revision < ?
+               ORDER BY revision DESC
+               LIMIT 1`,
+              [state.taskId, resource.id, state.revision]
+            );
+            if (!previousArtifact) continue;
+            this.database.run(
+              `INSERT OR IGNORE INTO download_artifacts (
+                task_id, revision, resource_id, file_name, source_host,
+                temp_file_path, bytes_written, sha256, expected_sha256,
+                verification_status, verified_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              [
+                state.taskId,
+                state.revision,
+                resource.id,
+                asString(previousArtifact.file_name),
+                asString(previousArtifact.source_host),
+                asString(previousArtifact.temp_file_path),
+                asNumber(previousArtifact.bytes_written),
+                asString(previousArtifact.sha256),
+                asString(previousArtifact.expected_sha256),
+                asString(previousArtifact.verification_status),
+                asString(previousArtifact.verified_at)
+              ]
+            );
+          }
         } else if (state.approvedRevision === null) {
           this.database.run(
             `UPDATE approval_records
@@ -628,12 +745,102 @@ export class TaskStore {
         exportStatement.free();
       }
 
+      const downloadArtifacts: DownloadArtifactRecord[] = [];
+      const artifactStatement = this.database.prepare(
+        `SELECT task_id, revision, resource_id, file_name, source_host,
+                temp_file_path, bytes_written, sha256, expected_sha256,
+                verification_status, verified_at
+         FROM download_artifacts
+         WHERE task_id = ?
+         ORDER BY revision DESC, resource_id`
+      );
+      try {
+        artifactStatement.bind([taskId]);
+        while (artifactStatement.step()) {
+          const artifact = downloadArtifactFromRow(
+            artifactStatement.getAsObject()
+          );
+          if (artifact) downloadArtifacts.push(artifact);
+        }
+      } finally {
+        artifactStatement.free();
+      }
+
       return {
         summary: taskHistorySummary(state, updatedAt),
         state,
         approvals,
-        workspaceExports
+        workspaceExports,
+        downloadArtifacts
       };
+    });
+  }
+
+  async recordDownloadArtifact(value: DownloadArtifactRecord) {
+    return this.enqueue(async () => {
+      if (!isDownloadArtifactRecord(value)) {
+        throw new Error("Refusing to persist an invalid download artifact.");
+      }
+      if (
+        value.verificationStatus === "verified" &&
+        value.sha256.toLowerCase() !== value.expectedSha256.toLowerCase()
+      ) {
+        throw new Error("Verified download artifact SHA256 does not match expected SHA256.");
+      }
+      this.database.run(
+        `INSERT INTO download_artifacts (
+          task_id, revision, resource_id, file_name, source_host,
+          temp_file_path, bytes_written, sha256, expected_sha256,
+          verification_status, verified_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(task_id, revision, resource_id) DO UPDATE SET
+          file_name = excluded.file_name,
+          source_host = excluded.source_host,
+          temp_file_path = excluded.temp_file_path,
+          bytes_written = excluded.bytes_written,
+          sha256 = excluded.sha256,
+          expected_sha256 = excluded.expected_sha256,
+          verification_status = excluded.verification_status,
+          verified_at = excluded.verified_at`,
+        [
+          value.taskId,
+          value.revision,
+          value.resourceId,
+          value.fileName,
+          value.sourceHost,
+          value.tempFilePath,
+          value.bytesWritten,
+          value.sha256.toLowerCase(),
+          value.expectedSha256.toLowerCase(),
+          value.verificationStatus,
+          value.verifiedAt
+        ]
+      );
+      await this.persist();
+    });
+  }
+
+  async listDownloadArtifacts(taskId: string, revision: number) {
+    return this.enqueue(() => {
+      const artifacts: DownloadArtifactRecord[] = [];
+      const statement = this.database.prepare(
+        `SELECT task_id, revision, resource_id, file_name, source_host,
+                temp_file_path, bytes_written, sha256, expected_sha256,
+                verification_status, verified_at
+         FROM download_artifacts
+         WHERE task_id = ? AND revision = ?
+         ORDER BY resource_id`
+      );
+      try {
+        statement.bind([taskId, revision]);
+        while (statement.step()) {
+          const artifact = downloadArtifactFromRow(statement.getAsObject());
+          if (artifact) artifacts.push(artifact);
+        }
+      } finally {
+        statement.free();
+      }
+      return artifacts;
     });
   }
 

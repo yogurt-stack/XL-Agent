@@ -1,6 +1,7 @@
 export type AgentPhase =
   | "intake"
   | "routing"
+  | "unsupported"
   | "clarifying"
   | "planning"
   | "waiting_approval"
@@ -42,16 +43,52 @@ export type ResourceCapability =
   | "code-editor"
   | "source-control"
   | "node-runtime"
+  | "powershell-runtime"
   | "workspace-template";
 
 export type ResourceSourceTrust = "official" | "trusted-catalog" | "trusted-mirror" | "unverified";
 
+export type TrustedCatalogStatus = "active" | "not-yet-valid" | "expired" | "invalid";
+
+export type TrustedCatalogMetadata = {
+  schemaVersion: 1;
+  catalogVersion: string;
+  generatedAt: string;
+  expiresAt: string;
+  sourceSha256: string;
+};
+
+export type TrustedResourceVerification = {
+  checksumAlgorithm: "sha256";
+  checksumSource:
+    | "vendor-manifest"
+    | "github-release-asset-digest"
+    | "pinned-repository-snapshot";
+  checksumSourceUrl: string;
+  signatureType: "authenticode" | "upstream-release" | "none";
+  expectedPublisher?: string;
+  signatureEnforcement: "planned" | "not-applicable";
+};
+
 export type LocalTaskIntent = "python-ai" | "fullstack-ai" | "base-development" | "ambiguous";
 
 export type TaskRequirements = {
-  intent: LocalTaskIntent;
+  intent: LocalTaskIntent | "user-links" | `skill:${string}`;
   label: string;
   requiredCapabilities: ResourceCapability[];
+};
+
+export type RouteStatus = "supported" | "needs_links" | "unsupported";
+
+export type RouteDecision = {
+  status: RouteStatus;
+  reason: string;
+  skillId: string | null;
+  sourceProviderId: string | null;
+  userLinks: string[];
+  resourceIds: string[];
+  clarifications: ClarificationQuestion[];
+  requirements: TaskRequirements | null;
 };
 
 export type PlanValidationIssueCode =
@@ -94,7 +131,10 @@ export type TrustedResource = {
   id: string;
   name: string;
   version: string;
+  publisher: string;
   source: string;
+  homepage: string;
+  releasePage: string;
   sizeMb: number;
   license: string;
   purpose: string;
@@ -106,6 +146,8 @@ export type TrustedResource = {
   supportedOperatingSystems: TargetOperatingSystem[];
   supportedArchitectures: TargetArchitecture[];
   sourceTrust: ResourceSourceTrust;
+  catalogStatus: "active";
+  verification: TrustedResourceVerification;
   download: TrustedDownloadMetadata;
   fallbackId?: string;
 };
@@ -190,6 +232,7 @@ export type AgentState = {
   revision: number;
   task: string;
   route: string | null;
+  routeDecision: RouteDecision | null;
   systemProfile: SystemProfile;
   hostProfile: HostSystemProfile | null;
   clarifications: ClarificationQuestion[];
@@ -307,6 +350,7 @@ export type SimulatedDownloadOutput = {
 
 export type ControlledDownloadOutput = {
   resourceId: string;
+  fileName: string;
   urlHost: string;
   bytesWritten: number;
   sha256: string;
@@ -397,7 +441,8 @@ export type AgentRunState = {
 
 export type AgentEvent =
   | { type: "SUBMIT_TASK"; task: string; taskId?: string }
-  | { type: "ROUTE_RESOLVED"; route: string }
+  | { type: "ROUTE_RESOLVED"; decision: RouteDecision }
+  | { type: "TASK_REQUIREMENTS_RESOLVED"; requirements: TaskRequirements }
   | { type: "ANSWER_CLARIFICATION"; questionId: string; answer: string }
   | { type: "SKIP_CLARIFICATION"; questionId: string }
   | { type: "PLAN_GENERATED" }
@@ -425,3 +470,19 @@ export type AgentEvent =
   | { type: "MODEL_RUNTIME_FAILED"; reason: string }
   | { type: "CANCEL_TASK" }
   | { type: "RESET" };
+
+export type AgentUserEvent = Extract<
+  AgentEvent,
+  {
+    type:
+      | "SUBMIT_TASK"
+      | "ANSWER_CLARIFICATION"
+      | "SKIP_CLARIFICATION"
+      | "TOGGLE_RESOURCE"
+      | "APPROVE_PLAN"
+      | "RESOLVE_DOWNLOAD_FAILURE"
+      | "RETRY_WORKSPACE_EXPORT"
+      | "CANCEL_TASK"
+      | "RESET";
+  }
+>;

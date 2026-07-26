@@ -47,8 +47,15 @@ if (coreCatalogCompilation.status !== 0) process.exit(coreCatalogCompilation.sta
 
 const require = createRequire(import.meta.url);
 const { downloadTrustedResource, toControlledDownloadError } = require(path.join(outputDir, "downloadClient.js"));
-const { getTrustedDownloadMetadata } = require(path.join(outputDir, "trustedDownloadCatalog.js"));
-const { trustedCatalog } = require(path.join(coreOutputDir, "catalog.js"));
+const {
+  getTrustedCatalogStatus,
+  getTrustedDownloadMetadata,
+  trustedCatalogMetadata: mainCatalogMetadata
+} = require(path.join(outputDir, "trustedDownloadCatalog.js"));
+const {
+  trustedCatalog,
+  trustedCatalogMetadata: rendererCatalogMetadata
+} = require(path.join(coreOutputDir, "catalog.js"));
 
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
@@ -77,8 +84,17 @@ const baseRequest = {
 
 try {
   const trustedMetadata = getTrustedDownloadMetadata("python-312");
-  assert(trustedMetadata?.url.startsWith("https://downloads.xunlei.example/"), "Main-process catalog must resolve trusted resource IDs");
+  assert(trustedMetadata?.url.startsWith("https://www.python.org/"), "Main-process catalog must resolve official trusted resource IDs");
   assert(getTrustedDownloadMetadata("unknown-resource") === null, "Main-process catalog must reject unknown resource IDs");
+  assert(
+    JSON.stringify(mainCatalogMetadata) === JSON.stringify(rendererCatalogMetadata),
+    "Renderer and main process must use the same catalog version and source digest"
+  );
+  assert(
+    getTrustedCatalogStatus(new Date(mainCatalogMetadata.expiresAt)) === "expired" &&
+      getTrustedDownloadMetadata("python-312", new Date(mainCatalogMetadata.expiresAt)) === null,
+    "Main-process catalog must fail closed at expiry"
+  );
   trustedMetadata.allowedHosts.push("evil.example");
   assert(
     !getTrustedDownloadMetadata("python-312").allowedHosts.includes("evil.example"),

@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { DefaultAgentPolicy, InMemoryAgentToolExecutor } from "./agentServices";
 import { createInitialAgentState, transition } from "./machine";
+import { ExtensibleAgentRouter } from "./router";
 import { createSystemProfileToolOutput } from "./systemProfile";
 import type { AgentAction, AgentState, HostSystemProfile } from "./types";
 
 function createWaitingApprovalState(): AgentState {
   let state = createInitialAgentState();
   state = transition(state, { type: "SUBMIT_TASK", task: "准备 Windows AI 环境" });
-  state = transition(state, { type: "ROUTE_RESOLVED", route: "windows-ai-development" });
+  state = transition(state, new ExtensibleAgentRouter().route(state)!);
   state = transition(state, {
     type: "ANSWER_CLARIFICATION",
     questionId: "primary-workload",
@@ -333,6 +334,7 @@ describe("in-memory agent tool executor", () => {
       ok: true,
       output: {
         resourceId,
+        fileName: `${resourceId}.download`,
         urlHost: new URL(activeResource.download.url).host,
         bytesWritten: 7,
         sha256: activeResource.download.expectedSha256,

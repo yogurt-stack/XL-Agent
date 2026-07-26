@@ -1,7 +1,12 @@
-import { trustedCatalog } from "./catalog";
+import { getTrustedCatalogStatus } from "./catalog";
+import { parseAgentToolCall } from "./agentSchemas";
 import type { AgentPolicy, AgentToolExecutor } from "./interfaces";
 import { createSystemProfileToolOutput } from "./systemProfile";
 import { resourceIdsForTask } from "./taskRequirements";
+import {
+  TrustedCatalogSourceProvider,
+  type SourceProvider
+} from "./sourceProviders";
 import type {
   AgentAction,
   AgentState,
@@ -35,53 +40,6 @@ const simulatedWorkspaceFiles = [
   "scripts/bootstrap.ps1",
   "scripts/verify-environment.ps1"
 ];
-
-const catalogSearchStopWords = new Set([
-  "11",
-  "ai",
-  "and",
-  "development",
-  "environment",
-  "for",
-  "resource",
-  "resources",
-  "tool",
-  "tools",
-  "windows",
-  "x64"
-]);
-
-function catalogSearchTokens(query: string) {
-  return query
-    .normalize("NFKC")
-    .toLowerCase()
-    .split(/[^\p{Letter}\p{Number}.+#-]+/u)
-    .filter(
-      (token) =>
-        token.length >= 2 &&
-        !catalogSearchStopWords.has(token)
-    );
-}
-
-function matchesCatalogQuery(
-  resource: (typeof trustedCatalog)[number],
-  queryTokens: string[]
-) {
-  if (queryTokens.length === 0) return false;
-  const searchable = [
-    resource.id,
-    resource.name,
-    resource.version,
-    resource.source,
-    resource.purpose,
-    resource.recommendation,
-    ...resource.provides
-  ]
-    .join(" ")
-    .normalize("NFKC")
-    .toLowerCase();
-  return queryTokens.some((token) => searchable.includes(token));
-}
 
 export const simulatedWorkspaceExport: WorkspaceExportRunner = async ({
   taskId,
@@ -163,6 +121,9 @@ function isValidControlledDownloadOutput(
   const output = value as Record<string, unknown>;
   return (
     output.resourceId === resource.id &&
+    typeof output.fileName === "string" &&
+    output.fileName.length > 0 &&
+    pathSafeFileName(output.fileName) &&
     typeof output.urlHost === "string" &&
     resource.download.allowedHosts.includes(output.urlHost) &&
     typeof output.bytesWritten === "number" &&
@@ -176,6 +137,14 @@ function isValidControlledDownloadOutput(
     typeof output.elapsedMs === "number" &&
     Number.isFinite(output.elapsedMs) &&
     output.elapsedMs >= 0
+  );
+}
+
+function pathSafeFileName(fileName: string) {
+  return (
+    fileName === fileName.replace(/\\/g, "/").split("/").pop() &&
+    fileName !== "." &&
+    fileName !== ".."
   );
 }
 
@@ -208,16 +177,67 @@ function isValidWorkspaceExportOutput(
   });
 }
 
+export type AgentToolHandler = (
+  call: AgentToolCall,
+  state: AgentState
+) => Promise<ToolResult>;
+
+export class AgentToolRegistry implements AgentToolExecutor {
+  private readonly handlers = new Map<AgentToolCall["name"], AgentToolHandler>();
+
+  register(name: AgentToolCall["name"], handler: AgentToolHandler) {
+    if (this.handlers.has(name)) {
+      throw new Error(`Agent Tool 已注册：${name}`);
+    }
+    this.handlers.set(name, handler);
+    return this;
+  }
+
+  list() {
+    return [...this.handlers.keys()];
+  }
+
+  async execute(call: AgentToolCall, state: AgentState) {
+    const validatedCall = parseAgentToolCall(call);
+    const handler = this.handlers.get(validatedCall.name);
+    if (!handler) throw new Error(`Agent Tool 未注册：${validatedCall.name}`);
+    return handler(validatedCall, state);
+  }
+}
+
 /** 执行只读系统画像、可信目录查询和下载相关受控工具。 */
 export class InMemoryAgentToolExecutor implements AgentToolExecutor {
+  private readonly registry = new AgentToolRegistry();
+
   constructor(
     private readonly readSystemProfile: SystemProfileReader = createSystemProfileToolOutput,
     private readonly controlledDownload?: ControlledDownloadRunner,
     private readonly workspaceExport: WorkspaceExportRunner | undefined =
-      controlledDownload ? undefined : simulatedWorkspaceExport
-  ) {}
+      controlledDownload ? undefined : simulatedWorkspaceExport,
+    private readonly sourceProvider: SourceProvider =
+      new TrustedCatalogSourceProvider()
+  ) {
+    for (const name of [
+      "read_system_profile",
+      "search_trusted_catalog",
+      "simulate_download",
+      "controlled_download",
+      "export_workspace"
+    ] as const) {
+      this.registry.register(name, (call, state) =>
+        this.executeRegistered(call, state)
+      );
+    }
+  }
 
-  async execute(call: AgentToolCall, state: AgentState): Promise<ToolResult> {
+  execute(call: AgentToolCall, state: AgentState): Promise<ToolResult> {
+    return this.registry.execute(call, state);
+  }
+
+  private async executeRegistered(
+    call: AgentToolCall,
+    state: AgentState
+  ): Promise<ToolResult> {
     if (call.name === "read_system_profile") {
       try {
         return successResult(call, state, await this.readSystemProfile());
@@ -233,16 +253,28 @@ export class InMemoryAgentToolExecutor implements AgentToolExecutor {
     }
 
     if (call.name === "search_trusted_catalog") {
-      const requestedIds = new Set(call.input.resourceIds ?? []);
-      const plannedIds = new Set(resourceIdsForTask(state));
-      const queryTokens = catalogSearchTokens(call.input.query);
-      const resources = trustedCatalog.filter((resource) => {
-        if (requestedIds.size > 0) return requestedIds.has(resource.id);
-        if (resource.sourceTrust === "trusted-mirror") return false;
-        return plannedIds.size > 0
-          ? plannedIds.has(resource.id)
-          : matchesCatalogQuery(resource, queryTokens);
-      });
+      const catalogStatus = getTrustedCatalogStatus();
+      if (catalogStatus !== "active") {
+        return errorResult(
+          call,
+          state,
+          catalogStatus === "expired"
+            ? "TRUSTED_CATALOG_EXPIRED"
+            : "TRUSTED_CATALOG_INVALID",
+          catalogStatus === "expired"
+            ? "可信资源目录已过期，必须更新并重新校验后才能生成资源计划。"
+            : "可信资源目录当前无效，不能生成资源计划。",
+          false
+        );
+      }
+      const requestedIds = call.input.resourceIds ?? [];
+      const plannedIds = resourceIdsForTask(state);
+      const resourceIds = requestedIds.length > 0 ? requestedIds : plannedIds;
+      const resources = (
+        resourceIds.length > 0
+          ? this.sourceProvider.search({ resourceIds })
+          : this.sourceProvider.search({ query: call.input.query })
+      ).filter((resource) => resource.sourceTrust !== "trusted-mirror");
       return successResult(call, state, resources);
     }
 

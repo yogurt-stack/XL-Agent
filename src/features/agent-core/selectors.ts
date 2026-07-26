@@ -64,6 +64,7 @@ export function phaseLabel(phase: AgentPhase) {
   const labels: Record<AgentPhase, string> = {
     intake: "等待任务",
     routing: "路由判断",
+    unsupported: "当前任务不受支持",
     clarifying: "澄清需求",
     planning: "生成资源计划",
     waiting_approval: "等待用户确认",

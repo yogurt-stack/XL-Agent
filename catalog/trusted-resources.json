@@ -1,0 +1,547 @@
+{
+  "$schema": "./trusted-resources.schema.json",
+  "schemaVersion": 1,
+  "catalogVersion": "2026.07.26.1",
+  "generatedAt": "2026-07-25T16:00:00.000Z",
+  "expiresAt": "2027-01-25T16:00:00.000Z",
+  "resources": [
+    {
+      "id": "python-312",
+      "name": "Python",
+      "version": "3.12.10 x64",
+      "publisher": "Python Software Foundation",
+      "source": "python.org",
+      "homepage": "https://www.python.org/",
+      "releasePage": "https://www.python.org/downloads/release/python-31210/",
+      "sizeMb": 25.7,
+      "license": "PSF License",
+      "purpose": "AI 运行时与脚本环境",
+      "recommendation": "固定到 Python 3.12 最后一个提供传统 Windows 安装器的官方版本。",
+      "required": true,
+      "dependsOn": [],
+      "provides": [
+        "python-runtime"
+      ],
+      "requiresCapabilities": [],
+      "supportedOperatingSystems": [
+        "Windows 11"
+      ],
+      "supportedArchitectures": [
+        "x64"
+      ],
+      "sourceTrust": "official",
+      "catalogStatus": "active",
+      "verification": {
+        "checksumAlgorithm": "sha256",
+        "checksumSource": "vendor-manifest",
+        "checksumSourceUrl": "https://github.com/microsoft/winget-pkgs/blob/master/manifests/p/Python/Python/3/12/3.12.10/Python.Python.3.12.installer.yaml",
+        "signatureType": "authenticode",
+        "expectedPublisher": "Python Software Foundation",
+        "signatureEnforcement": "planned"
+      },
+      "download": {
+        "url": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe",
+        "expectedSha256": "67b5635e80ea51072b87941312d00ec8927c4db9ba18938f7ad2d27b328b95fb",
+        "maxSizeMb": 32,
+        "allowedHosts": [
+          "www.python.org"
+        ]
+      },
+      "fallbackId": "miniforge-py312"
+    },
+    {
+      "id": "vscode",
+      "name": "Visual Studio Code",
+      "version": "Stable 1.129.0 x64 User",
+      "publisher": "Microsoft Corporation",
+      "source": "Microsoft",
+      "homepage": "https://code.visualstudio.com/",
+      "releasePage": "https://code.visualstudio.com/updates/v1_129",
+      "sizeMb": 105,
+      "license": "Microsoft Software License Terms",
+      "purpose": "代码编辑、终端与扩展管理",
+      "recommendation": "官方稳定版 x64 用户安装包，不要求管理员权限。",
+      "required": true,
+      "dependsOn": [],
+      "provides": [
+        "code-editor"
+      ],
+      "requiresCapabilities": [],
+      "supportedOperatingSystems": [
+        "Windows 11"
+      ],
+      "supportedArchitectures": [
+        "x64"
+      ],
+      "sourceTrust": "official",
+      "catalogStatus": "active",
+      "verification": {
+        "checksumAlgorithm": "sha256",
+        "checksumSource": "vendor-manifest",
+        "checksumSourceUrl": "https://github.com/microsoft/winget-pkgs/blob/master/manifests/m/Microsoft/VisualStudioCode/1.129.0/Microsoft.VisualStudioCode.installer.yaml",
+        "signatureType": "authenticode",
+        "expectedPublisher": "Microsoft Corporation",
+        "signatureEnforcement": "planned"
+      },
+      "download": {
+        "url": "https://vscode.download.prss.microsoft.com/dbazure/download/stable/125df4672b8a6a34975303c6b0baa124e560a4f7/VSCodeUserSetup-x64-1.129.0.exe",
+        "expectedSha256": "46b5a269597ddffa1a349212074b4ef12c9edbad6a69c193c10b1794a1a53582",
+        "maxSizeMb": 160,
+        "allowedHosts": [
+          "vscode.download.prss.microsoft.com"
+        ]
+      },
+      "fallbackId": "vscode-machine"
+    },
+    {
+      "id": "git",
+      "name": "Git for Windows",
+      "version": "2.55.0.3 x64",
+      "publisher": "Git for Windows",
+      "source": "GitHub Releases / git-for-windows",
+      "homepage": "https://gitforwindows.org/",
+      "releasePage": "https://github.com/git-for-windows/git/releases/tag/v2.55.0.windows.3",
+      "sizeMb": 62.4,
+      "license": "GPL-2.0-only",
+      "purpose": "源码管理与依赖拉取",
+      "recommendation": "Git for Windows 官方 GitHub Release 安装包。",
+      "required": true,
+      "dependsOn": [],
+      "provides": [
+        "source-control"
+      ],
+      "requiresCapabilities": [],
+      "supportedOperatingSystems": [
+        "Windows 11"
+      ],
+      "supportedArchitectures": [
+        "x64"
+      ],
+      "sourceTrust": "official",
+      "catalogStatus": "active",
+      "verification": {
+        "checksumAlgorithm": "sha256",
+        "checksumSource": "github-release-asset-digest",
+        "checksumSourceUrl": "https://api.github.com/repos/git-for-windows/git/releases/tags/v2.55.0.windows.3",
+        "signatureType": "authenticode",
+        "expectedPublisher": "Open Source Developer, Johannes Schindelin",
+        "signatureEnforcement": "planned"
+      },
+      "download": {
+        "url": "https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.3/Git-2.55.0.3-64-bit.exe",
+        "expectedSha256": "af12577d0fdff74243a5988197aa49b957d5044edc17004f6ddf0768996f1dca",
+        "maxSizeMb": 80,
+        "allowedHosts": [
+          "github.com",
+          "release-assets.githubusercontent.com"
+        ]
+      },
+      "fallbackId": "git-portable"
+    },
+    {
+      "id": "node-lts",
+      "name": "Node.js LTS",
+      "version": "24.18.0 LTS x64",
+      "publisher": "OpenJS Foundation",
+      "source": "nodejs.org",
+      "homepage": "https://nodejs.org/",
+      "releasePage": "https://nodejs.org/en/blog/release/v24.18.0",
+      "sizeMb": 31.4,
+      "license": "MIT",
+      "purpose": "Vite、npm 与前端工具链",
+      "recommendation": "固定到 Krypton LTS 的官方 Windows x64 MSI。",
+      "required": false,
+      "dependsOn": [],
+      "provides": [
+        "node-runtime"
+      ],
+      "requiresCapabilities": [],
+      "supportedOperatingSystems": [
+        "Windows 11"
+      ],
+      "supportedArchitectures": [
+        "x64"
+      ],
+      "sourceTrust": "official",
+      "catalogStatus": "active",
+      "verification": {
+        "checksumAlgorithm": "sha256",
+        "checksumSource": "vendor-manifest",
+        "checksumSourceUrl": "https://nodejs.org/dist/v24.18.0/SHASUMS256.txt",
+        "signatureType": "upstream-release",
+        "expectedPublisher": "Node.js Release Team",
+        "signatureEnforcement": "planned"
+      },
+      "download": {
+        "url": "https://nodejs.org/dist/v24.18.0/node-v24.18.0-x64.msi",
+        "expectedSha256": "e30cd4ca15529583afe0efc978f1ae3ab3a93c2400c222d0752d17900552ebb3",
+        "maxSizeMb": 48,
+        "allowedHosts": [
+          "nodejs.org"
+        ]
+      },
+      "fallbackId": "node-lts-zip"
+    },
+    {
+      "id": "powershell-7",
+      "name": "PowerShell",
+      "version": "7.6.4 x64",
+      "publisher": "Microsoft Corporation",
+      "source": "GitHub Releases / PowerShell",
+      "homepage": "https://github.com/PowerShell/PowerShell",
+      "releasePage": "https://github.com/PowerShell/PowerShell/releases/tag/v7.6.4",
+      "sizeMb": 110.2,
+      "license": "MIT",
+      "purpose": "Windows 自动化与后续受控脚本执行环境",
+      "recommendation": "加入可信目录但暂不默认选入开发资源计划，待安装执行阶段接入。",
+      "required": false,
+      "dependsOn": [],
+      "provides": [
+        "powershell-runtime"
+      ],
+      "requiresCapabilities": [],
+      "supportedOperatingSystems": [
+        "Windows 11"
+      ],
+      "supportedArchitectures": [
+        "x64"
+      ],
+      "sourceTrust": "official",
+      "catalogStatus": "active",
+      "verification": {
+        "checksumAlgorithm": "sha256",
+        "checksumSource": "github-release-asset-digest",
+        "checksumSourceUrl": "https://api.github.com/repos/PowerShell/PowerShell/releases/tags/v7.6.4",
+        "signatureType": "authenticode",
+        "expectedPublisher": "Microsoft Corporation",
+        "signatureEnforcement": "planned"
+      },
+      "download": {
+        "url": "https://github.com/PowerShell/PowerShell/releases/download/v7.6.4/PowerShell-7.6.4-win-x64.msi",
+        "expectedSha256": "d11942df52fd12470169797abfa4781d9480efdc81000ba4fa55a5b921ed8dd0",
+        "maxSizeMb": 128,
+        "allowedHosts": [
+          "github.com",
+          "release-assets.githubusercontent.com"
+        ]
+      },
+      "fallbackId": "powershell-7-zip"
+    },
+    {
+      "id": "sample-project",
+      "name": "AI Dev Starter",
+      "version": "XL-Agent dc711ec snapshot",
+      "publisher": "yogurt-stack",
+      "source": "XL-Agent pinned GitHub snapshot",
+      "homepage": "https://github.com/yogurt-stack/XL-Agent",
+      "releasePage": "https://github.com/yogurt-stack/XL-Agent/commit/dc711ec575b9a22da51fda01c1c2952aceb3f261",
+      "sizeMb": 1.6,
+      "license": "MIT",
+      "purpose": "环境验证、交接说明与受控示例代码快照",
+      "recommendation": "当前使用仓库固定提交快照；正式产品应替换为自有签名 Release。",
+      "required": true,
+      "dependsOn": [
+        "python-312",
+        "git"
+      ],
+      "provides": [
+        "workspace-template"
+      ],
+      "requiresCapabilities": [
+        "python-runtime",
+        "source-control"
+      ],
+      "supportedOperatingSystems": [
+        "Windows 11"
+      ],
+      "supportedArchitectures": [
+        "x64"
+      ],
+      "sourceTrust": "trusted-catalog",
+      "catalogStatus": "active",
+      "verification": {
+        "checksumAlgorithm": "sha256",
+        "checksumSource": "pinned-repository-snapshot",
+        "checksumSourceUrl": "https://github.com/yogurt-stack/XL-Agent/commit/dc711ec575b9a22da51fda01c1c2952aceb3f261",
+        "signatureType": "none",
+        "signatureEnforcement": "not-applicable"
+      },
+      "download": {
+        "url": "https://codeload.github.com/yogurt-stack/XL-Agent/zip/dc711ec575b9a22da51fda01c1c2952aceb3f261",
+        "expectedSha256": "1faaf2615901364045d223d8c7fc63ea2996b801dea194d50468c98558383353",
+        "maxSizeMb": 4,
+        "allowedHosts": [
+          "codeload.github.com"
+        ]
+      },
+      "fallbackId": "sample-project-mirror"
+    },
+    {
+      "id": "miniforge-py312",
+      "name": "Miniforge Python Runtime",
+      "version": "26.3.2-3 / Python 3 x64",
+      "publisher": "conda-forge",
+      "source": "GitHub Releases / conda-forge",
+      "homepage": "https://github.com/conda-forge/miniforge",
+      "releasePage": "https://github.com/conda-forge/miniforge/releases/tag/26.3.2-3",
+      "sizeMb": 75.2,
+      "license": "BSD-3-Clause",
+      "purpose": "Python 官方安装包的可信替代运行时",
+      "recommendation": "仅在主 Python 包不可用或版本不匹配时启用。",
+      "required": true,
+      "dependsOn": [],
+      "provides": [
+        "python-runtime"
+      ],
+      "requiresCapabilities": [],
+      "supportedOperatingSystems": [
+        "Windows 11"
+      ],
+      "supportedArchitectures": [
+        "x64"
+      ],
+      "sourceTrust": "trusted-mirror",
+      "catalogStatus": "active",
+      "verification": {
+        "checksumAlgorithm": "sha256",
+        "checksumSource": "github-release-asset-digest",
+        "checksumSourceUrl": "https://api.github.com/repos/conda-forge/miniforge/releases/tags/26.3.2-3",
+        "signatureType": "authenticode",
+        "expectedPublisher": "conda-forge",
+        "signatureEnforcement": "planned"
+      },
+      "download": {
+        "url": "https://github.com/conda-forge/miniforge/releases/download/26.3.2-3/Miniforge3-26.3.2-3-Windows-x86_64.exe",
+        "expectedSha256": "14a8635465b5190537ddad6286746ffebbc55a1ed2a7bb14a506595fe3191e1e",
+        "maxSizeMb": 96,
+        "allowedHosts": [
+          "github.com",
+          "release-assets.githubusercontent.com"
+        ]
+      }
+    },
+    {
+      "id": "vscode-machine",
+      "name": "Visual Studio Code Machine Installer",
+      "version": "Stable 1.129.0 x64 Machine",
+      "publisher": "Microsoft Corporation",
+      "source": "Microsoft",
+      "homepage": "https://code.visualstudio.com/",
+      "releasePage": "https://code.visualstudio.com/updates/v1_129",
+      "sizeMb": 105,
+      "license": "Microsoft Software License Terms",
+      "purpose": "VS Code 用户安装包的系统级官方替代",
+      "recommendation": "主安装包不可用且用户允许管理员安装时启用。",
+      "required": true,
+      "dependsOn": [],
+      "provides": [
+        "code-editor"
+      ],
+      "requiresCapabilities": [],
+      "supportedOperatingSystems": [
+        "Windows 11"
+      ],
+      "supportedArchitectures": [
+        "x64"
+      ],
+      "sourceTrust": "trusted-mirror",
+      "catalogStatus": "active",
+      "verification": {
+        "checksumAlgorithm": "sha256",
+        "checksumSource": "vendor-manifest",
+        "checksumSourceUrl": "https://github.com/microsoft/winget-pkgs/blob/master/manifests/m/Microsoft/VisualStudioCode/1.129.0/Microsoft.VisualStudioCode.installer.yaml",
+        "signatureType": "authenticode",
+        "expectedPublisher": "Microsoft Corporation",
+        "signatureEnforcement": "planned"
+      },
+      "download": {
+        "url": "https://vscode.download.prss.microsoft.com/dbazure/download/stable/125df4672b8a6a34975303c6b0baa124e560a4f7/VSCodeSetup-x64-1.129.0.exe",
+        "expectedSha256": "92928c03031740352816c0c7feeeafa0b065a59d70ba07a7793b5e9c28beffcf",
+        "maxSizeMb": 160,
+        "allowedHosts": [
+          "vscode.download.prss.microsoft.com"
+        ]
+      }
+    },
+    {
+      "id": "git-portable",
+      "name": "Portable Git for Windows",
+      "version": "2.55.0.3 x64",
+      "publisher": "Git for Windows",
+      "source": "GitHub Releases / git-for-windows",
+      "homepage": "https://gitforwindows.org/",
+      "releasePage": "https://github.com/git-for-windows/git/releases/tag/v2.55.0.windows.3",
+      "sizeMb": 56.2,
+      "license": "GPL-2.0-only",
+      "purpose": "Git 安装包的免安装官方替代",
+      "recommendation": "主 Git 安装包不可用时启用。",
+      "required": true,
+      "dependsOn": [],
+      "provides": [
+        "source-control"
+      ],
+      "requiresCapabilities": [],
+      "supportedOperatingSystems": [
+        "Windows 11"
+      ],
+      "supportedArchitectures": [
+        "x64"
+      ],
+      "sourceTrust": "trusted-mirror",
+      "catalogStatus": "active",
+      "verification": {
+        "checksumAlgorithm": "sha256",
+        "checksumSource": "github-release-asset-digest",
+        "checksumSourceUrl": "https://api.github.com/repos/git-for-windows/git/releases/tags/v2.55.0.windows.3",
+        "signatureType": "authenticode",
+        "expectedPublisher": "Open Source Developer, Johannes Schindelin",
+        "signatureEnforcement": "planned"
+      },
+      "download": {
+        "url": "https://github.com/git-for-windows/git/releases/download/v2.55.0.windows.3/PortableGit-2.55.0.3-64-bit.7z.exe",
+        "expectedSha256": "ab00566336b5472120f9a52d34f2e79c5406535792acb0548001ffd0bd090e5d",
+        "maxSizeMb": 80,
+        "allowedHosts": [
+          "github.com",
+          "release-assets.githubusercontent.com"
+        ]
+      }
+    },
+    {
+      "id": "node-lts-zip",
+      "name": "Node.js LTS ZIP",
+      "version": "24.18.0 LTS x64",
+      "publisher": "OpenJS Foundation",
+      "source": "nodejs.org",
+      "homepage": "https://nodejs.org/",
+      "releasePage": "https://nodejs.org/en/blog/release/v24.18.0",
+      "sizeMb": 35.5,
+      "license": "MIT",
+      "purpose": "Node.js MSI 的免安装官方替代",
+      "recommendation": "主 MSI 不可用时启用。",
+      "required": false,
+      "dependsOn": [],
+      "provides": [
+        "node-runtime"
+      ],
+      "requiresCapabilities": [],
+      "supportedOperatingSystems": [
+        "Windows 11"
+      ],
+      "supportedArchitectures": [
+        "x64"
+      ],
+      "sourceTrust": "trusted-mirror",
+      "catalogStatus": "active",
+      "verification": {
+        "checksumAlgorithm": "sha256",
+        "checksumSource": "vendor-manifest",
+        "checksumSourceUrl": "https://nodejs.org/dist/v24.18.0/SHASUMS256.txt",
+        "signatureType": "upstream-release",
+        "expectedPublisher": "Node.js Release Team",
+        "signatureEnforcement": "planned"
+      },
+      "download": {
+        "url": "https://nodejs.org/dist/v24.18.0/node-v24.18.0-win-x64.zip",
+        "expectedSha256": "0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821",
+        "maxSizeMb": 48,
+        "allowedHosts": [
+          "nodejs.org"
+        ]
+      }
+    },
+    {
+      "id": "powershell-7-zip",
+      "name": "PowerShell ZIP",
+      "version": "7.6.4 x64",
+      "publisher": "Microsoft Corporation",
+      "source": "GitHub Releases / PowerShell",
+      "homepage": "https://github.com/PowerShell/PowerShell",
+      "releasePage": "https://github.com/PowerShell/PowerShell/releases/tag/v7.6.4",
+      "sizeMb": 111.6,
+      "license": "MIT",
+      "purpose": "PowerShell MSI 的免安装官方替代",
+      "recommendation": "主 MSI 不可用时启用。",
+      "required": false,
+      "dependsOn": [],
+      "provides": [
+        "powershell-runtime"
+      ],
+      "requiresCapabilities": [],
+      "supportedOperatingSystems": [
+        "Windows 11"
+      ],
+      "supportedArchitectures": [
+        "x64"
+      ],
+      "sourceTrust": "trusted-mirror",
+      "catalogStatus": "active",
+      "verification": {
+        "checksumAlgorithm": "sha256",
+        "checksumSource": "github-release-asset-digest",
+        "checksumSourceUrl": "https://api.github.com/repos/PowerShell/PowerShell/releases/tags/v7.6.4",
+        "signatureType": "upstream-release",
+        "expectedPublisher": "Microsoft Corporation",
+        "signatureEnforcement": "planned"
+      },
+      "download": {
+        "url": "https://github.com/PowerShell/PowerShell/releases/download/v7.6.4/PowerShell-7.6.4-win-x64.zip",
+        "expectedSha256": "80832551c52809301e6071c8bac977beb5a2f1ec953eb4db9f94deb953333793",
+        "maxSizeMb": 128,
+        "allowedHosts": [
+          "github.com",
+          "release-assets.githubusercontent.com"
+        ]
+      }
+    },
+    {
+      "id": "sample-project-mirror",
+      "name": "AI Dev Starter Alternate Route",
+      "version": "XL-Agent dc711ec snapshot",
+      "publisher": "yogurt-stack",
+      "source": "GitHub archive redirect",
+      "homepage": "https://github.com/yogurt-stack/XL-Agent",
+      "releasePage": "https://github.com/yogurt-stack/XL-Agent/commit/dc711ec575b9a22da51fda01c1c2952aceb3f261",
+      "sizeMb": 1.6,
+      "license": "MIT",
+      "purpose": "同一固定提交快照的备用 HTTPS 路由",
+      "recommendation": "仅用于主 codeload 入口失败后的受控重试，不提供供应商级冗余。",
+      "required": true,
+      "dependsOn": [
+        "python-312",
+        "git"
+      ],
+      "provides": [
+        "workspace-template"
+      ],
+      "requiresCapabilities": [
+        "python-runtime",
+        "source-control"
+      ],
+      "supportedOperatingSystems": [
+        "Windows 11"
+      ],
+      "supportedArchitectures": [
+        "x64"
+      ],
+      "sourceTrust": "trusted-mirror",
+      "catalogStatus": "active",
+      "verification": {
+        "checksumAlgorithm": "sha256",
+        "checksumSource": "pinned-repository-snapshot",
+        "checksumSourceUrl": "https://github.com/yogurt-stack/XL-Agent/commit/dc711ec575b9a22da51fda01c1c2952aceb3f261",
+        "signatureType": "none",
+        "signatureEnforcement": "not-applicable"
+      },
+      "download": {
+        "url": "https://github.com/yogurt-stack/XL-Agent/archive/dc711ec575b9a22da51fda01c1c2952aceb3f261.zip",
+        "expectedSha256": "1faaf2615901364045d223d8c7fc63ea2996b801dea194d50468c98558383353",
+        "maxSizeMb": 4,
+        "allowedHosts": [
+          "github.com",
+          "codeload.github.com"
+        ]
+      }
+    }
+  ]
+}

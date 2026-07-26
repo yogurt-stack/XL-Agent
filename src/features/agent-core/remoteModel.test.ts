@@ -303,6 +303,10 @@ describe("remote model runtime", () => {
       questionId: "primary-workload",
       answer: "全栈 AI 应用"
     });
+    runtime.dispatch({
+      type: "SKIP_CLARIFICATION",
+      questionId: "mirror-policy"
+    });
     await runUntil(
       () =>
         runtime.getState().phase === "clarifying" &&
@@ -324,7 +328,7 @@ describe("remote model runtime", () => {
     expect(runtime.getState()).toMatchObject({
       phase: "waiting_approval",
       revision: 1,
-      agentRun: { step: 5 }
+      agentRun: { step: 4 }
     });
     expect(runtime.getState().resources.map((resource) => resource.id)).toEqual([
       "python-312",

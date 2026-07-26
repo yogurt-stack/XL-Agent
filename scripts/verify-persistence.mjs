@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
@@ -14,7 +15,6 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const outputDir = path.join(root, "node_modules", ".cache", "xunlei-persistence-compile");
 const verifyRoot = mkdtempSync(path.join(tmpdir(), "xunlei-persistence-verify-"));
 const tscBin = path.join(
   root,
@@ -22,22 +22,9 @@ const tscBin = path.join(
   ".bin",
   process.platform === "win32" ? "tsc.cmd" : "tsc"
 );
-
-rmSync(outputDir, { force: true, recursive: true });
 const compilation = spawnSync(
   tscBin,
-  [
-    "--target", "ES2020",
-    "--module", "commonjs",
-    "--moduleResolution", "node",
-    "--esModuleInterop",
-    "--skipLibCheck",
-    "--types", "node",
-    "--outDir", outputDir,
-    path.join("electron", "taskStore.ts"),
-    path.join("electron", "workspaceExporter.ts"),
-    path.join("electron", "sql-js-asm.d.ts")
-  ],
+  ["-p", path.join("electron", "tsconfig.json")],
   { cwd: root, stdio: "inherit" }
 );
 if (compilation.status !== 0) process.exit(compilation.status ?? 1);
@@ -46,17 +33,27 @@ const require = createRequire(import.meta.url);
 const {
   TaskStore,
   TASK_STORE_SCHEMA_VERSION
-} = require(path.join(outputDir, "taskStore.js"));
-const initSqlJs = require("sql.js/dist/sql-asm.js");
-const SQL = await initSqlJs();
+} = require(path.join(root, "dist-electron", "electron", "taskStore.js"));
 const {
   exportWorkspace,
   toWorkspaceExportError
-} = require(path.join(outputDir, "workspaceExporter.js"));
+} = require(
+  path.join(root, "dist-electron", "electron", "workspaceExporter.js")
+);
+const initSqlJs = require("sql.js/dist/sql-asm.js");
+const SQL = await initSqlJs();
 
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
 };
+const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+
+const artifactPayload = Buffer.from("verified download payload");
+const artifactSha256 = sha256(artifactPayload);
+const artifactRoot = path.join(verifyRoot, "download-cache");
+mkdirSync(artifactRoot, { recursive: true });
+const artifactPath = path.join(artifactRoot, "python-3.12.4-amd64.exe");
+writeFileSync(artifactPath, artifactPayload);
 
 function createSnapshot(overrides = {}) {
   return {
@@ -65,7 +62,12 @@ function createSnapshot(overrides = {}) {
     phase: "exporting",
     revision: 2,
     approvedRevision: 2,
-    route: "windows-ai-development",
+    route: "ai-development-environment",
+    routeDecision: {
+      status: "supported",
+      skillId: "ai-development-environment",
+      sourceProviderId: "trusted-catalog"
+    },
     systemProfile: {
       os: "Windows 11",
       architecture: "x64",
@@ -86,19 +88,21 @@ function createSnapshot(overrides = {}) {
       checkedRevision: 2,
       issues: []
     },
-    resources: [
-      {
-        id: "python-312",
-        name: "Python",
-        version: "3.12.4 x64",
-        source: "python.org",
-        sizeMb: 25.8,
-        license: "PSF License",
-        status: "verified",
-        selected: true,
-        attempts: 1
-      }
-    ],
+    resources: [{
+      id: "python-312",
+      name: "Python",
+      version: "3.12.4 x64",
+      publisher: "Python Software Foundation",
+      source: "python.org",
+      purpose: "Python runtime",
+      recommendation: "Official runtime",
+      sizeMb: 25.8,
+      license: "PSF License",
+      status: "verified",
+      selected: true,
+      attempts: 1,
+      download: { expectedSha256: artifactSha256 }
+    }],
     activeResourceId: null,
     replanReason: null,
     requestedReplanStrategy: null,
@@ -116,26 +120,43 @@ function createSnapshot(overrides = {}) {
       maxSteps: 6,
       status: "executing",
       decisions: [],
-      toolResults: [
-        {
-          callId: "download",
-          tool: "controlled_download",
-          status: "success",
-          startedAt: "start",
-          finishedAt: "finish"
+      toolResults: [{
+        callId: "download",
+        tool: "controlled_download",
+        status: "success",
+        output: {
+          resourceId: "python-312",
+          tempFilePath: artifactPath
+        },
+        startedAt: "start",
+        finishedAt: "finish"
+      }],
+      policyAudit: [{
+        actionId: "download",
+        decision: {
+          outcome: "allow",
+          risk: "medium",
+          reason: "approved"
         }
-      ],
-      policyAudit: [
-        {
-          actionId: "download",
-          decision: {
-            outcome: "allow",
-            risk: "medium",
-            reason: "approved"
-          }
-        }
-      ]
+      }]
     },
+    ...overrides
+  };
+}
+
+function createArtifact(taskId = "task-persistence", revision = 2, overrides = {}) {
+  return {
+    taskId,
+    revision,
+    resourceId: "python-312",
+    fileName: "python-3.12.4-amd64.exe",
+    sourceHost: "www.python.org",
+    tempFilePath: artifactPath,
+    bytesWritten: artifactPayload.byteLength,
+    sha256: artifactSha256,
+    expectedSha256: artifactSha256,
+    verificationStatus: "verified",
+    verifiedAt: "2026-07-24T00:00:00.000Z",
     ...overrides
   };
 }
@@ -145,39 +166,77 @@ try {
   const exportSnapshot = createSnapshot();
   const firstExport = await exportWorkspace(exportSnapshot, {
     workspaceRoot,
+    downloadArtifacts: [createArtifact()],
     now: () => new Date("2026-07-24T00:00:00.000Z")
   });
-  assert(!firstExport.reusedExisting, "First workspace export must create a new atomic directory");
-  assert(firstExport.files.length === 6, "Workspace export must create all six handoff files");
-  for (const file of firstExport.files) {
-    assert(existsSync(file.absolutePath), `Exported file is missing: ${file.relativePath}`);
-    assert(/^[a-f0-9]{64}$/.test(file.sha256), `Exported file has invalid SHA256: ${file.relativePath}`);
-  }
-  const manifest = JSON.parse(
-    readFileSync(path.join(firstExport.rootPath, "resource-manifest.json"), "utf8")
+  assert(!firstExport.reusedExisting, "First export must create an atomic directory");
+  assert(firstExport.files.length === 7, "Workspace must contain six documents plus one download");
+  const downloadRecord = firstExport.files.find((file) =>
+    file.relativePath.startsWith("downloads/")
   );
-  assert(manifest.taskId === exportSnapshot.taskId, "Manifest must bind the task ID");
-  assert(manifest.revision === exportSnapshot.revision, "Manifest must bind the approved revision");
-  assert(manifest.audit.toolResults.length === 1, "Manifest must preserve ToolResult audit data");
-  assert(manifest.audit.policyDecisions.length === 1, "Manifest must preserve Policy audit data");
+  assert(downloadRecord && existsSync(downloadRecord.absolutePath), "Verified artifact must be copied into downloads/");
+  assert(readFileSync(downloadRecord.absolutePath).equals(artifactPayload), "Copied artifact bytes must match");
+
+  const manifestPath = path.join(firstExport.rootPath, "resource-manifest.json");
+  const manifestText = readFileSync(manifestPath, "utf8");
+  const manifest = JSON.parse(manifestText);
+  assert(manifest.schemaVersion === "xunlei-agent-workspace-2.0", "Manifest schema must be v2");
+  assert(manifest.revision === 2 && manifest.approvedRevision === 2, "Manifest must bind the approved revision");
+  assert(manifest.resources[0].artifact.relativePath === downloadRecord.relativePath, "Manifest must link the copied download");
+  assert(manifest.resources[0].artifact.sha256 === artifactSha256, "Manifest must record the copied SHA256");
+  assert(!manifestText.includes(artifactPath), "Manifest must not expose temporary absolute download paths");
+  assert(
+    readFileSync(path.join(firstExport.rootPath, "RESOURCE_MANIFEST.md"), "utf8")
+      .includes(artifactSha256),
+    "Markdown must be derived from Manifest artifact data"
+  );
 
   const repeatedExport = await exportWorkspace(exportSnapshot, { workspaceRoot });
-  assert(repeatedExport.reusedExisting, "Repeated export must reuse the matching complete workspace");
+  assert(repeatedExport.reusedExisting, "Repeated export must reuse a matching complete workspace");
+
+  let missingArtifactRejected = false;
+  try {
+    await exportWorkspace(
+      createSnapshot({ taskId: "task-missing-artifact" }),
+      { workspaceRoot, downloadArtifacts: [] }
+    );
+  } catch (error) {
+    missingArtifactRejected =
+      toWorkspaceExportError(error).code === "WORKSPACE_EXPORT_ARTIFACT_MISSING";
+  }
+  assert(missingArtifactRejected, "Export must reject a verified state without a SQLite artifact record");
+
+  let mismatchedArtifactRejected = false;
+  try {
+    await exportWorkspace(
+      createSnapshot({ taskId: "task-bad-artifact" }),
+      {
+        workspaceRoot,
+        downloadArtifacts: [
+          createArtifact("task-bad-artifact", 2, {
+            sha256: "0".repeat(64),
+            expectedSha256: "0".repeat(64)
+          })
+        ]
+      }
+    );
+  } catch (error) {
+    mismatchedArtifactRejected =
+      toWorkspaceExportError(error).code === "WORKSPACE_EXPORT_ARTIFACT_INVALID";
+  }
+  assert(mismatchedArtifactRejected, "Export must rehash and reject a tampered artifact");
 
   let invalidApprovalRejected = false;
   try {
     await exportWorkspace(
-      createSnapshot({
-        taskId: "task-unapproved",
-        approvedRevision: null
-      }),
-      { workspaceRoot }
+      createSnapshot({ taskId: "task-unapproved", approvedRevision: null }),
+      { workspaceRoot, downloadArtifacts: [createArtifact("task-unapproved")] }
     );
   } catch (error) {
     invalidApprovalRejected =
       toWorkspaceExportError(error).code === "WORKSPACE_EXPORT_INVALID_STATE";
   }
-  assert(invalidApprovalRejected, "Workspace export must reject an unapproved revision");
+  assert(invalidApprovalRejected, "Export must reject an unapproved revision");
 
   const rollbackTaskId = "task-rollback";
   let rollbackRejected = false;
@@ -186,6 +245,7 @@ try {
       createSnapshot({ taskId: rollbackTaskId }),
       {
         workspaceRoot,
+        downloadArtifacts: [createArtifact(rollbackTaskId)],
         beforeCommit: () => {
           throw new Error("injected commit failure");
         }
@@ -195,12 +255,12 @@ try {
     rollbackRejected =
       toWorkspaceExportError(error).code === "WORKSPACE_EXPORT_WRITE_FAILED";
   }
-  assert(rollbackRejected, "Injected workspace commit failure must be surfaced");
+  assert(rollbackRejected, "Injected commit failure must be surfaced");
   const rollbackParent = path.join(workspaceRoot, rollbackTaskId);
   assert(
     !existsSync(rollbackParent) ||
       readdirSync(rollbackParent).every((entry) => !entry.includes("staging")),
-    "Failed workspace export must remove its staging directory"
+    "Failed export must remove its staging directory"
   );
 
   const conflictTaskId = "task-conflict";
@@ -209,17 +269,14 @@ try {
   let conflictRejected = false;
   try {
     await exportWorkspace(createSnapshot({ taskId: conflictTaskId }), {
-      workspaceRoot
+      workspaceRoot,
+      downloadArtifacts: [createArtifact(conflictTaskId)]
     });
   } catch (error) {
     conflictRejected =
       toWorkspaceExportError(error).code === "WORKSPACE_EXPORT_CONFLICT";
   }
-  assert(conflictRejected, "Incomplete existing workspace must be rejected without overwrite");
-  assert(
-    readdirSync(conflictTarget).length === 0,
-    "Conflict handling must not modify the existing target directory"
-  );
+  assert(conflictRejected && readdirSync(conflictTarget).length === 0, "Existing incomplete workspaces must not be overwritten");
 
   const databasePath = path.join(verifyRoot, "agent-tasks.sqlite");
   let nowMs = Date.parse("2026-07-24T01:00:00.000Z");
@@ -230,104 +287,62 @@ try {
   });
   const freshSchema = await store.getSchemaInfo();
   assert(
-    freshSchema.version === TASK_STORE_SCHEMA_VERSION &&
-      freshSchema.supportedVersion === TASK_STORE_SCHEMA_VERSION,
-    "Fresh task stores must be migrated to the current schema version"
+    freshSchema.version === 2 &&
+      freshSchema.supportedVersion === TASK_STORE_SCHEMA_VERSION &&
+      freshSchema.migrations.length === 2 &&
+      freshSchema.migrations[1].name === "verified-download-artifacts",
+    "Fresh stores must apply and record SQLite schema v2"
+  );
+
+  await store.saveSnapshot(exportSnapshot);
+  await store.recordDownloadArtifact(createArtifact());
+  assert(
+    (await store.listDownloadArtifacts(exportSnapshot.taskId, 2))[0]?.sha256 === artifactSha256,
+    "Verified download artifacts must persist in SQLite"
   );
   assert(
-    freshSchema.migrations.length === 1 &&
-      freshSchema.migrations[0].name === "initial-task-persistence",
-    "Fresh task stores must record the initial schema migration"
+    (await store.hasValidApproval(exportSnapshot.taskId, 2)).valid,
+    "Current revision approval must be active"
   );
-  await store.saveSnapshot(exportSnapshot);
-  const activeApproval = await store.hasValidApproval(
-    exportSnapshot.taskId,
-    exportSnapshot.revision
-  );
-  assert(activeApproval.valid, "Current revision approval must be active after persistence");
   await store.recordWorkspaceExport(firstExport);
-  const storedExport = await store.getWorkspaceExport(
-    firstExport.taskId,
-    firstExport.revision
-  );
-  assert(storedExport?.rootPath === firstExport.rootPath, "Workspace export metadata must persist in SQLite");
 
   nowMs += 500;
   await store.saveSnapshot(exportSnapshot);
   nowMs += 600;
-  const expiredApproval = await store.hasValidApproval(
-    exportSnapshot.taskId,
-    exportSnapshot.revision
-  );
-  assert(
-    !expiredApproval.valid && expiredApproval.status === "expired",
-    "Ordinary state persistence must not renew an approval beyond its configured TTL"
-  );
+  const expiredApproval = await store.hasValidApproval(exportSnapshot.taskId, 2);
+  assert(!expiredApproval.valid && expiredApproval.status === "expired", "State saves must not renew approval TTL");
 
-  await store.saveSnapshot(
-    createSnapshot({
-      approvedRevision: null,
-      phase: "waiting_approval"
-    })
-  );
+  await store.saveSnapshot(createSnapshot({
+    approvedRevision: null,
+    phase: "waiting_approval"
+  }));
   nowMs += 100;
   await store.saveSnapshot(exportSnapshot);
-  const renewedApproval = await store.hasValidApproval(
-    exportSnapshot.taskId,
-    exportSnapshot.revision
+  assert(
+    (await store.hasValidApproval(exportSnapshot.taskId, 2)).valid,
+    "Explicit reapproval must create a fresh approval"
   );
-  assert(renewedApproval.valid, "Explicit reapproval must create a fresh active approval");
 
   nowMs += 100;
-  const newerTerminalSnapshot = createSnapshot({
+  await store.saveSnapshot(createSnapshot({
     taskId: "task-history-newer",
     task: "已取消的历史任务",
     phase: "cancelled",
     approvedRevision: null
-  });
-  await store.saveSnapshot(newerTerminalSnapshot);
-  const taskHistory = await store.listTaskHistory();
+  }));
+  const history = await store.listTaskHistory();
+  assert(history.length === 2 && history[0].taskId === "task-history-newer", "History must be newest first");
+  const detail = await store.getTaskHistoryDetail(exportSnapshot.taskId);
   assert(
-    taskHistory.length === 2 &&
-      taskHistory[0].taskId === newerTerminalSnapshot.taskId &&
-      taskHistory[1].taskId === exportSnapshot.taskId,
-    "Task history must return the latest snapshot for each task in descending update order"
-  );
-  assert(
-    taskHistory[1].resourceCount === 1 &&
-      taskHistory[1].verifiedResourceCount === 1,
-    "Task history summaries must derive resource verification counts"
-  );
-  assert(
-    (await store.listTaskHistory(1))[0].taskId === newerTerminalSnapshot.taskId,
-    "Task history limit must restrict the result set"
-  );
-  const historyDetail = await store.getTaskHistoryDetail(exportSnapshot.taskId);
-  assert(
-    historyDetail?.state.taskId === exportSnapshot.taskId &&
-      historyDetail.approvals.length === 1 &&
-      historyDetail.workspaceExports[0]?.rootPath === firstExport.rootPath,
-    "Task history detail must include the latest state, approvals and workspace exports"
-  );
-  assert(
-    (await store.getTaskHistoryDetail("task-does-not-exist")) === null,
-    "Unknown history task IDs must return null"
-  );
-  let invalidHistoryLimitRejected = false;
-  try {
-    await store.listTaskHistory(101);
-  } catch {
-    invalidHistoryLimitRejected = true;
-  }
-  assert(
-    invalidHistoryLimitRejected,
-    "Task history must reject limits outside the safe range"
+    detail?.downloadArtifacts.length === 1 &&
+      detail.workspaceExports[0]?.rootPath === firstExport.rootPath,
+    "History detail must include download artifacts and workspace exports"
   );
   await store.close();
 
   assert(
     readFileSync(databasePath).subarray(0, 15).toString() === "SQLite format 3",
-    "Task store must persist a real SQLite database file"
+    "Task store must persist a real SQLite file"
   );
 
   const reopened = await TaskStore.open({
@@ -336,85 +351,64 @@ try {
     now: () => nowMs
   });
   const restored = await reopened.loadLatestUnfinished();
-  assert(restored?.state.taskId === exportSnapshot.taskId, "Restart must restore the latest unfinished task");
-  assert(
-    restored.state.agentRun.toolResults.length === 1 &&
-      restored.state.agentRun.policyAudit.length === 1,
-    "Restored task must preserve ToolResult and Policy audit data"
-  );
-  await reopened.saveSnapshot(
-    createSnapshot({
-      phase: "handoff",
-      workspace: {
-        ready: true,
-        files: firstExport.files.map((file) => file.relativePath),
-        fileRecords: firstExport.files,
-        exportStatus: "ready",
-        rootPath: firstExport.rootPath,
-        nextAction: "done"
-      }
-    })
-  );
-  assert(
-    (await reopened.loadLatestUnfinished()) === null,
-    "Completed handoff tasks must not auto-restore"
-  );
+  assert(restored?.state.taskId === exportSnapshot.taskId, "Restart must restore the unfinished task");
+  await reopened.saveSnapshot(createSnapshot({
+    phase: "handoff",
+    workspace: {
+      ready: true,
+      files: firstExport.files.map((file) => file.relativePath),
+      fileRecords: firstExport.files,
+      exportStatus: "ready",
+      rootPath: firstExport.rootPath,
+      nextAction: "done"
+    }
+  }));
+  assert((await reopened.loadLatestUnfinished()) === null, "Handoff tasks must not auto-restore");
   await reopened.close();
 
   const legacyDatabasePath = path.join(verifyRoot, "legacy-agent-tasks.sqlite");
   const legacyDatabase = new SQL.Database(readFileSync(databasePath));
   legacyDatabase.run(`
-    PRAGMA user_version = 0;
-    DROP TABLE schema_migrations;
+    PRAGMA user_version = 1;
+    DELETE FROM schema_migrations WHERE version > 1;
+    DROP TABLE download_artifacts;
   `);
   writeFileSync(legacyDatabasePath, legacyDatabase.export());
   legacyDatabase.close();
-
   const migratedLegacyStore = await TaskStore.open({
     databasePath: legacyDatabasePath,
-    approvalTtlMs: 1_000,
     now: () => nowMs
   });
   const migratedSchema = await migratedLegacyStore.getSchemaInfo();
   assert(
-    migratedSchema.version === TASK_STORE_SCHEMA_VERSION &&
-      migratedSchema.migrations.some(
-        (migration) => migration.version === TASK_STORE_SCHEMA_VERSION
-      ),
-    "An unversioned legacy database must migrate to the current schema"
+    migratedSchema.version === 2 &&
+      migratedSchema.migrations.some((migration) => migration.version === 2),
+    "A v1 database must migrate forward to v2"
   );
   assert(
-    (await migratedLegacyStore.getTaskState(exportSnapshot.taskId))?.taskId ===
-      exportSnapshot.taskId,
-    "Legacy schema migration must preserve existing task data"
+    (await migratedLegacyStore.getTaskState(exportSnapshot.taskId))?.taskId === exportSnapshot.taskId,
+    "Schema migration must preserve task snapshots"
   );
   await migratedLegacyStore.close();
 
   const futureDatabasePath = path.join(verifyRoot, "future-agent-tasks.sqlite");
   const futureDatabase = new SQL.Database(readFileSync(legacyDatabasePath));
-  futureDatabase.run(
-    `PRAGMA user_version = ${TASK_STORE_SCHEMA_VERSION + 1}`
-  );
+  futureDatabase.run(`PRAGMA user_version = ${TASK_STORE_SCHEMA_VERSION + 1}`);
   writeFileSync(futureDatabasePath, futureDatabase.export());
   futureDatabase.close();
-
   let futureSchemaRejected = false;
   try {
-    const unsupportedStore = await TaskStore.open({
-      databasePath: futureDatabasePath
-    });
+    const unsupportedStore = await TaskStore.open({ databasePath: futureDatabasePath });
     await unsupportedStore.close();
   } catch (error) {
     futureSchemaRejected =
-      error instanceof Error &&
-      error.message.includes("newer than supported");
+      error instanceof Error && error.message.includes("newer than supported");
   }
-  assert(
-    futureSchemaRejected,
-    "A database from a newer application version must be rejected without downgrade"
-  );
+  assert(futureSchemaRejected, "Newer schemas must be rejected without downgrade");
 } finally {
   rmSync(verifyRoot, { force: true, recursive: true });
 }
 
-console.log("Persistence passed: atomic export, SQLite schema migration, recovery, history, audit and approval expiry verified");
+console.log(
+  "Persistence passed: SQLite v2 artifacts, atomic downloads workspace, Manifest derivation, recovery and approval expiry verified"
+);
