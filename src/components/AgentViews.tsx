@@ -466,10 +466,14 @@ export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: 
               </div>
               <small>
                 {resource.progress}%
-                {resource.speedBytesPerSecond
+                {(resource.status === "downloading" ||
+                  resource.status === "paused") &&
+                resource.speedBytesPerSecond
                   ? ` · ${(resource.speedBytesPerSecond / 1024 / 1024).toFixed(1)} MB/s`
                   : ""}
-                {resource.etaSeconds !== undefined
+                {(resource.status === "downloading" ||
+                  resource.status === "paused") &&
+                resource.etaSeconds !== undefined
                   ? ` · 剩余约 ${resource.etaSeconds}s`
                   : ""}
                 {resource.failureReason ? ` · ${resource.failureReason}` : ""}
