@@ -71,7 +71,7 @@ jobs:
           fc-cache --force
 
       - name: Regenerate Linux Electron visual baselines
-        run: xvfb-run --auto-servernum npx playwright test --update-snapshots
+        run: npm run build && xvfb-run --auto-servernum npx playwright test --update-snapshots
 
       - name: Upload regenerated visual baselines
         if: ${{ always() }}
