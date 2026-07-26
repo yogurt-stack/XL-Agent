@@ -18,6 +18,7 @@ export type ResourceStatus =
   | "pending"
   | "queued"
   | "downloading"
+  | "paused"
   | "downloaded"
   | "verified"
   | "failed"
@@ -164,8 +165,50 @@ export type PlannedResource = TrustedResource & {
   status: ResourceStatus;
   progress: number;
   attempts: number;
+  bytesWritten?: number;
+  totalBytes?: number;
+  speedBytesPerSecond?: number;
+  etaSeconds?: number;
   replacedFrom?: string;
   failureReason?: string;
+};
+
+export type LocalArtifactSummary = {
+  artifactId: string;
+  fileName: string;
+  displayPath: string;
+  bytesWritten: number;
+  sha256: string;
+  matchedResourceId: string | null;
+  verificationStatus: "local-verified" | "unverified";
+  importedAt: string;
+};
+
+export type WorkspaceOverallStatus =
+  | "preparing"
+  | "ready"
+  | "partially_ready"
+  | "failed";
+
+export type AgentBInspectionAnswer = {
+  manifestRevision: number;
+  planRevision: number;
+  workspaceStatus: WorkspaceOverallStatus;
+  preparedRequiredResources: string[];
+  missingOrFailedResources: string[];
+  allowedActions: string[];
+  forbiddenActions: string[];
+  integrity: "valid" | "invalid";
+  summary: string;
+};
+
+export type AgentBRunState = {
+  status: "idle" | "running" | "completed" | "failed";
+  runId: string | null;
+  grantId: string | null;
+  manifestRevision: number | null;
+  answer: AgentBInspectionAnswer | null;
+  error: string | null;
 };
 
 export type AgentLogEntry = {
@@ -215,6 +258,10 @@ export type WorkspaceHandoff = {
   nextAction: string;
   exportStatus: "not_started" | "pending" | "exporting" | "ready" | "failed";
   rootPath?: string;
+  targetRootPath?: string;
+  currentSnapshotRootPath?: string;
+  manifestRevision: number;
+  overallStatus: WorkspaceOverallStatus;
   fileRecords: WorkspaceFileRecord[];
   exportError?: string;
 };
@@ -239,6 +286,7 @@ export type AgentState = {
   clarificationIndex: number;
   answers: Record<string, string | "skipped">;
   resources: PlannedResource[];
+  localArtifacts: LocalArtifactSummary[];
   replanReason: ReplanReason | null;
   requestedReplanStrategy: ReplanStrategy | null;
   activeResourceId: string | null;
@@ -249,6 +297,7 @@ export type AgentState = {
   planValidation: PlanValidationResult | null;
   approvedRevision: number | null;
   agentRun: AgentRunState;
+  agentB: AgentBRunState;
 };
 
 export type AgentToolName =
@@ -448,12 +497,49 @@ export type AgentEvent =
   | { type: "PLAN_GENERATED" }
   | { type: "TOGGLE_RESOURCE"; resourceId: string; selected: boolean }
   | { type: "APPROVE_PLAN"; revision: number }
-  | { type: "DOWNLOAD_PROGRESS"; resourceId: string; progress: number }
+  | { type: "PAUSE_DOWNLOAD"; resourceId: string }
+  | { type: "RESUME_DOWNLOAD"; resourceId: string }
+  | {
+      type: "DOWNLOAD_PROGRESS";
+      resourceId: string;
+      progress: number;
+      bytesWritten?: number;
+      totalBytes?: number;
+      speedBytesPerSecond?: number;
+      etaSeconds?: number;
+    }
+  | { type: "DOWNLOAD_PAUSED"; resourceId: string }
+  | { type: "DOWNLOAD_RESUMED"; resourceId: string }
   | { type: "DOWNLOAD_FAILED"; resourceId: string; reason: string }
   | { type: "DOWNLOAD_APPROVAL_EXPIRED"; reason: string }
   | { type: "RESOLVE_DOWNLOAD_FAILURE"; action: FailureResolutionAction }
   | { type: "REPLAN_GENERATED"; strategy: ReplanStrategy }
-  | { type: "VERIFY_RESOURCES"; versionMismatchResourceId?: string }
+  | {
+      type: "VERIFY_RESOURCES";
+      versionMismatchResourceId?: string;
+      failure?: {
+        resourceId: string;
+        code: string;
+        reason: string;
+        retriable: boolean;
+      };
+    }
+  | { type: "LOCAL_ARTIFACTS_ADDED"; artifacts: LocalArtifactSummary[] }
+  | { type: "WORKSPACE_ROOT_SELECTED"; rootPath: string }
+  | {
+      type: "MANIFEST_SNAPSHOT_WRITTEN";
+      manifestRevision: number;
+      rootPath: string;
+      status: WorkspaceOverallStatus;
+    }
+  | { type: "RUN_AGENT_B" }
+  | { type: "AGENT_B_STARTED"; runId: string; grantId: string }
+  | {
+      type: "AGENT_B_COMPLETED";
+      runId: string;
+      answer: AgentBInspectionAnswer;
+    }
+  | { type: "AGENT_B_FAILED"; runId: string; reason: string }
   | { type: "WORKSPACE_EXPORT_STARTED" }
   | { type: "WORKSPACE_EXPORT_COMPLETED"; output: WorkspaceExportOutput }
   | { type: "WORKSPACE_EXPORT_FAILED"; reason: string }
@@ -480,7 +566,10 @@ export type AgentUserEvent = Extract<
       | "SKIP_CLARIFICATION"
       | "TOGGLE_RESOURCE"
       | "APPROVE_PLAN"
+      | "PAUSE_DOWNLOAD"
+      | "RESUME_DOWNLOAD"
       | "RESOLVE_DOWNLOAD_FAILURE"
+      | "RUN_AGENT_B"
       | "RETRY_WORKSPACE_EXPORT"
       | "CANCEL_TASK"
       | "RESET";

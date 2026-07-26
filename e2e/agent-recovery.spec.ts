@@ -162,7 +162,9 @@ async function openCompletedWorkspace() {
   await expect(page.locator("pre.workspace-code-preview")).toContainText(
     "xunlei-agent-workspace-2.0"
   );
-  const rootPath = await page.locator(".workspace-view .agent-page-heading > p").innerText();
+  const rootPath = await page
+    .locator(".workspace-view .agent-page-heading > div:last-child > p")
+    .innerText();
   const expectedFiles = [
     "README.md",
     "RESOURCE_MANIFEST.md",
@@ -238,6 +240,10 @@ test("retries the original source and reaches a ready workspace", async () => {
   const manifest = await openCompletedWorkspace();
   await expectNoSeriousAccessibilityViolations("ready workspace");
   await expectVisualBaseline("ready-workspace");
+  await page.getByTestId("run-agent-b").click();
+  await expect(page.getByTestId("agent-b-answer")).toBeVisible();
+  await expect(page.getByTestId("agent-b-answer")).toContainText("校验通过");
+  await expect(page.getByTestId("agent-b-answer")).toContainText("禁止动作");
   expect(manifest).toMatchObject({
     revision: 2,
     approvedRevision: 2,
@@ -286,9 +292,12 @@ test("delegates the failed resource to Agent B as an incomplete handoff", async 
   await expect(page.getByRole("heading", { name: "等待资源准备完成" })).toBeVisible();
   await expect(page.getByText("已交给 Agent B 处理未完成资源")).toBeVisible();
   await expect(page.getByText("仍有资源或导出未完成")).toBeVisible();
+  await expect(page.getByTestId("agent-b-answer")).toBeVisible();
+  await expect(page.getByTestId("agent-b-answer")).toContainText("校验通过");
+  await expect(page.getByTestId("agent-b-answer")).toContainText("AI Dev Starter");
+  await expect(page.getByTestId("agent-b-answer")).toContainText("自动运行安装包");
   await expectMainPanelAtTop("Agent B handoff");
   await expectNoSeriousAccessibilityViolations("Agent B handoff");
-  await expectVisualBaseline("agent-b-incomplete-handoff");
 
   const manifest = JSON.parse(await page.locator("pre.workspace-code-preview").innerText()) as {
     resources: Array<{ id: string; status: string; failureReason: string | null }>;

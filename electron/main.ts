@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { config as loadEnv } from "dotenv";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -9,11 +9,16 @@ import { AgentRuntimeHost } from "./agentRuntimeHost";
 import {
   downloadTrustedResource,
   toControlledDownloadError,
+  type ControlledDownloadOptions,
   type ControlledDownloadOutput
 } from "./downloadClient";
 import { RemoteModelClient } from "./modelClient";
 import { TaskStore } from "./taskStore";
 import type { TrustedDownloadMetadata } from "./trustedDownloadCatalog";
+import {
+  LocalArtifactScanError,
+  scanLocalArtifacts
+} from "./localArtifacts";
 
 loadEnv({ path: path.resolve(process.cwd(), ".env"), quiet: true });
 
@@ -129,19 +134,34 @@ async function fixtureDownload(
 
 async function performTrustedDownload(
   resourceId: string,
-  metadata: TrustedDownloadMetadata
+  metadata: TrustedDownloadMetadata,
+  options: ControlledDownloadOptions = {}
 ) {
   if (
     process.env.NODE_ENV === "test" &&
     process.env.XL_AGENT_E2E_DOWNLOAD_FIXTURE === "1"
   ) {
-    return fixtureDownload(resourceId, metadata);
+    const result = await fixtureDownload(resourceId, metadata);
+    if (result.ok) {
+      await options.onProgress?.({
+        resourceId,
+        bytesWritten: result.output.bytesWritten,
+        totalBytes: result.output.bytesWritten,
+        progress: 99,
+        speedBytesPerSecond: result.output.bytesWritten,
+        etaSeconds: 0
+      });
+    }
+    return result;
   }
 
   try {
     return {
       ok: true as const,
-      output: await downloadTrustedResource({ resourceId, ...metadata })
+      output: await downloadTrustedResource(
+        { resourceId, ...metadata },
+        options
+      )
     };
   } catch (error) {
     return {
@@ -258,7 +278,10 @@ ipcMain.handle("agent:getRuntimeSnapshot", async () => {
 
 ipcMain.handle("agent:dispatchUserEvent", async (_event, value: unknown) => {
   try {
-    return { ok: true as const, snapshot: (await getAgentRuntimeHost()).dispatch(value) };
+    return {
+      ok: true as const,
+      snapshot: await (await getAgentRuntimeHost()).dispatch(value)
+    };
   } catch (error) {
     return runtimeIpcFailure(error);
   }
@@ -357,6 +380,83 @@ ipcMain.handle("agent:getTaskHistoryDetail", async (_event, input: unknown) => {
 ipcMain.handle("agent:flushTaskPersistence", async () => {
   await (await getAgentRuntimeHost()).flushPersistence();
   return { ok: true as const };
+});
+
+ipcMain.handle("agent:selectLocalResources", async () => {
+  const host = await getAgentRuntimeHost();
+  const state = host.getSnapshot().state;
+  if (
+    state.taskId === "unassigned" ||
+    state.phase === "downloading" ||
+    state.phase === "verifying" ||
+    state.phase === "exporting"
+  ) {
+    return {
+      ok: false as const,
+      error: {
+        code: "LOCAL_RESOURCE_NOT_ALLOWED",
+        message: "请先创建任务，并在执行下载前接入本地资源。",
+        retriable: false
+      }
+    };
+  }
+  const result = await dialog.showOpenDialog({
+    title: "选择要交给 Agent 的本地资源",
+    properties: ["openFile", "openDirectory", "multiSelections"]
+  });
+  if (result.canceled || result.filePaths.length === 0) {
+    return { ok: true as const, snapshot: host.getSnapshot(), imported: 0 };
+  }
+  try {
+    const currentPlanRevision = Math.max(1, state.revision);
+    const scannedRecords = await scanLocalArtifacts(result.filePaths, {
+      taskId: state.taskId,
+      planRevision: currentPlanRevision
+    });
+    const planRevision =
+      state.phase === "waiting_approval" &&
+      scannedRecords.some((record) => record.matchedResourceId)
+        ? currentPlanRevision + 1
+        : currentPlanRevision;
+    const records = scannedRecords.map((record) => ({
+      ...record,
+      planRevision
+    }));
+    return {
+      ok: true as const,
+      snapshot: await host.addLocalArtifacts(records),
+      imported: records.length
+    };
+  } catch (error) {
+    return {
+      ok: false as const,
+      error: {
+        code:
+          error instanceof LocalArtifactScanError
+            ? error.code
+            : "LOCAL_RESOURCE_READ_FAILED",
+        message:
+          error instanceof Error ? error.message : "本地资源接入失败。",
+        retriable: false
+      }
+    };
+  }
+});
+
+ipcMain.handle("agent:selectWorkspaceRoot", async () => {
+  const host = await getAgentRuntimeHost();
+  const result = await dialog.showOpenDialog({
+    title: "选择 Agent 工作区保存目录",
+    properties: ["openDirectory", "createDirectory"]
+  });
+  if (result.canceled || result.filePaths.length !== 1) {
+    return { ok: true as const, snapshot: host.getSnapshot(), selected: false };
+  }
+  return {
+    ok: true as const,
+    snapshot: host.selectWorkspaceRoot(result.filePaths[0]),
+    selected: true
+  };
 });
 
 ipcMain.handle("agent:readWorkspaceFile", async (_event, input: unknown) => {

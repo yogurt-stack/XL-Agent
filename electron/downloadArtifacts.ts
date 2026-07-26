@@ -1,5 +1,7 @@
 export type DownloadArtifactVerificationStatus =
+  | "downloaded"
   | "verified"
+  | "local-verified"
   | "test-fixture";
 
 export type DownloadArtifactRecord = {

@@ -18,6 +18,7 @@ import {
 } from "../src/features/agent-core/workspaceTemplates";
 import type { WorkspaceGuide } from "../src/features/agent-core/domainSkills";
 import type { DownloadArtifactRecord } from "./downloadArtifacts";
+import type { LocalArtifactRecord } from "./localArtifacts";
 
 export type WorkspaceFileRecord = {
   relativePath: string;
@@ -77,6 +78,16 @@ export type WorkspaceSnapshot = {
       expectedSha256?: string;
     };
   }>;
+  localArtifacts: Array<{
+    artifactId: string;
+    fileName: string;
+    displayPath: string;
+    bytesWritten: number;
+    sha256: string;
+    matchedResourceId: string | null;
+    verificationStatus: "local-verified" | "unverified";
+    importedAt: string;
+  }>;
   agentRun: {
     toolResults: unknown[];
     policyAudit: unknown[];
@@ -89,6 +100,7 @@ export type WorkspaceSnapshot = {
 export type WorkspaceExportOptions = {
   workspaceRoot: string;
   downloadArtifacts?: DownloadArtifactRecord[];
+  localArtifacts?: LocalArtifactRecord[];
   templateRegistry?: WorkspaceTemplateRegistry;
   workspaceGuide?: WorkspaceGuide;
   allowTestFixtures?: boolean;
@@ -136,6 +148,17 @@ type ResourceWorkspaceManifest = {
     attempts: number;
     failureReason: string | null;
     artifact: ManifestArtifact | null;
+  }>;
+  localArtifacts: Array<{
+    artifactId: string;
+    fileName: string;
+    displayPath: string;
+    relativePath: string | null;
+    bytesWritten: number;
+    sha256: string;
+    matchedResourceId: string | null;
+    verificationStatus: "local-verified" | "unverified";
+    importedAt: string;
   }>;
   audit: {
     toolResults: unknown[];
@@ -331,6 +354,7 @@ async function copyVerifiedArtifacts(
     }
     if (
       artifact.verificationStatus !== "verified" &&
+      artifact.verificationStatus !== "local-verified" &&
       !(allowTestFixtures && artifact.verificationStatus === "test-fixture")
     ) {
       throw exportError(
@@ -391,10 +415,79 @@ async function copyVerifiedArtifacts(
   return { manifestArtifacts, fileRecords };
 }
 
+async function copyAdditionalLocalArtifacts(
+  artifacts: LocalArtifactRecord[],
+  stagingRoot: string,
+  taskRoot: string
+) {
+  const manifestArtifacts: ResourceWorkspaceManifest["localArtifacts"] = [];
+  const fileRecords: WorkspaceFileRecord[] = [];
+  for (const artifact of artifacts) {
+    if (artifact.matchedResourceId) {
+      manifestArtifacts.push({
+        artifactId: artifact.artifactId,
+        fileName: artifact.fileName,
+        displayPath: artifact.displayPath,
+        relativePath: null,
+        bytesWritten: artifact.bytesWritten,
+        sha256: artifact.sha256,
+        matchedResourceId: artifact.matchedResourceId,
+        verificationStatus: artifact.verificationStatus,
+        importedAt: artifact.importedAt
+      });
+      continue;
+    }
+    const sourceInfo = await lstat(artifact.sourcePath);
+    if (!sourceInfo.isFile() || sourceInfo.isSymbolicLink()) {
+      throw exportError(
+        "WORKSPACE_EXPORT_ARTIFACT_INVALID",
+        `本地资源 ${artifact.displayPath} 不再是普通文件。`,
+        false
+      );
+    }
+    const relativePath = path.posix.join(
+      "local-resources",
+      `${sanitizeSegment(artifact.artifactId)}-${sanitizeFileName(artifact.fileName)}`
+    );
+    const stagingPath = path.join(stagingRoot, relativePath);
+    await mkdir(path.dirname(stagingPath), { recursive: true });
+    await copyFile(artifact.sourcePath, stagingPath);
+    const actual = await sha256File(stagingPath);
+    if (
+      actual.sha256.toLowerCase() !== artifact.sha256.toLowerCase() ||
+      actual.bytesWritten !== artifact.bytesWritten
+    ) {
+      throw exportError(
+        "WORKSPACE_EXPORT_ARTIFACT_INVALID",
+        `本地资源 ${artifact.displayPath} 在导出前发生变化。`,
+        false
+      );
+    }
+    manifestArtifacts.push({
+      artifactId: artifact.artifactId,
+      fileName: artifact.fileName,
+      displayPath: artifact.displayPath,
+      relativePath,
+      bytesWritten: actual.bytesWritten,
+      sha256: actual.sha256,
+      matchedResourceId: null,
+      verificationStatus: artifact.verificationStatus,
+      importedAt: artifact.importedAt
+    });
+    fileRecords.push({
+      relativePath,
+      absolutePath: path.join(taskRoot, relativePath),
+      ...actual
+    });
+  }
+  return { manifestArtifacts, fileRecords };
+}
+
 function createManifest(
   snapshot: WorkspaceSnapshot,
   generatedAt: string,
-  manifestArtifacts: Map<string, ManifestArtifact>
+  manifestArtifacts: Map<string, ManifestArtifact>,
+  localArtifacts: ResourceWorkspaceManifest["localArtifacts"]
 ): ResourceWorkspaceManifest {
   const resources = snapshot.resources.map((resource) => ({
     id: resource.id,
@@ -430,13 +523,20 @@ function createManifest(
     mode: "electron-controlled-export",
     generatedAt,
     resources,
+    localArtifacts,
     audit: {
       toolResults: snapshot.agentRun.toolResults.map(sanitizeToolAudit),
       policyDecisions: snapshot.agentRun.policyAudit.map(sanitizePolicyAudit)
     },
     handoff: {
       ready: true,
-      files: [...documentFiles, ...downloadFiles],
+      files: [
+        ...documentFiles,
+        ...downloadFiles,
+        ...localArtifacts.flatMap((artifact) =>
+          artifact.relativePath ? [artifact.relativePath] : []
+        )
+      ],
       nextAction: "先核对 Manifest revision 与 downloads/ 校验信息，再按 README.md 人工处理资源。",
       missingItems: []
     }
@@ -612,10 +712,16 @@ export async function exportWorkspace(
       taskRoot,
       options.allowTestFixtures === true
     );
+    const copiedLocal = await copyAdditionalLocalArtifacts(
+      options.localArtifacts ?? [],
+      stagingRoot,
+      taskRoot
+    );
     const manifest = createManifest(
       snapshot,
       generatedAt,
-      copied.manifestArtifacts
+      copied.manifestArtifacts,
+      copiedLocal.manifestArtifacts
     );
     const artifacts = createArtifacts(
       manifest,
@@ -650,7 +756,11 @@ export async function exportWorkspace(
       rootPath: taskRoot,
       generatedAt,
       reusedExisting: false,
-      files: [...documentRecords, ...copied.fileRecords]
+      files: [
+        ...documentRecords,
+        ...copied.fileRecords,
+        ...copiedLocal.fileRecords
+      ]
     };
   } catch (error) {
     await rm(stagingRoot, { force: true, recursive: true });

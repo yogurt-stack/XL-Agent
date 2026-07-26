@@ -112,8 +112,19 @@ export const agentUserEventSchema = z.discriminatedUnion("type", [
     revision: z.number().int().positive()
   }).strict(),
   z.object({
+    type: z.literal("PAUSE_DOWNLOAD"),
+    resourceId: resourceIdSchema
+  }).strict(),
+  z.object({
+    type: z.literal("RESUME_DOWNLOAD"),
+    resourceId: resourceIdSchema
+  }).strict(),
+  z.object({
     type: z.literal("RESOLVE_DOWNLOAD_FAILURE"),
     action: z.enum(["trusted-mirror", "primary-retry", "delegate-agent-b"])
+  }).strict(),
+  z.object({
+    type: z.literal("RUN_AGENT_B")
   }).strict(),
   z.object({
     type: z.literal("RETRY_WORKSPACE_EXPORT")

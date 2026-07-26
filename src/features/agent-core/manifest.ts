@@ -19,6 +19,8 @@ export function createResourceManifest(state: AgentState) {
           ? "electron-controlled-export"
           : "handoff-preview",
     generatedAt: state.workspace.generatedAt ?? null,
+    manifestRevision: state.workspace.manifestRevision,
+    status: state.workspace.overallStatus,
     resources: state.resources.map((resource) => ({
       id: resource.id,
       replacedFrom: resource.replacedFrom ?? null,
@@ -32,6 +34,8 @@ export function createResourceManifest(state: AgentState) {
       attempts: resource.attempts,
       failureReason: resource.failureReason ?? null
     })),
+    localArtifacts: state.localArtifacts,
+    agentB: state.agentB,
     handoff: {
       ready: state.workspace.ready,
       files: state.workspace.files,

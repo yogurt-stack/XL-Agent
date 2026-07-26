@@ -36,6 +36,7 @@ const resourceStatusLabels: Record<ResourceStatus, string> = {
   pending: "待确认",
   queued: "等待下载",
   downloading: "下载中",
+  paused: "已暂停",
   downloaded: "待验证",
   verified: "已验证",
   failed: "失败",

@@ -52,6 +52,7 @@ export class AgentRuntime implements AgentRuntimePort {
   private workVersion = 0;
   private modelStepRunning = false;
   private toolStepRunning = false;
+  private verifierStepRunning = false;
   private readonly stepDelayMs: number;
   private readonly downloadTool: RuntimeDownloadTool;
   private readonly createTaskId: () => string;
@@ -80,6 +81,15 @@ export class AgentRuntime implements AgentRuntimePort {
     return this.state;
   }
 
+  /**
+   * 接收由 Main 侧长任务产生的进度事件，不取消当前 Tool Promise。
+   */
+  reportExternalEvent(event: AgentEvent) {
+    this.applyEvent(event);
+    this.drive();
+    return this.state;
+  }
+
   private applyEvent(event: AgentEvent) {
     const nextState = transition(this.state, event);
     if (nextState === this.state) return;
@@ -104,7 +114,13 @@ export class AgentRuntime implements AgentRuntimePort {
   }
 
   private drive() {
-    if (!this.started || this.cancelScheduledStep || this.modelStepRunning || this.toolStepRunning) return;
+    if (
+      !this.started ||
+      this.cancelScheduledStep ||
+      this.modelStepRunning ||
+      this.toolStepRunning ||
+      this.verifierStepRunning
+    ) return;
 
     if (
       this.state.phase === "planning" &&
@@ -168,6 +184,16 @@ export class AgentRuntime implements AgentRuntimePort {
         this.cancelScheduledStep = null;
         if (!this.started || version !== this.workVersion) return;
         await this.runWorkspaceExportToolStep(version);
+      }, this.stepDelayMs);
+      return;
+    }
+
+    if (this.state.phase === "verifying") {
+      const version = this.workVersion;
+      this.cancelScheduledStep = this.dependencies.scheduler.schedule(async () => {
+        this.cancelScheduledStep = null;
+        if (!this.started || version !== this.workVersion) return;
+        await this.runVerifierStep(version);
       }, this.stepDelayMs);
       return;
     }
@@ -428,6 +454,43 @@ export class AgentRuntime implements AgentRuntimePort {
     }
   }
 
+  private async runVerifierStep(version: number) {
+    this.verifierStepRunning = true;
+    try {
+      const event = await this.dependencies.verifier.verify(this.state);
+      if (!event || !this.isCurrentWork(version)) return;
+      this.applyEvent(event);
+    } catch (error) {
+      if (this.isCurrentWork(version)) {
+        const resourceId =
+          this.state.resources.find(
+            (resource) =>
+              resource.selected && resource.status === "downloaded"
+          )?.id ?? this.state.resources.find((resource) => resource.selected)?.id;
+        if (resourceId) {
+          this.applyEvent({
+            type: "VERIFY_RESOURCES",
+            failure: {
+              resourceId,
+              code: "VERIFIER_RUNTIME_FAILED",
+              reason:
+                error instanceof Error ? error.message : "资源验证器失败。",
+              retriable: true
+            }
+          });
+        } else {
+          this.applyEvent({
+            type: "MODEL_RUNTIME_FAILED",
+            reason: "资源验证器没有找到可验证资源。"
+          });
+        }
+      }
+    } finally {
+      this.verifierStepRunning = false;
+      if (this.isCurrentWork(version)) this.drive();
+    }
+  }
+
   private isCurrentWork(version: number) {
     return this.started && version === this.workVersion;
   }
@@ -436,7 +499,6 @@ export class AgentRuntime implements AgentRuntimePort {
     const { phase } = this.state;
     if (phase === "planning") return this.dependencies.planner.createPlan(this.state);
     if (phase === "replanning") return this.dependencies.planner.createReplan(this.state);
-    if (phase === "verifying") return this.dependencies.verifier.verify(this.state);
     return null;
   }
 

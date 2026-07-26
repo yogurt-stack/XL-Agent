@@ -137,6 +137,38 @@ export function useAgentCore() {
     });
   }, [bridge]);
 
+  const selectLocalResources = useCallback(async () => {
+    if (!bridge) {
+      return {
+        ok: false as const,
+        error: {
+          code: "ELECTRON_BRIDGE_UNAVAILABLE",
+          message: "浏览器模式不能接入本地资源。",
+          retriable: false
+        }
+      };
+    }
+    const result = await bridge.selectLocalResources();
+    if (result.ok) applySnapshot(result.snapshot);
+    return result;
+  }, [applySnapshot, bridge]);
+
+  const selectWorkspaceRoot = useCallback(async () => {
+    if (!bridge) {
+      return {
+        ok: false as const,
+        error: {
+          code: "ELECTRON_BRIDGE_UNAVAILABLE",
+          message: "浏览器模式不能选择工作区目录。",
+          retriable: false
+        }
+      };
+    }
+    const result = await bridge.selectWorkspaceRoot();
+    if (result.ok) applySnapshot(result.snapshot);
+    return result;
+  }, [applySnapshot, bridge]);
+
   useEffect(() => {
     if (!bridge) return;
     let disposed = false;
@@ -172,6 +204,8 @@ export function useAgentCore() {
     retryTaskLocally,
     flushPersistence,
     readWorkspaceFile,
-    openWorkspace
+    openWorkspace,
+    selectLocalResources,
+    selectWorkspaceRoot
   };
 }

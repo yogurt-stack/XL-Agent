@@ -24,8 +24,7 @@ import type {
 } from "../src/features/agent-core/runtimeBridge";
 import { createSystemProfileToolOutput } from "../src/features/agent-core/systemProfile";
 import {
-  FixedWindowsPlanner,
-  MockVerifier
+  FixedWindowsPlanner
 } from "../src/features/agent-core/mockServices";
 import { createDefaultDomainSkillRegistry } from "../src/features/agent-core/domainSkills";
 import {
@@ -38,6 +37,8 @@ import type {
   ControlledDownloadResult,
   WorkspaceExportResult
 } from "../src/features/agent-core/types";
+import type { ControlledDownloadOptions } from "./downloadClient";
+import type { DownloadTaskProgress } from "./downloadTasks";
 import type { RemoteModelClient } from "./modelClient";
 import {
   toModelConnectionError as toMainModelConnectionError
@@ -53,6 +54,11 @@ import {
   toWorkspaceExportError
 } from "./workspaceExporter";
 import { readHostSystemProfile } from "./systemProfile";
+import { LocalXunleiAdapter } from "./xunleiAdapter";
+import type { LocalArtifactRecord } from "./localArtifacts";
+import { ElectronArtifactVerifier } from "./artifactVerifier";
+import { writeCurrentManifestSnapshot } from "./manifestSnapshots";
+import { WorkspaceInspectorAgent } from "./agentB";
 
 export type AgentRuntimeHostOptions = {
   store: TaskStore;
@@ -60,7 +66,8 @@ export type AgentRuntimeHostOptions = {
   workspaceRoot: string;
   performDownload: (
     resourceId: string,
-    metadata: TrustedDownloadMetadata
+    metadata: TrustedDownloadMetadata,
+    options: ControlledDownloadOptions
   ) => Promise<ControlledDownloadResult> | ControlledDownloadResult;
   onSnapshot?: (snapshot: AgentRuntimeSnapshot) => void;
   stepDelayMs?: number;
@@ -102,9 +109,24 @@ export class AgentRuntimeHost {
   private readonly workspaceTemplates =
     createDefaultWorkspaceTemplateRegistry();
   private readonly domainSkills = createDefaultDomainSkillRegistry();
+  private readonly downloadAdapter: LocalXunleiAdapter;
+  private readonly agentB: WorkspaceInspectorAgent;
+  private suppressNextManifestGeneration = false;
   private disposed = false;
 
   private constructor(private readonly options: AgentRuntimeHostOptions) {
+    this.downloadAdapter = new LocalXunleiAdapter({
+      store: options.store,
+      performDownload: async (resourceId, metadata, downloadOptions) =>
+        options.performDownload(resourceId, metadata, downloadOptions),
+      onProgress: (progress) => this.handleDownloadProgress(progress)
+    });
+    this.agentB = new WorkspaceInspectorAgent({
+      store: options.store,
+      allowTestFixtures:
+        process.env.NODE_ENV === "test" &&
+        process.env.XL_AGENT_E2E_DOWNLOAD_FIXTURE === "1"
+    });
     this.modelConnection = new ModelConnectionController({
       getConnectionInfo: async () => options.modelClient.getSafeConnectionInfo(),
       testConnection: async () => {
@@ -154,7 +176,11 @@ export class AgentRuntimeHost {
     this.runtime = new AgentRuntime({
       router: new ExtensibleAgentRouter(this.domainSkills, sourceProviders),
       planner: new FixedWindowsPlanner(),
-      verifier: new MockVerifier(),
+      verifier: new ElectronArtifactVerifier(
+        this.options.store,
+        process.env.NODE_ENV === "test" &&
+          process.env.XL_AGENT_E2E_DOWNLOAD_FIXTURE === "1"
+      ),
       scheduler: createTimeoutScheduler(),
       model: fallbackModel,
       tools,
@@ -198,9 +224,57 @@ export class AgentRuntimeHost {
     };
   }
 
-  dispatch(value: unknown): AgentRuntimeSnapshot {
+  async dispatch(value: unknown): Promise<AgentRuntimeSnapshot> {
     const event = parseAgentUserEvent(value);
+    const state = this.runtime.getState();
+    if (event.type === "PAUSE_DOWNLOAD") {
+      if (
+        await this.downloadAdapter.pause(
+          state.taskId,
+          state.revision,
+          event.resourceId
+        )
+      ) {
+        this.runtime.reportExternalEvent({
+          type: "DOWNLOAD_PAUSED",
+          resourceId: event.resourceId
+        });
+      }
+      return this.getSnapshot();
+    }
+    if (event.type === "RESUME_DOWNLOAD") {
+      if (
+        await this.downloadAdapter.resume(
+          state.taskId,
+          state.revision,
+          event.resourceId
+        )
+      ) {
+        this.runtime.reportExternalEvent({
+          type: "DOWNLOAD_RESUMED",
+          resourceId: event.resourceId
+        });
+      }
+      return this.getSnapshot();
+    }
+    if (event.type === "CANCEL_TASK") {
+      await this.downloadAdapter.cancelTask(state.taskId);
+    }
     this.runtime.dispatch(event);
+    if (
+      event.type === "RUN_AGENT_B" &&
+      !this.canRunAgentB(this.runtime.getState())
+    ) {
+      throw new Error("当前任务尚无可供 Agent B 检查的 Manifest。");
+    }
+    if (
+      (event.type === "RUN_AGENT_B" ||
+        (event.type === "RESOLVE_DOWNLOAD_FAILURE" &&
+          event.action === "delegate-agent-b")) &&
+      this.canRunAgentB(this.runtime.getState())
+    ) {
+      await this.runAgentBInspection();
+    }
     return this.getSnapshot();
   }
 
@@ -219,8 +293,56 @@ export class AgentRuntimeHost {
     return this.getSnapshot();
   }
 
+  async addLocalArtifacts(records: LocalArtifactRecord[]) {
+    if (!records.length) return this.getSnapshot();
+    const state = this.runtime.getState();
+    if (
+      state.taskId === "unassigned" ||
+      records.some(
+        (record) =>
+          record.taskId !== state.taskId ||
+          record.planRevision <= 0
+      )
+    ) {
+      throw new Error("本地资源必须绑定当前有效任务和计划 revision。");
+    }
+    await this.options.store.recordLocalArtifacts(records);
+    for (const record of records) {
+      if (!record.matchedResourceId) continue;
+      await this.options.store.recordDownloadArtifact({
+        taskId: state.taskId,
+        revision: record.planRevision,
+        resourceId: record.matchedResourceId,
+        fileName: record.fileName,
+        sourceHost: "local-user",
+        tempFilePath: record.sourcePath,
+        bytesWritten: record.bytesWritten,
+        sha256: record.sha256,
+        expectedSha256: record.sha256,
+        verificationStatus: "local-verified",
+        verifiedAt: record.importedAt
+      });
+    }
+    this.runtime.reportExternalEvent({
+      type: "LOCAL_ARTIFACTS_ADDED",
+      artifacts: records.map(
+        ({ taskId: _taskId, planRevision: _planRevision, sourcePath: _sourcePath, ...summary }) =>
+          summary
+      )
+    });
+    return this.getSnapshot();
+  }
+
+  selectWorkspaceRoot(rootPath: string) {
+    this.runtime.reportExternalEvent({
+      type: "WORKSPACE_ROOT_SELECTED",
+      rootPath
+    });
+    return this.getSnapshot();
+  }
+
   async flushPersistence() {
-    await this.persistenceQueue.catch(() => undefined);
+    await this.waitForPersistence().catch(() => undefined);
     await this.options.store.flush();
   }
 
@@ -232,12 +354,48 @@ export class AgentRuntimeHost {
   private handleRuntimeState(state: AgentState) {
     this.emitSnapshot();
     if (state.phase === "intake" || state.taskId === "unassigned" || !state.task) return;
+    const shouldGenerateManifest = !this.suppressNextManifestGeneration;
+    this.suppressNextManifestGeneration = false;
 
     const operation = this.persistenceQueue
       .catch(() => undefined)
       .then(() => this.options.store.saveSnapshot(state))
+      .then(async ({ savedAt }) => {
+        if (!shouldGenerateManifest) return { savedAt, manifest: null };
+        const manifest = await this.options.store.createManifestSnapshotRecord(
+          state
+        );
+        const [downloadArtifacts, localArtifacts] = await Promise.all([
+          this.options.store.listDownloadArtifacts(
+            state.taskId,
+            state.revision
+          ),
+          this.options.store.listLocalArtifacts(
+            state.taskId
+          )
+        ]);
+        const rootPath = await writeCurrentManifestSnapshot({
+          workspaceRoot:
+            state.workspace.targetRootPath ?? this.options.workspaceRoot,
+          record: manifest,
+          downloadArtifacts,
+          localArtifacts,
+          allowTestFixtures:
+            process.env.NODE_ENV === "test" &&
+            process.env.XL_AGENT_E2E_DOWNLOAD_FIXTURE === "1"
+        });
+        await this.options.store.setManifestSnapshotRoot(
+          state.taskId,
+          manifest.manifestRevision,
+          rootPath
+        );
+        return {
+          savedAt,
+          manifest: { ...manifest, rootPath }
+        };
+      })
       .then(
-        ({ savedAt }) => {
+        ({ savedAt, manifest }) => {
           this.persistence = {
             ...this.persistence,
             status: "ready",
@@ -245,6 +403,15 @@ export class AgentRuntimeHost {
             error: null
           };
           this.emitSnapshot();
+          if (manifest) {
+            this.suppressNextManifestGeneration = true;
+            this.runtime.reportExternalEvent({
+              type: "MANIFEST_SNAPSHOT_WRITTEN",
+              manifestRevision: manifest.manifestRevision,
+              rootPath: manifest.rootPath,
+              status: manifest.status
+            });
+          }
           return savedAt;
         },
         (error) => {
@@ -265,7 +432,51 @@ export class AgentRuntimeHost {
   }
 
   private async waitForPersistence() {
-    await this.persistenceQueue;
+    while (true) {
+      const pending = this.persistenceQueue;
+      await pending;
+      if (pending === this.persistenceQueue) return;
+    }
+  }
+
+  private async runAgentBInspection() {
+    await this.waitForPersistence();
+    const state = this.runtime.getState();
+    if (!this.canRunAgentB(state)) {
+      throw new Error("当前任务尚无可供 Agent B 检查的 Manifest。");
+    }
+    const grant = this.agentB.issueGrant(state.taskId, state.revision);
+    const runId = this.agentB.createRunId();
+    this.runtime.reportExternalEvent({
+      type: "AGENT_B_STARTED",
+      runId,
+      grantId: grant.grantId
+    });
+    await this.waitForPersistence();
+    try {
+      const result = await this.agentB.run(grant, runId);
+      this.runtime.reportExternalEvent({
+        type: "AGENT_B_COMPLETED",
+        runId,
+        answer: result.answer
+      });
+    } catch (error) {
+      this.runtime.reportExternalEvent({
+        type: "AGENT_B_FAILED",
+        runId,
+        reason:
+          error instanceof Error ? error.message : "Agent B 检查失败。"
+      });
+    }
+  }
+
+  private canRunAgentB(state: AgentState) {
+    return (
+      state.taskId !== "unassigned" &&
+      state.revision > 0 &&
+      state.workspace.manifestRevision > 0 &&
+      state.agentB.status !== "running"
+    );
   }
 
   private async runControlledDownload(request: {
@@ -312,10 +523,10 @@ export class AgentRuntimeHost {
       );
     }
 
-    const result = await this.options.performDownload(
-      request.resourceId,
+    const result = await this.downloadAdapter.createDownloadTask({
+      ...request,
       metadata
-    );
+    });
     if (result.ok) {
       const testFixture =
         process.env.NODE_ENV === "test" &&
@@ -330,11 +541,32 @@ export class AgentRuntimeHost {
         bytesWritten: result.output.bytesWritten,
         sha256: result.output.sha256,
         expectedSha256: metadata.expectedSha256,
-        verificationStatus: testFixture ? "test-fixture" : "verified",
+        verificationStatus: testFixture ? "test-fixture" : "downloaded",
         verifiedAt: new Date().toISOString()
       });
     }
     return result;
+  }
+
+  private handleDownloadProgress(progress: DownloadTaskProgress) {
+    const state = this.runtime?.getState();
+    if (
+      !state ||
+      state.taskId !== progress.taskId ||
+      state.revision !== progress.revision ||
+      state.activeResourceId !== progress.resourceId
+    ) {
+      return;
+    }
+    this.runtime.reportExternalEvent({
+      type: "DOWNLOAD_PROGRESS",
+      resourceId: progress.resourceId,
+      progress: Math.min(99, progress.progress),
+      bytesWritten: progress.bytesWritten,
+      totalBytes: progress.totalBytes ?? undefined,
+      speedBytesPerSecond: progress.speedBytesPerSecond,
+      etaSeconds: progress.etaSeconds ?? undefined
+    });
   }
 
   private async runWorkspaceExport(request: {
@@ -379,6 +611,9 @@ export class AgentRuntimeHost {
           request.taskId,
           request.revision
         );
+      const localArtifacts = await this.options.store.listLocalArtifacts(
+        request.taskId
+      );
       const skill = runtimeState.route
         ? this.domainSkills.get(runtimeState.route)
         : null;
@@ -393,8 +628,11 @@ export class AgentRuntimeHost {
             })
           : undefined;
       const output = await exportWorkspace(runtimeState, {
-        workspaceRoot: this.options.workspaceRoot,
+        workspaceRoot:
+          runtimeState.workspace.targetRootPath ??
+          this.options.workspaceRoot,
         downloadArtifacts,
+        localArtifacts,
         templateRegistry: this.workspaceTemplates,
         workspaceGuide,
         allowTestFixtures:

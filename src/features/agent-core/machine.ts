@@ -63,6 +63,27 @@ function toPlannedResource(resource: TrustedResource, selected: boolean): Planne
   };
 }
 
+function applyLocalArtifactMatches(
+  resources: PlannedResource[],
+  state: AgentState
+) {
+  const matchedIds = new Set(
+    state.localArtifacts.flatMap((artifact) =>
+      artifact.matchedResourceId ? [artifact.matchedResourceId] : []
+    )
+  );
+  return resources.map((resource) =>
+    matchedIds.has(resource.id)
+      ? {
+          ...resource,
+          selected: true,
+          status: "downloaded" as const,
+          progress: 100
+        }
+      : resource
+  );
+}
+
 /**
  * 根据可信目录和澄清答案生成第一版资源计划。
  * @param state 当前 Agent 状态，读取工作负载澄清答案。
@@ -71,14 +92,14 @@ function toPlannedResource(resource: TrustedResource, selected: boolean): Planne
 function createInitialPlan(state: AgentState): PlannedResource[] {
   const fullStack = state.answers["primary-workload"] === "全栈 AI 应用";
 
-  return primaryCatalogIds.map((resourceId) => {
+  return applyLocalArtifactMatches(primaryCatalogIds.map((resourceId) => {
     const resource = catalogById.get(resourceId);
     if (!resource) {
       throw new Error(`Trusted catalog resource is missing: ${resourceId}`);
     }
 
     return toPlannedResource(resource, resource.required || (resource.id === "node-lts" && fullStack));
-  });
+  }), state);
 }
 
 /**
@@ -86,11 +107,14 @@ function createInitialPlan(state: AgentState): PlannedResource[] {
  * @param resourceIds 模型建议的可信资源 ID 列表。
  * @returns 去重并过滤未知 ID 后的计划资源数组。
  */
-function createModelPlan(resourceIds: string[]): PlannedResource[] {
-  return [...new Set(resourceIds)].flatMap((resourceId) => {
+function createModelPlan(
+  resourceIds: string[],
+  state: AgentState
+): PlannedResource[] {
+  return applyLocalArtifactMatches([...new Set(resourceIds)].flatMap((resourceId) => {
     const resource = catalogById.get(resourceId);
     return resource ? [toPlannedResource(resource, true)] : [];
-  });
+  }), state);
 }
 
 /**
@@ -294,6 +318,7 @@ export function createInitialAgentState(): AgentState {
     clarificationIndex: 0,
     answers: {},
     resources: [],
+    localArtifacts: [],
     replanReason: null,
     requestedReplanStrategy: null,
     activeResourceId: null,
@@ -303,6 +328,8 @@ export function createInitialAgentState(): AgentState {
       files: handoffFiles,
       nextAction: "等待任务输入。",
       exportStatus: "not_started",
+      manifestRevision: 0,
+      overallStatus: "preparing",
       fileRecords: []
     },
     planExplanation: null,
@@ -316,6 +343,14 @@ export function createInitialAgentState(): AgentState {
       decisions: [],
       toolResults: [],
       policyAudit: []
+    },
+    agentB: {
+      status: "idle",
+      runId: null,
+      grantId: null,
+      manifestRevision: null,
+      answer: null,
+      error: null
     }
   };
 }
@@ -364,6 +399,8 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
             files: handoffFiles,
             nextAction: "等待路由判断。",
             exportStatus: "not_started",
+            manifestRevision: 0,
+            overallStatus: "preparing",
             fileRecords: []
           }
         },
@@ -581,7 +618,7 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
           `模型计划未通过严格验证：${planValidation.issues[0]?.message ?? "未知计划错误"}`
         );
       }
-      const resources = createModelPlan(event.resourceIds);
+      const resources = createModelPlan(event.resourceIds, state);
       return withLog(
         {
           ...state,
@@ -774,7 +811,21 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       const progress = Math.max(0, Math.min(100, event.progress));
       const resources = state.resources.map((resource) =>
         resource.id === event.resourceId
-          ? { ...resource, progress, status: progress === 100 ? ("downloaded" as ResourceStatus) : resource.status }
+          ? {
+              ...resource,
+              progress,
+              status:
+                progress === 100
+                  ? ("downloaded" as ResourceStatus)
+                  : resource.status === "paused"
+                    ? ("paused" as ResourceStatus)
+                    : ("downloading" as ResourceStatus),
+              bytesWritten: event.bytesWritten ?? resource.bytesWritten,
+              totalBytes: event.totalBytes ?? resource.totalBytes,
+              speedBytesPerSecond:
+                event.speedBytesPerSecond ?? resource.speedBytesPerSecond,
+              etaSeconds: event.etaSeconds ?? resource.etaSeconds
+            }
           : resource
       );
       if (progress < 100) return { ...state, resources };
@@ -794,6 +845,50 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         "所有已选择资源下载完成，开始验证版本与清单。"
       );
     }
+
+    case "PAUSE_DOWNLOAD":
+    case "RESUME_DOWNLOAD":
+      return state;
+
+    case "DOWNLOAD_PAUSED":
+      if (
+        state.phase !== "downloading" ||
+        state.activeResourceId !== event.resourceId
+      ) {
+        return state;
+      }
+      return withLog(
+        {
+          ...state,
+          resources: state.resources.map((resource) =>
+            resource.id === event.resourceId
+              ? { ...resource, status: "paused" as const }
+              : resource
+          )
+        },
+        "info",
+        `资源 ${event.resourceId} 已暂停。`
+      );
+
+    case "DOWNLOAD_RESUMED":
+      if (
+        state.phase !== "downloading" ||
+        state.activeResourceId !== event.resourceId
+      ) {
+        return state;
+      }
+      return withLog(
+        {
+          ...state,
+          resources: state.resources.map((resource) =>
+            resource.id === event.resourceId
+              ? { ...resource, status: "downloading" as const }
+              : resource
+          )
+        },
+        "info",
+        `资源 ${event.resourceId} 已恢复。`
+      );
 
     case "DOWNLOAD_FAILED":
       if (state.phase !== "downloading" || state.activeResourceId !== event.resourceId) return state;
@@ -857,6 +952,17 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
               files: handoffFiles,
               nextAction: `Agent B 处理 ${failedResource.name}：${failedResource.failureReason ?? "下载失败"}`,
               exportStatus: "not_started",
+              manifestRevision: state.workspace.manifestRevision,
+              overallStatus: state.resources.some(
+                (resource) =>
+                  resource.status === "downloaded" ||
+                  resource.status === "verified"
+              )
+                ? "partially_ready"
+                : "failed",
+              targetRootPath: state.workspace.targetRootPath,
+              currentSnapshotRootPath:
+                state.workspace.currentSnapshotRootPath,
               fileRecords: []
             }
           },
@@ -921,6 +1027,20 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
 
     case "VERIFY_RESOURCES": {
       if (state.phase !== "verifying") return state;
+      if (event.failure) {
+        return event.failure.retriable
+          ? enterFailureResolution(
+              state,
+              event.failure.resourceId,
+              `${event.failure.code}: ${event.failure.reason}`
+            )
+          : enterReplanning(
+              state,
+              event.failure.resourceId,
+              "version_mismatch",
+              `${event.failure.code}: ${event.failure.reason}`
+            );
+      }
       if (event.versionMismatchResourceId) {
         const resource = state.resources.find((item) => item.id === event.versionMismatchResourceId);
         if (!resource) return state;
@@ -946,6 +1066,10 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
             files: handoffFiles,
             nextAction: "正在原子写入工作区交接包。",
             exportStatus: "pending",
+            manifestRevision: state.workspace.manifestRevision,
+            overallStatus: "preparing",
+            targetRootPath: state.workspace.targetRootPath,
+            currentSnapshotRootPath: state.workspace.currentSnapshotRootPath,
             fileRecords: []
           },
           agentRun: { ...state.agentRun, status: "executing" }
@@ -984,7 +1108,11 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
             files: event.output.files.map((file) => file.relativePath),
             nextAction: "核对 resource-manifest.json 与 downloads/ 校验信息，再按 README.md 人工处理资源。",
             exportStatus: "ready",
+            manifestRevision: state.workspace.manifestRevision,
+            overallStatus: "ready",
             rootPath: event.output.rootPath,
+            targetRootPath: state.workspace.targetRootPath,
+            currentSnapshotRootPath: state.workspace.currentSnapshotRootPath,
             fileRecords: event.output.files,
             exportError: undefined
           },
@@ -1029,6 +1157,133 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         },
         "info",
         "用户请求重试工作区交接包导出。"
+      );
+
+    case "LOCAL_ARTIFACTS_ADDED": {
+      if (!event.artifacts.length) return state;
+      const byId = new Map(
+        [...state.localArtifacts, ...event.artifacts].map((artifact) => [
+          artifact.artifactId,
+          artifact
+        ])
+      );
+      const matchedIds = new Set(
+        event.artifacts.flatMap((artifact) =>
+          artifact.matchedResourceId ? [artifact.matchedResourceId] : []
+        )
+      );
+      const resources = state.resources.map((resource) =>
+        matchedIds.has(resource.id)
+          ? {
+              ...resource,
+              selected: true,
+              status: "downloaded" as const,
+              progress: 100,
+              failureReason: undefined
+            }
+          : resource
+      );
+      const revision =
+        state.phase === "waiting_approval" && matchedIds.size > 0
+          ? state.revision + 1
+          : state.revision;
+      const taskRequirements =
+        state.taskRequirements ?? deriveTaskRequirements(state);
+      const planValidation =
+        resources.length > 0 && revision > 0
+          ? validatePlannedResources(resources, {
+              requirements: taskRequirements,
+              systemProfile: state.systemProfile,
+              revision
+            })
+          : state.planValidation;
+      return withLog(
+        {
+          ...state,
+          revision,
+          resources,
+          localArtifacts: [...byId.values()],
+          approvedRevision: matchedIds.size > 0 ? null : state.approvedRevision,
+          taskRequirements,
+          planValidation
+        },
+        "success",
+        `已接入 ${event.artifacts.length} 个本地资源，其中 ${matchedIds.size} 个匹配当前可信资源计划。`
+      );
+    }
+
+    case "WORKSPACE_ROOT_SELECTED":
+      return withLog(
+        {
+          ...state,
+          workspace: {
+            ...state.workspace,
+            targetRootPath: event.rootPath
+          }
+        },
+        "info",
+        "已更新当前任务的工作区目标目录。"
+      );
+
+    case "MANIFEST_SNAPSHOT_WRITTEN":
+      if (event.manifestRevision <= state.workspace.manifestRevision) return state;
+      return {
+        ...state,
+        workspace: {
+          ...state.workspace,
+          manifestRevision: event.manifestRevision,
+          currentSnapshotRootPath: event.rootPath,
+          overallStatus: event.status
+        }
+      };
+
+    case "RUN_AGENT_B":
+      return state;
+
+    case "AGENT_B_STARTED":
+      return {
+        ...state,
+        agentB: {
+          status: "running",
+          runId: event.runId,
+          grantId: event.grantId,
+          manifestRevision: null,
+          answer: null,
+          error: null
+        }
+      };
+
+    case "AGENT_B_COMPLETED":
+      if (state.agentB.runId !== event.runId) return state;
+      return withLog(
+        {
+          ...state,
+          agentB: {
+            ...state.agentB,
+            status: "completed",
+            manifestRevision: event.answer.manifestRevision,
+            answer: event.answer,
+            error: null
+          }
+        },
+        "success",
+        `Agent B 已读取 Manifest r${event.answer.manifestRevision} 并完成只读检查。`
+      );
+
+    case "AGENT_B_FAILED":
+      if (state.agentB.runId !== event.runId) return state;
+      return withLog(
+        {
+          ...state,
+          agentB: {
+            ...state.agentB,
+            status: "failed",
+            answer: null,
+            error: event.reason
+          }
+        },
+        "error",
+        `Agent B 检查失败：${event.reason}`
       );
 
     case "TASK_STATE_RESTORED": {

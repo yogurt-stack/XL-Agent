@@ -6,7 +6,21 @@ import type {
   WorkspaceExportOutput,
   WorkspaceSnapshot
 } from "./workspaceExporter";
+import type {
+  AgentBInspectionAnswer,
+  AgentState
+} from "../src/features/agent-core/types";
 import type { DownloadArtifactRecord } from "./downloadArtifacts";
+import type {
+  DownloadTaskRecord,
+  DownloadTaskStatus
+} from "./downloadTasks";
+import type { LocalArtifactRecord } from "./localArtifacts";
+import {
+  createManifestSnapshot,
+  type ManifestSnapshotRecord,
+  type ResourceManifestSnapshot
+} from "./manifestSnapshots";
 
 export type PersistedAgentState = WorkspaceSnapshot & {
   activeResourceId: string | null;
@@ -66,7 +80,7 @@ export type TaskStoreOptions = {
   now?: () => number;
 };
 
-export const TASK_STORE_SCHEMA_VERSION = 2;
+export const TASK_STORE_SCHEMA_VERSION = 3;
 
 export type TaskStoreSchemaInfo = {
   version: number;
@@ -76,6 +90,20 @@ export type TaskStoreSchemaInfo = {
     name: string;
     appliedAt: string;
   }>;
+};
+
+export type AgentBRunRecord = {
+  runId: string;
+  taskId: string;
+  planRevision: number;
+  manifestRevision: number | null;
+  grantId: string;
+  status: "running" | "completed" | "failed";
+  toolResult: unknown;
+  answer: AgentBInspectionAnswer | null;
+  errorMessage: string | null;
+  startedAt: string;
+  completedAt: string | null;
 };
 
 const terminalPhases = new Set(["intake", "unsupported", "handoff", "cancelled"]);
@@ -190,7 +218,9 @@ function isDownloadArtifactRecord(
     /^[a-f0-9]{64}$/i.test(value.sha256) &&
     typeof value.expectedSha256 === "string" &&
     /^[a-f0-9]{64}$/i.test(value.expectedSha256) &&
-    (value.verificationStatus === "verified" ||
+    (value.verificationStatus === "downloaded" ||
+      value.verificationStatus === "verified" ||
+      value.verificationStatus === "local-verified" ||
       value.verificationStatus === "test-fixture") &&
     typeof value.verifiedAt === "string" &&
     Number.isFinite(Date.parse(value.verifiedAt))
@@ -214,6 +244,137 @@ function downloadArtifactFromRow(
     verifiedAt: asString(row.verified_at)
   };
   return isDownloadArtifactRecord(candidate) ? candidate : null;
+}
+
+function isDownloadTaskStatus(value: unknown): value is DownloadTaskStatus {
+  return (
+    value === "queued" ||
+    value === "downloading" ||
+    value === "paused" ||
+    value === "completed" ||
+    value === "failed" ||
+    value === "cancelled" ||
+    value === "interrupted"
+  );
+}
+
+function downloadTaskFromRow(row: ParamsObject): DownloadTaskRecord | null {
+  const taskId = asString(row.task_id);
+  const revision = asNumber(row.revision);
+  const resourceId = asString(row.resource_id);
+  const status = asString(row.status);
+  const progress = asNumber(row.progress);
+  const bytesWritten = asNumber(row.bytes_written);
+  const totalBytes = asNumber(row.total_bytes);
+  const speedBytesPerSecond = asNumber(row.speed_bytes_per_second);
+  const etaSeconds = asNumber(row.eta_seconds);
+  const createdAt = asString(row.created_at);
+  const updatedAt = asString(row.updated_at);
+  if (
+    !taskId ||
+    revision === null ||
+    !resourceId ||
+    !isDownloadTaskStatus(status) ||
+    progress === null ||
+    bytesWritten === null ||
+    speedBytesPerSecond === null ||
+    !createdAt ||
+    !updatedAt
+  ) {
+    return null;
+  }
+  return {
+    taskId,
+    revision,
+    resourceId,
+    status,
+    progress,
+    bytesWritten,
+    totalBytes,
+    speedBytesPerSecond,
+    etaSeconds,
+    tempFilePath: asString(row.temp_file_path),
+    errorCode: asString(row.error_code),
+    errorMessage: asString(row.error_message),
+    createdAt,
+    updatedAt
+  };
+}
+
+function localArtifactFromRow(row: ParamsObject): LocalArtifactRecord | null {
+  const artifactId = asString(row.artifact_id);
+  const taskId = asString(row.task_id);
+  const planRevision = asNumber(row.plan_revision);
+  const fileName = asString(row.file_name);
+  const displayPath = asString(row.display_path);
+  const sourcePath = asString(row.source_path);
+  const bytesWritten = asNumber(row.bytes_written);
+  const sha256 = asString(row.sha256);
+  const verificationStatus = asString(row.verification_status);
+  const importedAt = asString(row.imported_at);
+  if (
+    !artifactId ||
+    !taskId ||
+    planRevision === null ||
+    !fileName ||
+    !displayPath ||
+    !sourcePath ||
+    bytesWritten === null ||
+    !sha256 ||
+    !importedAt ||
+    (verificationStatus !== "local-verified" &&
+      verificationStatus !== "unverified")
+  ) {
+    return null;
+  }
+  return {
+    artifactId,
+    taskId,
+    planRevision,
+    fileName,
+    displayPath,
+    sourcePath,
+    bytesWritten,
+    sha256,
+    matchedResourceId: asString(row.matched_resource_id),
+    verificationStatus,
+    importedAt
+  };
+}
+
+function agentBRunFromRow(row: ParamsObject): AgentBRunRecord | null {
+  const runId = asString(row.run_id);
+  const taskId = asString(row.task_id);
+  const planRevision = asNumber(row.plan_revision);
+  const grantId = asString(row.grant_id);
+  const status = asString(row.status);
+  const startedAt = asString(row.started_at);
+  if (
+    !runId ||
+    !taskId ||
+    planRevision === null ||
+    !grantId ||
+    !startedAt ||
+    (status !== "running" && status !== "completed" && status !== "failed")
+  ) {
+    return null;
+  }
+  const answer = parseJson(asString(row.answer_json));
+  return {
+    runId,
+    taskId,
+    planRevision,
+    manifestRevision: asNumber(row.manifest_revision),
+    grantId,
+    status,
+    toolResult: parseJson(asString(row.tool_result_json)),
+    answer: isRecord(answer)
+      ? (answer as AgentBInspectionAnswer)
+      : null,
+    errorMessage: asString(row.error_message),
+    startedAt,
+    completedAt: asString(row.completed_at)
+  };
 }
 
 function stateHasErrors(state: PersistedAgentState) {
@@ -316,6 +477,78 @@ const schemaMigrations: SchemaMigration[] = [
           ON download_artifacts (task_id, revision);
       `);
     }
+  },
+  {
+    version: 3,
+    name: "p0-resource-orchestration",
+    up(database) {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS download_tasks (
+          task_id TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          resource_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          progress REAL NOT NULL,
+          bytes_written INTEGER NOT NULL,
+          total_bytes INTEGER,
+          speed_bytes_per_second INTEGER NOT NULL,
+          eta_seconds INTEGER,
+          temp_file_path TEXT,
+          error_code TEXT,
+          error_message TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (task_id, revision, resource_id)
+        );
+        CREATE INDEX IF NOT EXISTS download_tasks_task_status
+          ON download_tasks (task_id, status);
+
+        CREATE TABLE IF NOT EXISTS local_artifacts (
+          artifact_id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL,
+          plan_revision INTEGER NOT NULL,
+          file_name TEXT NOT NULL,
+          display_path TEXT NOT NULL,
+          source_path TEXT NOT NULL,
+          bytes_written INTEGER NOT NULL,
+          sha256 TEXT NOT NULL,
+          matched_resource_id TEXT,
+          verification_status TEXT NOT NULL,
+          imported_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS local_artifacts_task
+          ON local_artifacts (task_id, plan_revision);
+
+        CREATE TABLE IF NOT EXISTS resource_manifest_snapshots (
+          task_id TEXT NOT NULL,
+          manifest_revision INTEGER NOT NULL,
+          plan_revision INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          manifest_json TEXT NOT NULL,
+          root_path TEXT,
+          generated_at TEXT NOT NULL,
+          PRIMARY KEY (task_id, manifest_revision)
+        );
+        CREATE INDEX IF NOT EXISTS manifest_snapshots_task_plan
+          ON resource_manifest_snapshots (task_id, plan_revision);
+
+        CREATE TABLE IF NOT EXISTS agent_b_runs (
+          run_id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL,
+          plan_revision INTEGER NOT NULL,
+          manifest_revision INTEGER,
+          grant_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          tool_result_json TEXT,
+          answer_json TEXT,
+          error_message TEXT,
+          started_at TEXT NOT NULL,
+          completed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS agent_b_runs_task
+          ON agent_b_runs (task_id, plan_revision);
+      `);
+    }
   }
 ];
 
@@ -402,6 +635,15 @@ export class TaskStore {
     };
     try {
       migrateSchema(database, new Date(resolvedOptions.now()).toISOString());
+      database.run(
+        `UPDATE download_tasks
+         SET status = 'interrupted',
+             error_code = 'APPLICATION_RESTARTED',
+             error_message = '应用重启中断了下载，可重新审批后恢复执行。',
+             updated_at = ?
+         WHERE status IN ('downloading', 'paused')`,
+        [new Date(resolvedOptions.now()).toISOString()]
+      );
     } catch (error) {
       database.close();
       throw error;
@@ -776,13 +1018,329 @@ export class TaskStore {
     });
   }
 
+  async recordDownloadTask(value: DownloadTaskRecord) {
+    return this.enqueue(async () => {
+      if (
+        !isDownloadTaskStatus(value.status) ||
+        !Number.isSafeInteger(value.revision) ||
+        value.revision <= 0 ||
+        !Number.isFinite(value.progress) ||
+        value.progress < 0 ||
+        value.progress > 100 ||
+        !Number.isSafeInteger(value.bytesWritten) ||
+        value.bytesWritten < 0
+      ) {
+        throw new Error("Refusing to persist an invalid download task.");
+      }
+      this.database.run(
+        `INSERT INTO download_tasks (
+          task_id, revision, resource_id, status, progress, bytes_written,
+          total_bytes, speed_bytes_per_second, eta_seconds, temp_file_path,
+          error_code, error_message, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(task_id, revision, resource_id) DO UPDATE SET
+          status = excluded.status,
+          progress = excluded.progress,
+          bytes_written = excluded.bytes_written,
+          total_bytes = excluded.total_bytes,
+          speed_bytes_per_second = excluded.speed_bytes_per_second,
+          eta_seconds = excluded.eta_seconds,
+          temp_file_path = excluded.temp_file_path,
+          error_code = excluded.error_code,
+          error_message = excluded.error_message,
+          updated_at = excluded.updated_at`,
+        [
+          value.taskId,
+          value.revision,
+          value.resourceId,
+          value.status,
+          value.progress,
+          value.bytesWritten,
+          value.totalBytes,
+          value.speedBytesPerSecond,
+          value.etaSeconds,
+          value.tempFilePath,
+          value.errorCode,
+          value.errorMessage,
+          value.createdAt,
+          value.updatedAt
+        ]
+      );
+      await this.persist();
+    });
+  }
+
+  async recordLocalArtifacts(values: LocalArtifactRecord[]) {
+    return this.enqueue(async () => {
+      this.database.run("BEGIN IMMEDIATE");
+      try {
+        for (const value of values) {
+          if (
+            !/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(value.artifactId) ||
+            !path.isAbsolute(value.sourcePath) ||
+            value.fileName !== path.basename(value.fileName) ||
+            !Number.isSafeInteger(value.bytesWritten) ||
+            value.bytesWritten < 0 ||
+            !/^[a-f0-9]{64}$/i.test(value.sha256)
+          ) {
+            throw new Error("Refusing to persist an invalid local artifact.");
+          }
+          this.database.run(
+            `INSERT INTO local_artifacts (
+              artifact_id, task_id, plan_revision, file_name, display_path,
+              source_path, bytes_written, sha256, matched_resource_id,
+              verification_status, imported_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(artifact_id) DO UPDATE SET
+              task_id = excluded.task_id,
+              plan_revision = excluded.plan_revision,
+              file_name = excluded.file_name,
+              display_path = excluded.display_path,
+              source_path = excluded.source_path,
+              bytes_written = excluded.bytes_written,
+              sha256 = excluded.sha256,
+              matched_resource_id = excluded.matched_resource_id,
+              verification_status = excluded.verification_status,
+              imported_at = excluded.imported_at`,
+            [
+              value.artifactId,
+              value.taskId,
+              value.planRevision,
+              value.fileName,
+              value.displayPath,
+              value.sourcePath,
+              value.bytesWritten,
+              value.sha256.toLowerCase(),
+              value.matchedResourceId,
+              value.verificationStatus,
+              value.importedAt
+            ]
+          );
+        }
+        this.database.run("COMMIT");
+      } catch (error) {
+        this.database.run("ROLLBACK");
+        throw error;
+      }
+      await this.persist();
+    });
+  }
+
+  async listLocalArtifacts(taskId: string, planRevision?: number) {
+    return this.enqueue(() => {
+      const records: LocalArtifactRecord[] = [];
+      const statement = this.database.prepare(
+        planRevision === undefined
+          ? `SELECT * FROM local_artifacts
+             WHERE task_id = ? ORDER BY imported_at, artifact_id`
+          : `SELECT * FROM local_artifacts
+             WHERE task_id = ? AND plan_revision = ?
+             ORDER BY imported_at, artifact_id`
+      );
+      try {
+        statement.bind(
+          planRevision === undefined
+            ? [taskId]
+            : [taskId, planRevision]
+        );
+        while (statement.step()) {
+          const row = statement.getAsObject();
+          const artifactId = asString(row.artifact_id);
+          const revision = asNumber(row.plan_revision);
+          const fileName = asString(row.file_name);
+          const displayPath = asString(row.display_path);
+          const sourcePath = asString(row.source_path);
+          const bytesWritten = asNumber(row.bytes_written);
+          const sha256 = asString(row.sha256);
+          const verificationStatus = asString(row.verification_status);
+          const importedAt = asString(row.imported_at);
+          if (
+            !artifactId ||
+            revision === null ||
+            !fileName ||
+            !displayPath ||
+            !sourcePath ||
+            bytesWritten === null ||
+            !sha256 ||
+            !importedAt ||
+            (verificationStatus !== "local-verified" &&
+              verificationStatus !== "unverified")
+          ) {
+            continue;
+          }
+          records.push({
+            artifactId,
+            taskId,
+            planRevision: revision,
+            fileName,
+            displayPath,
+            sourcePath,
+            bytesWritten,
+            sha256,
+            matchedResourceId: asString(row.matched_resource_id),
+            verificationStatus,
+            importedAt
+          });
+        }
+      } finally {
+        statement.free();
+      }
+      return records;
+    });
+  }
+
+  async updateDownloadTaskProgress(
+    value: Pick<
+      DownloadTaskRecord,
+      | "taskId"
+      | "revision"
+      | "resourceId"
+      | "status"
+      | "progress"
+      | "bytesWritten"
+      | "totalBytes"
+      | "speedBytesPerSecond"
+      | "etaSeconds"
+      | "updatedAt"
+    >
+  ) {
+    return this.enqueue(async () => {
+      if (!isDownloadTaskStatus(value.status)) {
+        throw new Error("Download task status is invalid.");
+      }
+      this.database.run(
+        `UPDATE download_tasks
+         SET status = ?, progress = ?, bytes_written = ?, total_bytes = ?,
+             speed_bytes_per_second = ?, eta_seconds = ?, updated_at = ?
+         WHERE task_id = ? AND revision = ? AND resource_id = ?`,
+        [
+          value.status,
+          value.progress,
+          value.bytesWritten,
+          value.totalBytes,
+          value.speedBytesPerSecond,
+          value.etaSeconds,
+          value.updatedAt,
+          value.taskId,
+          value.revision,
+          value.resourceId
+        ]
+      );
+      await this.persist();
+    });
+  }
+
+  async setDownloadTaskStatus(
+    taskId: string,
+    revision: number,
+    resourceId: string,
+    status: DownloadTaskStatus,
+    updatedAt: string
+  ) {
+    return this.enqueue(async () => {
+      if (!isDownloadTaskStatus(status)) {
+        throw new Error("Download task status is invalid.");
+      }
+      this.database.run(
+        `UPDATE download_tasks SET status = ?, updated_at = ?
+         WHERE task_id = ? AND revision = ? AND resource_id = ?`,
+        [status, updatedAt, taskId, revision, resourceId]
+      );
+      await this.persist();
+    });
+  }
+
+  async completeDownloadTask(value: {
+    taskId: string;
+    revision: number;
+    resourceId: string;
+    tempFilePath: string;
+    bytesWritten: number;
+    updatedAt: string;
+  }) {
+    return this.enqueue(async () => {
+      this.database.run(
+        `UPDATE download_tasks
+         SET status = 'completed', progress = 100, bytes_written = ?,
+             total_bytes = ?, speed_bytes_per_second = 0, eta_seconds = 0,
+             temp_file_path = ?, error_code = NULL, error_message = NULL,
+             updated_at = ?
+         WHERE task_id = ? AND revision = ? AND resource_id = ?`,
+        [
+          value.bytesWritten,
+          value.bytesWritten,
+          value.tempFilePath,
+          value.updatedAt,
+          value.taskId,
+          value.revision,
+          value.resourceId
+        ]
+      );
+      await this.persist();
+    });
+  }
+
+  async failDownloadTask(value: {
+    taskId: string;
+    revision: number;
+    resourceId: string;
+    status: "failed" | "cancelled";
+    errorCode: string;
+    errorMessage: string;
+    updatedAt: string;
+  }) {
+    return this.enqueue(async () => {
+      this.database.run(
+        `UPDATE download_tasks
+         SET status = ?, error_code = ?, error_message = ?, updated_at = ?
+         WHERE task_id = ? AND revision = ? AND resource_id = ?`,
+        [
+          value.status,
+          value.errorCode,
+          value.errorMessage,
+          value.updatedAt,
+          value.taskId,
+          value.revision,
+          value.resourceId
+        ]
+      );
+      await this.persist();
+    });
+  }
+
+  async listDownloadTasks(taskId: string, revision?: number) {
+    return this.enqueue(() => {
+      const records: DownloadTaskRecord[] = [];
+      const statement = this.database.prepare(
+        revision === undefined
+          ? `SELECT * FROM download_tasks WHERE task_id = ?
+             ORDER BY revision DESC, resource_id`
+          : `SELECT * FROM download_tasks
+             WHERE task_id = ? AND revision = ? ORDER BY resource_id`
+      );
+      try {
+        statement.bind(
+          revision === undefined ? [taskId] : [taskId, revision]
+        );
+        while (statement.step()) {
+          const record = downloadTaskFromRow(statement.getAsObject());
+          if (record) records.push(record);
+        }
+      } finally {
+        statement.free();
+      }
+      return records;
+    });
+  }
+
   async recordDownloadArtifact(value: DownloadArtifactRecord) {
     return this.enqueue(async () => {
       if (!isDownloadArtifactRecord(value)) {
         throw new Error("Refusing to persist an invalid download artifact.");
       }
       if (
-        value.verificationStatus === "verified" &&
+        (value.verificationStatus === "verified" ||
+          value.verificationStatus === "local-verified") &&
         value.sha256.toLowerCase() !== value.expectedSha256.toLowerCase()
       ) {
         throw new Error("Verified download artifact SHA256 does not match expected SHA256.");
@@ -841,6 +1399,285 @@ export class TaskStore {
         statement.free();
       }
       return artifacts;
+    });
+  }
+
+  async updateDownloadArtifactVerification(
+    taskId: string,
+    revision: number,
+    resourceId: string,
+    verificationStatus: "verified" | "local-verified",
+    verifiedAt: string
+  ) {
+    return this.enqueue(async () => {
+      this.database.run(
+        `UPDATE download_artifacts
+         SET verification_status = ?, verified_at = ?
+         WHERE task_id = ? AND revision = ? AND resource_id = ?`,
+        [
+          verificationStatus,
+          verifiedAt,
+          taskId,
+          revision,
+          resourceId
+        ]
+      );
+      await this.persist();
+    });
+  }
+
+  async createManifestSnapshotRecord(
+    state: PersistedAgentState
+  ): Promise<ManifestSnapshotRecord> {
+    return this.enqueue(async () => {
+      const revisionRow = firstRow(
+        this.database,
+        `SELECT MAX(manifest_revision) AS manifest_revision
+         FROM resource_manifest_snapshots WHERE task_id = ?`,
+        [state.taskId]
+      );
+      const manifestRevision =
+        (revisionRow ? asNumber(revisionRow.manifest_revision) : null) ?? 0;
+      const nextManifestRevision = manifestRevision + 1;
+
+      const downloadArtifacts: DownloadArtifactRecord[] = [];
+      const artifactStatement = this.database.prepare(
+        `SELECT task_id, revision, resource_id, file_name, source_host,
+                temp_file_path, bytes_written, sha256, expected_sha256,
+                verification_status, verified_at
+         FROM download_artifacts
+         WHERE task_id = ? AND revision = ?
+         ORDER BY resource_id`
+      );
+      try {
+        artifactStatement.bind([state.taskId, state.revision]);
+        while (artifactStatement.step()) {
+          const artifact = downloadArtifactFromRow(
+            artifactStatement.getAsObject()
+          );
+          if (artifact) downloadArtifacts.push(artifact);
+        }
+      } finally {
+        artifactStatement.free();
+      }
+
+      const localArtifacts: LocalArtifactRecord[] = [];
+      const localStatement = this.database.prepare(
+        `SELECT * FROM local_artifacts
+         WHERE task_id = ?
+         ORDER BY imported_at, artifact_id`
+      );
+      try {
+        localStatement.bind([state.taskId]);
+        while (localStatement.step()) {
+          const artifact = localArtifactFromRow(localStatement.getAsObject());
+          if (artifact) localArtifacts.push(artifact);
+        }
+      } finally {
+        localStatement.free();
+      }
+
+      const generatedAt = new Date(this.options.now()).toISOString();
+      const manifest = createManifestSnapshot({
+        state: state as AgentState,
+        manifestRevision: nextManifestRevision,
+        generatedAt,
+        downloadArtifacts,
+        localArtifacts
+      });
+      this.database.run(
+        `INSERT INTO resource_manifest_snapshots (
+          task_id, manifest_revision, plan_revision, status, manifest_json,
+          root_path, generated_at
+        ) VALUES (?, ?, ?, ?, ?, NULL, ?)`,
+        [
+          state.taskId,
+          nextManifestRevision,
+          state.revision,
+          manifest.status,
+          JSON.stringify(manifest),
+          generatedAt
+        ]
+      );
+      await this.persist();
+      return {
+        taskId: state.taskId,
+        manifestRevision: nextManifestRevision,
+        planRevision: state.revision,
+        status: manifest.status,
+        manifest,
+        rootPath: null,
+        generatedAt
+      };
+    });
+  }
+
+  async setManifestSnapshotRoot(
+    taskId: string,
+    manifestRevision: number,
+    rootPath: string
+  ) {
+    return this.enqueue(async () => {
+      if (!path.isAbsolute(rootPath)) {
+        throw new Error("Manifest snapshot root must be absolute.");
+      }
+      this.database.run(
+        `UPDATE resource_manifest_snapshots SET root_path = ?
+         WHERE task_id = ? AND manifest_revision = ?`,
+        [rootPath, taskId, manifestRevision]
+      );
+      await this.persist();
+    });
+  }
+
+  async getLatestManifestSnapshot(
+    taskId: string,
+    planRevision?: number
+  ): Promise<ManifestSnapshotRecord | null> {
+    return this.enqueue(() => {
+      const row = firstRow(
+        this.database,
+        planRevision === undefined
+          ? `SELECT * FROM resource_manifest_snapshots
+             WHERE task_id = ?
+             ORDER BY manifest_revision DESC LIMIT 1`
+          : `SELECT * FROM resource_manifest_snapshots
+             WHERE task_id = ? AND plan_revision = ?
+             ORDER BY manifest_revision DESC LIMIT 1`,
+        planRevision === undefined
+          ? [taskId]
+          : [taskId, planRevision]
+      );
+      if (!row) return null;
+      const manifestJson = asString(row.manifest_json);
+      const manifestRevision = asNumber(row.manifest_revision);
+      const storedPlanRevision = asNumber(row.plan_revision);
+      const status = asString(row.status);
+      const generatedAt = asString(row.generated_at);
+      if (
+        !manifestJson ||
+        manifestRevision === null ||
+        storedPlanRevision === null ||
+        !generatedAt ||
+        (status !== "preparing" &&
+          status !== "ready" &&
+          status !== "partially_ready" &&
+          status !== "failed")
+      ) {
+        return null;
+      }
+      const manifest = parseJson(manifestJson) as ResourceManifestSnapshot;
+      if (
+        !isRecord(manifest) ||
+        manifest.schemaVersion !== "xunlei-agent-manifest-3.0"
+      ) {
+        return null;
+      }
+      return {
+        taskId,
+        manifestRevision,
+        planRevision: storedPlanRevision,
+        status,
+        manifest,
+        rootPath: asString(row.root_path),
+        generatedAt
+      };
+    });
+  }
+
+  async startAgentBRun(value: {
+    runId: string;
+    taskId: string;
+    planRevision: number;
+    grantId: string;
+    startedAt: string;
+  }) {
+    return this.enqueue(async () => {
+      this.database.run(
+        `INSERT INTO agent_b_runs (
+          run_id, task_id, plan_revision, manifest_revision, grant_id,
+          status, tool_result_json, answer_json, error_message, started_at,
+          completed_at
+        ) VALUES (?, ?, ?, NULL, ?, 'running', NULL, NULL, NULL, ?, NULL)`,
+        [
+          value.runId,
+          value.taskId,
+          value.planRevision,
+          value.grantId,
+          value.startedAt
+        ]
+      );
+      await this.persist();
+    });
+  }
+
+  async completeAgentBRun(value: {
+    runId: string;
+    manifestRevision: number;
+    toolResult: unknown;
+    answer: unknown;
+    completedAt: string;
+  }) {
+    return this.enqueue(async () => {
+      this.database.run(
+        `UPDATE agent_b_runs
+         SET manifest_revision = ?, status = 'completed',
+             tool_result_json = ?, answer_json = ?, error_message = NULL,
+             completed_at = ?
+         WHERE run_id = ?`,
+        [
+          value.manifestRevision,
+          JSON.stringify(value.toolResult),
+          JSON.stringify(value.answer),
+          value.completedAt,
+          value.runId
+        ]
+      );
+      await this.persist();
+    });
+  }
+
+  async failAgentBRun(value: {
+    runId: string;
+    errorMessage: string;
+    completedAt: string;
+  }) {
+    return this.enqueue(async () => {
+      this.database.run(
+        `UPDATE agent_b_runs
+         SET status = 'failed', error_message = ?, completed_at = ?
+         WHERE run_id = ?`,
+        [value.errorMessage, value.completedAt, value.runId]
+      );
+      await this.persist();
+    });
+  }
+
+  async listAgentBRuns(taskId: string, planRevision?: number) {
+    return this.enqueue(() => {
+      const records: AgentBRunRecord[] = [];
+      const statement = this.database.prepare(
+        planRevision === undefined
+          ? `SELECT * FROM agent_b_runs
+             WHERE task_id = ? ORDER BY started_at DESC, run_id`
+          : `SELECT * FROM agent_b_runs
+             WHERE task_id = ? AND plan_revision = ?
+             ORDER BY started_at DESC, run_id`
+      );
+      try {
+        statement.bind(
+          planRevision === undefined
+            ? [taskId]
+            : [taskId, planRevision]
+        );
+        while (statement.step()) {
+          const record = agentBRunFromRow(statement.getAsObject());
+          if (record) records.push(record);
+        }
+      } finally {
+        statement.free();
+      }
+      return records;
     });
   }
 

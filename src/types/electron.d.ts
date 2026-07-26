@@ -81,6 +81,28 @@ declare global {
         | { ok: false; error: TaskHistoryIpcError }
       >;
       flushTaskPersistence: () => Promise<{ ok: true }>;
+      selectLocalResources: () => Promise<
+        | {
+            ok: true;
+            snapshot: AgentRuntimeSnapshot;
+            imported: number;
+          }
+        | {
+            ok: false;
+            error: { code: string; message: string; retriable: boolean };
+          }
+      >;
+      selectWorkspaceRoot: () => Promise<
+        | {
+            ok: true;
+            snapshot: AgentRuntimeSnapshot;
+            selected: boolean;
+          }
+        | {
+            ok: false;
+            error: { code: string; message: string; retriable: boolean };
+          }
+      >;
       readWorkspaceFile: (request: {
         taskId: string;
         revision: number;

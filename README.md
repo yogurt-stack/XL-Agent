@@ -1,6 +1,6 @@
 # 迅雷 AI Task Agent
 
-一个基于 Electron + React + TypeScript + Vite 的桌面端高保真交互 Demo。
+一个基于 Electron + React + TypeScript + Vite 的桌面端资源编排 Agent MVP。
 
 它实现“用户用自然语言描述目标，Agent 路由并澄清需求，生成可信资源计划，经用户确认后受控下载、验证、重规划并生成可交接工作区”的流程。Electron 主进程负责只读采集脱敏主机画像、可信资源下载、工作区原子导出和 SQLite 任务持久化；renderer 不能直接访问 Node、文件系统或数据库。默认本地模型不发起网络请求；只有显式配置可选远程 LLM 时才会由 Electron 主进程访问指定 HTTPS 端点。
 
@@ -22,6 +22,25 @@
 - 基于任务能力、依赖、目标系统、来源、授权和 revision 的严格计划验证
 - 基于 SQLite 的任务快照、审批记录和工作区导出记录
 - 只读历史任务列表与详情查阅，不影响当前 Agent 状态机
+- `LocalXunleiAdapter` 下载边界、流式写盘、实时速度/ETA、暂停、恢复和取消
+- 本地文件/目录递归接入、SHA256 匹配和用户自选工作区目录
+- Electron Main 真实制品重哈希验证，不在生产链路使用 `MockVerifier`
+- 独立递增的 Manifest snapshot revision，以及 `preparing`、`ready`、`partially_ready`、`failed` 状态
+- 已注册的只读 Agent B：有限步主循环、`inspect_workspace` 工具、task/revision/TTL 权限和 SQLite 运行审计
+
+## P0 资源编排
+
+本轮 P0 已完成五个基础闭环：
+
+1. 下载任务进入 SQLite `download_tasks`，响应体按流写入临时文件；执行页显示字节数、速度和 ETA，并提供暂停、恢复、取消。
+2. 计划页可直接选择本地文件或目录，也可在审批前选择工作区根目录。本地文件在 Main 进程递归扫描、限制数量/总大小、拒绝符号链接并计算 SHA256。
+3. `ElectronArtifactVerifier` 会重新读取普通文件，核对字节数、SHA256、可信计划与来源 Host，再把 `downloaded` 提升为 `verified`。
+4. 每次持久化状态转换都会生成独立 Manifest revision，并原子更新 `<workspace>/<task>/current` 下的 JSON、Markdown、README 和 AGENTS 说明。
+5. Agent B 以 `workspace-inspector` 注册，只允许调用 `inspect_workspace`；用户可在失败交接或就绪工作区主动运行。权限绑定 task ID、plan revision、grant ID 和五分钟 TTL，结果写入 `agent_b_runs`。
+
+应用重启时，仍在下载或暂停的任务会保留最后进度并转为 `interrupted`，避免误报为继续运行；重新审批后可安全重新执行。当前没有实现跨应用重启的 HTTP Range 字节续传，也不会自动安装、解压或运行下载物。
+
+完整设计、权限边界和验收矩阵见 [`docs/p0-resource-orchestration-2026-07-26.md`](docs/p0-resource-orchestration-2026-07-26.md)。
 
 ## 启动
 
@@ -61,7 +80,7 @@ npm run test:coverage
 
 覆盖率产物写入 `coverage/`，不会进入版本管理。现有 `verify:*` 脚本在正式测试迁移完成前继续作为综合回归基线。
 
-当前正式测试按职责覆盖严格计划验证、状态机 revision 审批、Policy/Tool 边界、系统画像契约、Runtime 下载失败恢复、历史任务返回值校验以及成功或未完成的 Manifest 交接。每类规则使用独立测试文件，便于直接定位回归所在层级。
+当前正式测试按职责覆盖严格计划验证、状态机 revision 审批、下载进度与暂停/恢复、Agent 注册、Policy/Tool 边界、系统画像契约、Runtime 下载失败恢复、历史任务返回值校验以及成功或未完成的 Manifest 交接。每类规则使用独立测试文件，便于直接定位回归所在层级。
 
 Electron 端到端测试使用 production renderer、真实 preload、本地规则模型和临时 SQLite，覆盖首页到交接、三个失败处置按钮、重启恢复、审批过期和历史任务查阅：
 
@@ -69,14 +88,14 @@ Electron 端到端测试使用 production renderer、真实 preload、本地规�
 npm run test:e2e
 ```
 
-E2E 固定单 worker 运行，显式禁用远程模型配置，并向真实 Electron renderer 注入 axe-core 扫描关键页面的 serious/critical 无障碍问题。测试还会验证 ToolResult 聚合详情的展开状态，并在与 CI 一致的 Linux 环境比较首页、失败处置、可信替代计划、就绪工作区和 Agent B 未完成交接五个视觉基线。macOS 本地继续运行完整功能与无障碍断言，但不比较 Linux 字体渲染基线。失败时会在 `test-results/` 中保留页面截图、视觉差异图和 Playwright trace，HTML 报告写入 `playwright-report/`。
+E2E 固定单 worker 运行，显式禁用远程模型配置，并向真实 Electron renderer 注入 axe-core 扫描关键页面的 serious/critical 无障碍问题。测试还会验证 ToolResult 聚合详情、主动和失败路径 Agent B 检查，并在与 CI 一致的 Linux 环境比较首页、失败处置、可信替代计划和就绪工作区视觉基线。macOS 本地继续运行完整功能与无障碍断言，但不比较 Linux 字体渲染基线。失败时会在 `test-results/` 中保留页面截图、视觉差异图和 Playwright trace，HTML 报告写入 `playwright-report/`。
 
 ## 持续集成
 
 GitHub Actions 会在推送到 `main`、针对 `main` 的 Pull Request 以及手动触发时运行两个独立 Job：
 
-- `quality`：类型检查、Vitest 覆盖率、Agent Core、模型客户端和 production build。
-- `electron-e2e`：在 Linux Xvfb 环境中运行 Electron 状态机、恢复、历史查阅、无障碍扫描和五个视觉基线比较。
+- `quality`：类型检查、Vitest 覆盖率、Agent Core、模型客户端、下载客户端、SQLite、P0 资源编排和 production build。
+- `electron-e2e`：在 Linux Xvfb 环境中运行 Electron 状态机、恢复、Agent B、历史查阅、无障碍扫描和视觉基线比较。
 
 本地可以运行与快速质量门禁相同的命令：
 
@@ -90,6 +109,7 @@ Electron E2E 失败时，CI 会保留 `playwright-report/`、`test-results/`、�
 
 ```bash
 npm run verify:agent-core
+npm run verify:p0-resource-orchestration
 ```
 
 该场景覆盖未知/重复资源、任务能力和依赖闭包、系统/来源/授权策略、revision 审批绑定、必需资源取消、下载失败暂停、主来源重试、可信替代来源、Agent B 未完成交接和最终 Manifest。
@@ -146,11 +166,15 @@ npm run verify:catalog
 
 ## SQLite 与历史任务
 
-Electron 主进程使用 `sql.js` 将任务数据写入 `agent-tasks.sqlite`。默认位置是 Electron `userData` 目录，也可通过 `XL_AGENT_TASK_STORE_PATH` 指定绝对路径。当前 schema v2 包含：
+Electron 主进程使用 `sql.js` 将任务数据写入 `agent-tasks.sqlite`。默认位置是 Electron `userData` 目录，也可通过 `XL_AGENT_TASK_STORE_PATH` 指定绝对路径。当前 schema v3 包含：
 
 - `task_snapshots`：每个 task ID 最近一次完整状态快照。
 - `approval_records`：按 task ID 和 revision 保存的本地用户审批。
 - `download_artifacts`：按 task ID、revision 和资源 ID 保存已下载且已校验文件的受控元数据。
+- `download_tasks`：保存流式下载的状态、进度、速度、ETA、错误和重启中断信息。
+- `local_artifacts`：保存用户显式接入的本地文件哈希、展示路径和可信资源匹配结果；绝对来源路径不写入 Manifest。
+- `resource_manifest_snapshots`：保存独立 Manifest revision、plan revision、整体状态和落盘目录。
+- `agent_b_runs`：保存 Agent B grant、工具结果、结构化答案与失败原因。
 - `workspace_exports`：按 task ID 和 revision 保存的工作区导出结果。
 - `schema_migrations`：数据库迁移版本和执行记录。
 
@@ -171,7 +195,7 @@ React 不再创建或持有 Runtime；Renderer 只通过 preload 白名单桥接
 - `WorkspaceTemplateRegistry`：按路由选择 Manifest 派生的工作区模板。
 - `AgentPlanner`：只在未配置模型的兼容路径中生成固定计划和替代计划。
 - `ModelRuntime`：在 `planning` 和 `replanning` 阶段生成结构化决策；远程模型必须返回且只返回一个原生 `tool_call`，参数由严格 Zod Schema 校验。
-- `AgentVerifier`：在 `verifying` 阶段生成验证结果。当前默认验证通过；UI/测试可显式派发版本不匹配事件以进入重规划。
+- `AgentVerifier`：在 `verifying` 阶段由 Electron Main 重新读取制品并核对普通文件属性、字节数、SHA256、可信计划和来源 Host。
 - `AgentToolExecutor`：通过工具注册表执行脱敏系统画像、可信目录查询、受控下载和工作区导出。
 - `AgentPolicy`：在执行动作前返回允许、需要审批或拒绝的策略结果。
 - `TaskRequirements`：把自然语言意图和澄清答案转换为确定性的必需能力集合。
@@ -187,8 +211,16 @@ xunlei-ai-task-agent/
     trusted-resources.json
     trusted-resources.schema.json
   electron/
+    agentB.ts
+    agentRuntimeHost.ts
+    artifactVerifier.ts
+    downloadClient.ts
+    localArtifacts.ts
     main.ts
+    manifestSnapshots.ts
     preload.ts
+    taskStore.ts
+    xunleiAdapter.ts
     tsconfig.json
   scripts/
     dev.mjs
@@ -211,7 +243,8 @@ xunlei-ai-task-agent/
 
 1. 输入任务，例如“帮我准备一个 Windows 下的 AI 开发环境”。
 2. Agent 通过 Domain Skill/Source Provider 注册表做三态路由，并一次询问一个澄清问题；不支持的任务会明确停止。
-3. 生成可信资源计划 r1，并验证任务能力、依赖、系统、来源和授权；取消必需资源或版本不匹配会进入重规划。
-4. 下载失败后暂停在人工决策点，可选择重试原来源、可信替代来源或交给 Agent B。
-5. 重试和替代来源由模型生成新计划，严格验证后进入 `waiting_approval`；审批事件必须绑定当前 revision，Agent B 分支生成未完成交接。
-6. 验证通过后，Main 从 SQLite 的已校验制品记录复制真实文件到 `downloads/`，重新计算 SHA256，并以 Manifest v2 为单一事实源生成交接文档。
+3. 生成可信资源计划 r1，并验证任务能力、依赖、系统、来源和授权；此时可接入本地文件/目录并选择工作区根目录。
+4. 审批绑定当前 revision 后，Main 通过流式下载任务执行；用户可以暂停、恢复或取消。
+5. 下载失败后停在人工决策点，可选择重试原来源、可信替代来源或运行只读 Agent B 检查当前部分工作区。
+6. 真实验证器重哈希制品；每次状态转换持续更新 Manifest v3 snapshot，最终再以 Manifest v2 导出不可变交接包。
+7. 工作区页可主动运行 Agent B；结构化答案明确引用 Manifest revision、已准备项、缺失项、允许动作和禁止动作。

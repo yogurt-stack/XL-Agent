@@ -202,4 +202,121 @@ describe("agent state machine", () => {
       workspace: { exportStatus: "pending" }
     });
   });
+
+  it("tracks streamed progress and pause/resume without losing byte metrics", () => {
+    const approved = transition(createWaitingApprovalState(), {
+      type: "APPROVE_PLAN",
+      revision: 1
+    });
+    const resourceId = approved.activeResourceId!;
+    const progressed = transition(approved, {
+      type: "DOWNLOAD_PROGRESS",
+      resourceId,
+      progress: 37,
+      bytesWritten: 3_700,
+      totalBytes: 10_000,
+      speedBytesPerSecond: 1_000,
+      etaSeconds: 6.3
+    });
+    const paused = transition(progressed, {
+      type: "DOWNLOAD_PAUSED",
+      resourceId
+    });
+    const resumed = transition(paused, {
+      type: "DOWNLOAD_RESUMED",
+      resourceId
+    });
+
+    expect(paused.resources.find((resource) => resource.id === resourceId))
+      .toMatchObject({
+        status: "paused",
+        progress: 37,
+        bytesWritten: 3_700,
+        totalBytes: 10_000
+      });
+    expect(resumed.resources.find((resource) => resource.id === resourceId))
+      .toMatchObject({
+        status: "downloading",
+        progress: 37,
+        speedBytesPerSecond: 1_000,
+        etaSeconds: 6.3
+      });
+  });
+
+  it("matches a trusted local artifact and requires approval for a new revision", () => {
+    const waitingApproval = createWaitingApprovalState();
+    const python = waitingApproval.resources.find(
+      (resource) => resource.id === "python-312"
+    )!;
+    const withLocalArtifact = transition(waitingApproval, {
+      type: "LOCAL_ARTIFACTS_ADDED",
+      artifacts: [
+        {
+          artifactId: "local-python",
+          fileName: "python.exe",
+          displayPath: "selected/python.exe",
+          bytesWritten: 42,
+          sha256: python.download.expectedSha256,
+          matchedResourceId: python.id,
+          verificationStatus: "local-verified",
+          importedAt: "2026-07-26T00:00:00.000Z"
+        }
+      ]
+    });
+
+    expect(withLocalArtifact.revision).toBe(2);
+    expect(withLocalArtifact.approvedRevision).toBeNull();
+    expect(
+      withLocalArtifact.resources.find((resource) => resource.id === python.id)
+    ).toMatchObject({ status: "downloaded", progress: 100 });
+    expect(withLocalArtifact.localArtifacts).toHaveLength(1);
+  });
+
+  it("records the scoped Agent B lifecycle and ignores stale run results", () => {
+    const waitingApproval = createWaitingApprovalState();
+    const started = transition(waitingApproval, {
+      type: "AGENT_B_STARTED",
+      runId: "run-current",
+      grantId: "grant-current"
+    });
+    const stale = transition(started, {
+      type: "AGENT_B_COMPLETED",
+      runId: "run-stale",
+      answer: {
+        manifestRevision: 2,
+        planRevision: 1,
+        workspaceStatus: "preparing",
+        preparedRequiredResources: [],
+        missingOrFailedResources: ["Python"],
+        allowedActions: ["读取当前 Manifest"],
+        forbiddenActions: ["自动安装"],
+        integrity: "valid",
+        summary: "stale"
+      }
+    });
+    const completed = transition(stale, {
+      type: "AGENT_B_COMPLETED",
+      runId: "run-current",
+      answer: {
+        manifestRevision: 3,
+        planRevision: 1,
+        workspaceStatus: "partially_ready",
+        preparedRequiredResources: ["Git"],
+        missingOrFailedResources: ["Python"],
+        allowedActions: ["读取当前 Manifest"],
+        forbiddenActions: ["自动安装"],
+        integrity: "valid",
+        summary: "Agent B inspection complete."
+      }
+    });
+
+    expect(stale).toBe(started);
+    expect(completed.agentB).toMatchObject({
+      status: "completed",
+      runId: "run-current",
+      grantId: "grant-current",
+      manifestRevision: 3,
+      error: null
+    });
+  });
 });

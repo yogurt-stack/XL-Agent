@@ -45,7 +45,12 @@ export interface AgentPlanner {
 }
 
 export interface AgentVerifier {
-  verify(state: AgentState): Extract<AgentEvent, { type: "VERIFY_RESOURCES" }> | null;
+  verify(
+    state: AgentState
+  ):
+    | Extract<AgentEvent, { type: "VERIFY_RESOURCES" }>
+    | null
+    | Promise<Extract<AgentEvent, { type: "VERIFY_RESOURCES" }> | null>;
 }
 
 export type AgentStateListener = (state: AgentState) => void;

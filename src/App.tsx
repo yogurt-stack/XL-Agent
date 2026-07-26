@@ -22,7 +22,9 @@ export function App() {
     testModelConnection,
     retryTaskLocally,
     readWorkspaceFile,
-    openWorkspace
+    openWorkspace,
+    selectLocalResources,
+    selectWorkspaceRoot
   } = useAgentCore();
   const [activeView, setActiveView] = useState<AppView>("home");
   const historyState = useTaskHistory(activeView === "history");
@@ -42,9 +44,9 @@ export function App() {
       <main className="main-panel" ref={mainPanelRef}>
         {activeView === "home" && <AgentHomeView dispatch={dispatch} state={state} onNavigate={setActiveView} />}
         {activeView === "clarification" && <ClarificationView dispatch={dispatch} state={state} onNavigate={setActiveView} onRetryLocally={retryTaskLocally} />}
-        {activeView === "plan" && <ResourcePlanView dispatch={dispatch} state={state} onNavigate={setActiveView} />}
+        {activeView === "plan" && <ResourcePlanView dispatch={dispatch} state={state} onNavigate={setActiveView} onSelectLocalResources={selectLocalResources} onSelectWorkspaceRoot={selectWorkspaceRoot} />}
         {activeView === "execution" && <ExecutionView dispatch={dispatch} state={state} onNavigate={setActiveView} modelConnection={modelConnectionState} />}
-        {activeView === "workspace" && <WorkspaceView dispatch={dispatch} onOpenWorkspace={openWorkspace} onReadFile={readWorkspaceFile} state={state} />}
+        {activeView === "workspace" && <WorkspaceView dispatch={dispatch} onOpenWorkspace={openWorkspace} onReadFile={readWorkspaceFile} onSelectWorkspaceRoot={selectWorkspaceRoot} state={state} />}
         {activeView === "history" && <TaskHistoryView historyState={historyState} />}
         {activeView === "settings" && <SettingsView modelConnection={modelConnectionState} onTestConnection={testModelConnection} persistence={persistenceState} state={state} />}
       </main>

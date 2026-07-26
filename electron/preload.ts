@@ -89,6 +89,30 @@ contextBridge.exposeInMainWorld("xunleiAgent", {
     ipcRenderer.invoke("agent:getTaskHistoryDetail", { taskId }) as Promise<TaskHistoryDetailResult>,
   flushTaskPersistence: () =>
     ipcRenderer.invoke("agent:flushTaskPersistence") as Promise<{ ok: true }>,
+  selectLocalResources: () =>
+    ipcRenderer.invoke("agent:selectLocalResources") as Promise<
+      | {
+          ok: true;
+          snapshot: AgentRuntimeSnapshot;
+          imported: number;
+        }
+      | {
+          ok: false;
+          error: { code: string; message: string; retriable: boolean };
+        }
+    >,
+  selectWorkspaceRoot: () =>
+    ipcRenderer.invoke("agent:selectWorkspaceRoot") as Promise<
+      | {
+          ok: true;
+          snapshot: AgentRuntimeSnapshot;
+          selected: boolean;
+        }
+      | {
+          ok: false;
+          error: { code: string; message: string; retriable: boolean };
+        }
+    >,
   readWorkspaceFile: (request: {
     taskId: string;
     revision: number;

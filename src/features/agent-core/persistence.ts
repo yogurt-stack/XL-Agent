@@ -28,6 +28,7 @@ const resourceStatuses = new Set<ResourceStatus>([
   "pending",
   "queued",
   "downloading",
+  "paused",
   "downloaded",
   "verified",
   "failed",
@@ -81,6 +82,12 @@ export function isRestorableAgentState(value: unknown): value is AgentState {
     value.systemProfile.shell !== "PowerShell 7" ||
     typeof value.systemProfile.workspaceRoot !== "string" ||
     typeof value.workspace.ready !== "boolean" ||
+    typeof value.workspace.manifestRevision !== "number" ||
+    !Number.isInteger(value.workspace.manifestRevision) ||
+    (value.workspace.overallStatus !== "preparing" &&
+      value.workspace.overallStatus !== "ready" &&
+      value.workspace.overallStatus !== "partially_ready" &&
+      value.workspace.overallStatus !== "failed") ||
     typeof value.workspace.exportStatus !== "string" ||
     !["not_started", "pending", "exporting", "ready", "failed"].includes(
       value.workspace.exportStatus
@@ -99,12 +106,18 @@ export function isRestorableAgentState(value: unknown): value is AgentState {
     ) ||
     typeof value.workspace.nextAction !== "string" ||
     !Array.isArray(value.resources) ||
+    !Array.isArray(value.localArtifacts) ||
     !Array.isArray(value.logs) ||
     !Array.isArray(value.clarifications) ||
     !isRecord(value.answers) ||
     !Array.isArray(value.agentRun.decisions) ||
     !Array.isArray(value.agentRun.toolResults) ||
-    !Array.isArray(value.agentRun.policyAudit)
+    !Array.isArray(value.agentRun.policyAudit) ||
+    !isRecord(value.agentB) ||
+    (value.agentB.status !== "idle" &&
+      value.agentB.status !== "running" &&
+      value.agentB.status !== "completed" &&
+      value.agentB.status !== "failed")
   ) {
     return false;
   }
@@ -168,6 +181,40 @@ export function normalizeRestorableAgentState(
 
   let candidate: unknown =
     legacyRoute === value.route ? value : { ...value, route: legacyRoute };
+
+  const candidateRecord = candidate as Record<string, unknown>;
+  const legacyWorkspace = isRecord(candidateRecord.workspace)
+    ? candidateRecord.workspace
+    : {};
+  candidate = {
+    ...candidateRecord,
+    localArtifacts: Array.isArray(candidateRecord.localArtifacts)
+      ? candidateRecord.localArtifacts
+      : [],
+    workspace: {
+      ...legacyWorkspace,
+      manifestRevision:
+        typeof legacyWorkspace.manifestRevision === "number"
+          ? legacyWorkspace.manifestRevision
+          : 0,
+      overallStatus:
+        legacyWorkspace.overallStatus === "ready" ||
+        legacyWorkspace.overallStatus === "partially_ready" ||
+        legacyWorkspace.overallStatus === "failed"
+          ? legacyWorkspace.overallStatus
+          : "preparing"
+    },
+    agentB: isRecord(candidateRecord.agentB)
+      ? candidateRecord.agentB
+      : {
+          status: "idle",
+          runId: null,
+          grantId: null,
+          manifestRevision: null,
+          answer: null,
+          error: null
+        }
+  };
 
   if (!hasRouteDecision) {
     let routeDecision: RouteDecision | null = null;

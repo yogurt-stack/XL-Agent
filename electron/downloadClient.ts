@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, open, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -28,7 +28,8 @@ export type ControlledDownloadErrorCode =
   | "DOWNLOAD_WRITE_FAILED"
   | "DOWNLOAD_NETWORK_ERROR"
   | "CHECKSUM_METADATA_INVALID"
-  | "CHECKSUM_MISMATCH";
+  | "CHECKSUM_MISMATCH"
+  | "DOWNLOAD_CANCELLED";
 
 export type ControlledDownloadError = {
   code: ControlledDownloadErrorCode;
@@ -43,6 +44,20 @@ export type ControlledDownloadOptions = {
   tempRoot?: string;
   now?: () => number;
   createId?: () => string;
+  signal?: AbortSignal;
+  waitIfPaused?: () => Promise<void>;
+  onProgress?: (
+    progress: ControlledDownloadProgress
+  ) => Promise<void> | void;
+};
+
+export type ControlledDownloadProgress = {
+  resourceId: string;
+  bytesWritten: number;
+  totalBytes: number | null;
+  progress: number;
+  speedBytesPerSecond: number;
+  etaSeconds: number | null;
 };
 
 export class ControlledDownloadRequestError extends Error {
@@ -58,6 +73,29 @@ function downloadError(
   retriable: boolean
 ) {
   return new ControlledDownloadRequestError({ code, message, retriable });
+}
+
+async function writeAll(
+  file: Awaited<ReturnType<typeof open>>,
+  chunk: Uint8Array
+) {
+  let offset = 0;
+  while (offset < chunk.byteLength) {
+    const result = await file.write(
+      chunk,
+      offset,
+      chunk.byteLength - offset,
+      null
+    );
+    if (result.bytesWritten <= 0) {
+      throw downloadError(
+        "DOWNLOAD_WRITE_FAILED",
+        "下载文件写入临时目录失败。",
+        true
+      );
+    }
+    offset += result.bytesWritten;
+  }
 }
 
 export function toControlledDownloadError(error: unknown): ControlledDownloadError {
@@ -145,10 +183,6 @@ function normalizeExpectedSha256(expectedSha256: string) {
   return normalized;
 }
 
-function sha256Of(buffer: Buffer) {
-  return createHash("sha256").update(buffer).digest("hex");
-}
-
 /**
  * 受控真实下载客户端的最小边界。
  *
@@ -168,9 +202,14 @@ export async function downloadTrustedResource(
 
   let response: Response;
   try {
-    response = await fetchRequest(parsedUrl.toString());
+    response = await fetchRequest(parsedUrl.toString(), {
+      signal: options.signal
+    });
   } catch (error) {
     if (error instanceof ControlledDownloadRequestError) throw error;
+    if (options.signal?.aborted) {
+      throw downloadError("DOWNLOAD_CANCELLED", "下载任务已取消。", false);
+    }
     throw downloadError(
       "DOWNLOAD_NETWORK_ERROR",
       error instanceof Error ? error.message : "下载请求失败，请检查网络连接。",
@@ -198,15 +237,97 @@ export async function downloadTrustedResource(
     }
   }
 
-  let buffer: Buffer;
+  const fileName = responseFileName(response, parsedUrl, request.resourceId);
+  const artifactRoot = path.join(
+    tempRoot,
+    `${sanitizeResourceId(request.resourceId)}-${createId()}`
+  );
+  const tempFilePath = path.join(artifactRoot, fileName);
+  const declaredBytes = contentLength ? Number(contentLength) : Number.NaN;
+  const totalBytes =
+    Number.isFinite(declaredBytes) && declaredBytes >= 0
+      ? declaredBytes
+      : null;
+  const hash = createHash("sha256");
+  let bytesWritten = 0;
+  let file: Awaited<ReturnType<typeof open>> | null = null;
   try {
-    const arrayBuffer = await response.arrayBuffer();
-    if (arrayBuffer.byteLength > maxBytes) {
-      throw downloadError("DOWNLOAD_SIZE_LIMIT_EXCEEDED", "下载文件超过可信目录声明的大小上限。", false);
+    await mkdir(artifactRoot, { recursive: true });
+    file = await open(tempFilePath, "wx");
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw downloadError(
+        "DOWNLOAD_NETWORK_ERROR",
+        "下载响应没有可读取的数据流。",
+        true
+      );
     }
-    buffer = Buffer.from(arrayBuffer);
+
+    while (true) {
+      if (options.signal?.aborted) {
+        throw downloadError("DOWNLOAD_CANCELLED", "下载任务已取消。", false);
+      }
+      await options.waitIfPaused?.();
+      if (options.signal?.aborted) {
+        throw downloadError("DOWNLOAD_CANCELLED", "下载任务已取消。", false);
+      }
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      if (!chunk.value?.byteLength) continue;
+      if (bytesWritten + chunk.value.byteLength > maxBytes) {
+        throw downloadError(
+          "DOWNLOAD_SIZE_LIMIT_EXCEEDED",
+          "下载文件超过可信目录声明的大小上限。",
+          false
+        );
+      }
+      await writeAll(file, chunk.value);
+      hash.update(chunk.value);
+      bytesWritten += chunk.value.byteLength;
+      const elapsedSeconds = Math.max(
+        0.001,
+        ((options.now?.() ?? Date.now()) - startedAt) / 1000
+      );
+      const speedBytesPerSecond = Math.round(bytesWritten / elapsedSeconds);
+      const progress =
+        totalBytes && totalBytes > 0
+          ? Math.min(99, Math.floor((bytesWritten / totalBytes) * 100))
+          : Math.min(99, Math.floor((bytesWritten / maxBytes) * 100));
+      const remaining =
+        totalBytes === null ? null : Math.max(0, totalBytes - bytesWritten);
+      await options.onProgress?.({
+        resourceId: request.resourceId,
+        bytesWritten,
+        totalBytes,
+        progress,
+        speedBytesPerSecond,
+        etaSeconds:
+          remaining === null || speedBytesPerSecond <= 0
+            ? null
+            : Math.ceil(remaining / speedBytesPerSecond)
+      });
+    }
+    await file.close();
+    file = null;
   } catch (error) {
+    await file?.close().catch(() => undefined);
+    await rm(artifactRoot, { force: true, recursive: true });
     if (error instanceof ControlledDownloadRequestError) throw error;
+    if (options.signal?.aborted) {
+      throw downloadError("DOWNLOAD_CANCELLED", "下载任务已取消。", false);
+    }
+    const nodeError = error as NodeJS.ErrnoException;
+    if (
+      nodeError.code === "EACCES" ||
+      nodeError.code === "ENOSPC" ||
+      nodeError.code === "EROFS"
+    ) {
+      throw downloadError(
+        "DOWNLOAD_WRITE_FAILED",
+        "下载文件写入临时目录失败。",
+        true
+      );
+    }
     throw downloadError(
       "DOWNLOAD_NETWORK_ERROR",
       error instanceof Error ? error.message : "下载响应读取失败。",
@@ -214,8 +335,9 @@ export async function downloadTrustedResource(
     );
   }
 
-  const actualSha256 = sha256Of(buffer);
+  const actualSha256 = hash.digest("hex");
   if (actualSha256 !== expectedSha256) {
+    await rm(artifactRoot, { force: true, recursive: true });
     throw downloadError(
       "CHECKSUM_MISMATCH",
       "下载文件 SHA256 与可信目录不一致。",
@@ -223,25 +345,11 @@ export async function downloadTrustedResource(
     );
   }
 
-  const fileName = responseFileName(response, parsedUrl, request.resourceId);
-  const artifactRoot = path.join(
-    tempRoot,
-    `${sanitizeResourceId(request.resourceId)}-${createId()}`
-  );
-  const tempFilePath = path.join(artifactRoot, fileName);
-
-  try {
-    await mkdir(artifactRoot, { recursive: true });
-    await writeFile(tempFilePath, buffer, { flag: "wx" });
-  } catch {
-    throw downloadError("DOWNLOAD_WRITE_FAILED", "下载文件写入临时目录失败。", true);
-  }
-
   return {
     resourceId: request.resourceId,
     fileName,
     urlHost: parsedUrl.host,
-    bytesWritten: buffer.byteLength,
+    bytesWritten,
     sha256: actualSha256,
     tempFilePath,
     elapsedMs: Math.max(0, (options.now?.() ?? Date.now()) - startedAt)

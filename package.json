@@ -19,9 +19,10 @@
     "verify:electron-renderer": "npm run build && electron scripts/verify-electron-renderer.cjs",
     "verify:download-client": "node scripts/verify-download-client.mjs",
     "verify:persistence": "node scripts/verify-persistence.mjs",
+    "verify:p0-resource-orchestration": "node scripts/verify-p0-resource-orchestration.mjs",
     "verify:model-client": "node scripts/verify-model-client.mjs",
     "verify:production-build": "npm run build && node scripts/verify-production-build.mjs",
-    "verify:ci": "npm run typecheck && npm run test:coverage && npm run verify:agent-core && npm run verify:model-client && npm run verify:download-client && npm run verify:persistence && npm run verify:production-build",
+    "verify:ci": "npm run typecheck && npm run test:coverage && npm run verify:agent-core && npm run verify:model-client && npm run verify:download-client && npm run verify:persistence && npm run verify:p0-resource-orchestration && npm run verify:production-build",
     "preview": "npm run build && electron ."
   },
   "dependencies": {

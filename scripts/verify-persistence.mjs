@@ -287,11 +287,11 @@ try {
   });
   const freshSchema = await store.getSchemaInfo();
   assert(
-    freshSchema.version === 2 &&
+    freshSchema.version === 3 &&
       freshSchema.supportedVersion === TASK_STORE_SCHEMA_VERSION &&
-      freshSchema.migrations.length === 2 &&
-      freshSchema.migrations[1].name === "verified-download-artifacts",
-    "Fresh stores must apply and record SQLite schema v2"
+      freshSchema.migrations.length === 3 &&
+      freshSchema.migrations[2].name === "p0-resource-orchestration",
+    "Fresh stores must apply and record SQLite schema v3"
   );
 
   await store.saveSnapshot(exportSnapshot);
@@ -381,9 +381,9 @@ try {
   });
   const migratedSchema = await migratedLegacyStore.getSchemaInfo();
   assert(
-    migratedSchema.version === 2 &&
-      migratedSchema.migrations.some((migration) => migration.version === 2),
-    "A v1 database must migrate forward to v2"
+    migratedSchema.version === 3 &&
+      migratedSchema.migrations.some((migration) => migration.version === 3),
+    "A v1 database must migrate forward to v3"
   );
   assert(
     (await migratedLegacyStore.getTaskState(exportSnapshot.taskId))?.taskId === exportSnapshot.taskId,
@@ -410,5 +410,5 @@ try {
 }
 
 console.log(
-  "Persistence passed: SQLite v2 artifacts, atomic downloads workspace, Manifest derivation, recovery and approval expiry verified"
+  "Persistence passed: SQLite v3 tasks/artifacts, atomic workspace export, recovery and approval expiry verified"
 );
