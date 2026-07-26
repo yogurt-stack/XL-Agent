@@ -31,6 +31,7 @@ const allowedChecksumSources = new Set([
   "pinned-repository-snapshot"
 ]);
 const allowedSignatureTypes = new Set(["authenticode", "upstream-release", "none"]);
+const allowedCatalogStatuses = new Set(["active", "deprecated", "revoked"]);
 
 function fail(message) {
   throw new Error(`Trusted catalog validation failed: ${message}`);
@@ -98,6 +99,8 @@ function validateResourceShape(resource, index) {
       "supportedArchitectures",
       "sourceTrust",
       "catalogStatus",
+      "statusReason",
+      "replacedBy",
       "verification",
       "download",
       "fallbackId"
@@ -149,7 +152,23 @@ function validateResourceShape(resource, index) {
     `${label} contains an unsupported architecture`
   );
   expect(allowedSourceTrust.has(resource.sourceTrust), `${label}.sourceTrust is invalid`);
-  expect(resource.catalogStatus === "active", `${label}.catalogStatus must be active`);
+  expect(
+    allowedCatalogStatuses.has(resource.catalogStatus),
+    `${label}.catalogStatus is invalid`
+  );
+  if (resource.catalogStatus !== "active") {
+    expect(
+      isNonEmptyString(resource.statusReason),
+      `${label}.statusReason is required for non-active resources`
+    );
+  }
+  if (resource.replacedBy !== undefined) {
+    expect(
+      typeof resource.replacedBy === "string" &&
+        /^[a-z0-9][a-z0-9._-]{0,79}$/.test(resource.replacedBy),
+      `${label}.replacedBy is invalid`
+    );
+  }
 
   const verification = resource.verification;
   expect(
@@ -191,12 +210,14 @@ function validateResourceShape(resource, index) {
     );
   } else {
     expect(
-      verification.signatureEnforcement === "planned",
-      `${label} signature enforcement must be explicitly marked planned`
-    );
-    expect(
       isNonEmptyString(verification.expectedPublisher),
       `${label}.verification.expectedPublisher is required`
+    );
+    expect(
+      verification.signatureType === "authenticode"
+        ? verification.signatureEnforcement === "required"
+        : verification.signatureEnforcement === "checksum-only",
+      `${label} signature enforcement does not match its signature type`
     );
   }
 
@@ -274,8 +295,26 @@ function validateCatalog(catalog) {
     const fallback = byId.get(resource.fallbackId);
     expect(fallback, `${resource.id} has unknown fallback ${resource.fallbackId}`);
     expect(
+      fallback.catalogStatus === "active",
+      `${resource.id} fallback must be active`
+    );
+    expect(
       resource.provides.every((capability) => fallback.provides.includes(capability)),
       `${resource.id} fallback does not preserve capabilities`
+    );
+  }
+  for (const resource of catalog.resources) {
+    if (!resource.replacedBy) continue;
+    expect(resource.replacedBy !== resource.id, `${resource.id} cannot replace itself`);
+    const replacement = byId.get(resource.replacedBy);
+    expect(replacement, `${resource.id} has unknown replacement ${resource.replacedBy}`);
+    expect(
+      replacement.catalogStatus === "active",
+      `${resource.id} replacement must be active`
+    );
+    expect(
+      resource.provides.every((capability) => replacement.provides.includes(capability)),
+      `${resource.id} replacement does not preserve capabilities`
     );
   }
 }
@@ -309,20 +348,42 @@ function renderElectronCatalog(catalog, sourceSha256) {
     expiresAt: catalog.expiresAt,
     sourceSha256
   };
-  const downloads = Object.fromEntries(
-    catalog.resources.map((resource) => [resource.id, resource.download])
+  const resources = Object.fromEntries(
+    catalog.resources.map((resource) => [
+      resource.id,
+      {
+        catalogStatus: resource.catalogStatus,
+        statusReason: resource.statusReason,
+        replacedBy: resource.replacedBy,
+        verification: resource.verification,
+        download: resource.download
+      }
+    ])
   );
   return `${generatedHeader(sourceSha256)}
-export type GeneratedTrustedDownloadMetadata = {
-  url: string;
-  expectedSha256: string;
-  maxSizeMb: number;
-  allowedHosts: string[];
+export type GeneratedTrustedResourceMetadata = {
+  catalogStatus: "active" | "deprecated" | "revoked";
+  statusReason?: string;
+  replacedBy?: string;
+  verification: {
+    checksumAlgorithm: "sha256";
+    checksumSource: "vendor-manifest" | "github-release-asset-digest" | "pinned-repository-snapshot";
+    checksumSourceUrl: string;
+    signatureType: "authenticode" | "upstream-release" | "none";
+    expectedPublisher?: string;
+    signatureEnforcement: "required" | "checksum-only" | "not-applicable";
+  };
+  download: {
+    url: string;
+    expectedSha256: string;
+    maxSizeMb: number;
+    allowedHosts: string[];
+  };
 };
 
 export const trustedCatalogMetadata = ${JSON.stringify(metadata, null, 2)};
 
-export const trustedDownloads: Record<string, GeneratedTrustedDownloadMetadata> = ${JSON.stringify(downloads, null, 2)};
+export const trustedResources: Record<string, GeneratedTrustedResourceMetadata> = ${JSON.stringify(resources, null, 2)};
 `;
 }
 

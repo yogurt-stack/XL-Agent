@@ -373,6 +373,8 @@ test("shows persisted task history without changing the active task", async () =
   await expect(page.getByRole("heading", { name: "资源快照" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "审批记录" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "模型与工具审计" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "供应链与恢复审计" })).toBeVisible();
+  await expect(page.getByText("目录版本已固定", { exact: true }).first()).toBeVisible();
   await expect(page.locator(".history-resource-row").filter({ hasText: "AI Dev Starter" })).toBeVisible();
   await expectNoSeriousAccessibilityViolations("task history");
 

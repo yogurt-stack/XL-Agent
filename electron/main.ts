@@ -127,7 +127,8 @@ async function fixtureDownload(
       bytesWritten: Buffer.byteLength(`fixture:${resourceId}`),
       sha256: metadata.expectedSha256,
       tempFilePath,
-      elapsedMs: 1
+      elapsedMs: 1,
+      resumedFromBytes: 0
     }
   };
 }
@@ -149,7 +150,12 @@ async function performTrustedDownload(
         totalBytes: result.output.bytesWritten,
         progress: 99,
         speedBytesPerSecond: result.output.bytesWritten,
-        etaSeconds: 0
+        etaSeconds: 0,
+        tempFilePath: result.output.tempFilePath,
+        etag: null,
+        lastModified: null,
+        resumeCapable: false,
+        resumedFromBytes: 0
       });
     }
     return result;

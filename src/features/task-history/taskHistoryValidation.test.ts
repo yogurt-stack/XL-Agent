@@ -35,7 +35,9 @@ describe("task history response validation", () => {
           summary,
           state,
           approvals: [],
-          workspaceExports: []
+          workspaceExports: [],
+          downloadArtifacts: [],
+          operationEvents: []
         },
         state.taskId
       )
@@ -70,7 +72,9 @@ describe("task history response validation", () => {
           },
           state,
           approvals: [],
-          workspaceExports: []
+          workspaceExports: [],
+          downloadArtifacts: [],
+          operationEvents: []
         },
         "another-task"
       )

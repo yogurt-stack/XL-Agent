@@ -237,7 +237,12 @@ try {
         totalBytes: 100,
         progress: 25,
         speedBytesPerSecond: 50,
-        etaSeconds: 1.5
+        etaSeconds: 1.5,
+        tempFilePath: artifactPath,
+        etag: "\"p0-etag\"",
+        lastModified: null,
+        resumeCapable: true,
+        resumedFromBytes: 0
       });
       firstProgress.resolve();
       await continuePausedDownload.promise;
@@ -249,7 +254,12 @@ try {
         totalBytes: 100,
         progress: 100,
         speedBytesPerSecond: 50,
-        etaSeconds: 0
+        etaSeconds: 0,
+        tempFilePath: artifactPath,
+        etag: "\"p0-etag\"",
+        lastModified: null,
+        resumeCapable: true,
+        resumedFromBytes: 0
       });
       return {
         ok: true,
@@ -260,7 +270,8 @@ try {
           bytesWritten: artifactPayload.byteLength,
           sha256: artifactSha256,
           tempFilePath: artifactPath,
-          elapsedMs: 2_000
+          elapsedMs: 2_000,
+          resumedFromBytes: 0
         }
       };
     }
@@ -428,7 +439,13 @@ try {
     sha256: artifactSha256,
     expectedSha256: artifactSha256,
     verificationStatus: "downloaded",
-    verifiedAt: "2026-07-26T08:11:00.000Z"
+    verifiedAt: "2026-07-26T08:11:00.000Z",
+    signatureStatus: "not-applicable",
+    expectedPublisher: null,
+    actualPublisher: null,
+    certificateThumbprint: null,
+    signatureMessage: null,
+    signatureCheckedAt: null
   });
   const verifier = new ElectronArtifactVerifier(store);
   const verifiedEvent = await verifier.verify(verifierState);
@@ -469,7 +486,13 @@ try {
     sha256: artifactSha256,
     expectedSha256: artifactSha256,
     verificationStatus: "verified",
-    verifiedAt: "2026-07-26T08:12:00.000Z"
+    verifiedAt: "2026-07-26T08:12:00.000Z",
+    signatureStatus: "not-applicable",
+    expectedPublisher: null,
+    actualPublisher: null,
+    certificateThumbprint: null,
+    signatureMessage: null,
+    signatureCheckedAt: null
   });
   const manifestRecord = await store.createManifestSnapshotRecord(
     manifestState

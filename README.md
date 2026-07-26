@@ -27,6 +27,9 @@
 - Electron Main 真实制品重哈希验证，不在生产链路使用 `MockVerifier`
 - 独立递增的 Manifest snapshot revision，以及 `preparing`、`ready`、`partially_ready`、`failed` 状态
 - 已注册的只读 Agent B：有限步主循环、`inspect_workspace` 工具、task/revision/TTL 权限和 SQLite 运行审计
+- 目录条目 `active/deprecated/revoked` 生命周期、审批目录版本固定和 P1 供应链操作审计
+- Windows Authenticode、预期发布者与 SHA256 三层制品校验，以及可失败关闭的平台边界
+- HTTP Range / If-Range 断点恢复；服务端忽略 Range 时安全重下，区间不一致时拒绝写入
 
 ## P0 资源编排
 
@@ -38,9 +41,22 @@
 4. 每次持久化状态转换都会生成独立 Manifest revision，并原子更新 `<workspace>/<task>/current` 下的 JSON、Markdown、README 和 AGENTS 说明。
 5. Agent B 以 `workspace-inspector` 注册，只允许调用 `inspect_workspace`；用户可在失败交接或就绪工作区主动运行。权限绑定 task ID、plan revision、grant ID 和五分钟 TTL，结果写入 `agent_b_runs`。
 
-应用重启时，仍在下载或暂停的任务会保留最后进度并转为 `interrupted`，避免误报为继续运行；重新审批后可安全重新执行。当前没有实现跨应用重启的 HTTP Range 字节续传，也不会自动安装、解压或运行下载物。
+应用重启时，仍在下载或暂停的任务会保留最后进度并转为 `interrupted`，同时撤销旧执行审批。重新审批后，如果受控断点文件仍是普通文件、服务端接受匹配的 `Range/If-Range` 且最终完整 SHA256 一致，下载会从已写字节继续；服务端返回 `200` 时会清空旧断点并安全重下，错误 `Content-Range` 会失败关闭。
 
 完整设计、权限边界和验收矩阵见 [`docs/p0-resource-orchestration-2026-07-26.md`](docs/p0-resource-orchestration-2026-07-26.md)。
+
+## P1 供应链安全与恢复
+
+P1 在保持“只准备资源、不自动安装或执行”的前提下完成四个增量闭环：
+
+1. 可信目录支持 `active`、`deprecated`、`revoked`；非 active 条目和替代项不能进入新计划。
+2. 每次 plan revision 审批会固定 `catalogVersion + sourceSha256`；目录变化、旧库未固定审批或哈希不一致时，Main 进程拒绝执行。
+3. Windows 目标的 Authenticode 资源必须同时通过文件重哈希、Windows 系统签名状态和预期发布者匹配，结果写入 SQLite、Manifest 与历史审计。
+4. 下载断点保存路径、字节数、ETag/Last-Modified 和 Range 能力；跨重启恢复仍沿用 revision 审批、Host allowlist、大小上限和最终 SHA256。
+
+签名检查是 Electron Main 内部的固定用途系统检查：它只调用固定编码的 `Get-AuthenticodeSignature` 读取系统信任结果，文件绝对路径通过子进程环境变量传递，不接受模型、用户或资源内容提供的命令文本，也不注册 Shell/PowerShell Tool。非 Windows 主机对 `required` Authenticode 返回 `unavailable` 并失败关闭；测试只能通过显式注入的验证器替身覆盖该平台边界。
+
+完整实现与验收矩阵见 [`docs/p1-supply-chain-resilience-2026-07-26.md`](docs/p1-supply-chain-resilience-2026-07-26.md)。
 
 ## 启动
 
@@ -94,7 +110,7 @@ E2E 固定单 worker 运行，显式禁用远程模型配置，并向真实 Elec
 
 GitHub Actions 会在推送到 `main`、针对 `main` 的 Pull Request 以及手动触发时运行两个独立 Job：
 
-- `quality`：类型检查、Vitest 覆盖率、Agent Core、模型客户端、下载客户端、SQLite、P0 资源编排和 production build。
+- `quality`：类型检查、Vitest 覆盖率、Agent Core、模型客户端、下载客户端、SQLite、P0 资源编排、P1 供应链恢复和 production build。
 - `electron-e2e`：在 Linux Xvfb 环境中运行 Electron 状态机、恢复、Agent B、历史查阅、无障碍扫描和视觉基线比较。
 
 本地可以运行与快速质量门禁相同的命令：
@@ -110,6 +126,7 @@ Electron E2E 失败时，CI 会保留 `playwright-report/`、`test-results/`、�
 ```bash
 npm run verify:agent-core
 npm run verify:p0-resource-orchestration
+npm run verify:p1-supply-chain-resilience
 ```
 
 该场景覆盖未知/重复资源、任务能力和依赖闭包、系统/来源/授权策略、revision 审批绑定、必需资源取消、下载失败暂停、主来源重试、可信替代来源、Agent B 未完成交接和最终 Manifest。
@@ -160,21 +177,24 @@ npm run generate:catalog
 npm run verify:catalog
 ```
 
-目录目前记录 Authenticode/上游签名预期，但签名执行仍标记为 `planned`；当前强制执行的是
-固定版本、HTTPS Host allowlist、大小上限与 SHA256。正式安装阶段接入前还需在 Windows
-主进程侧加入 `WinVerifyTrust`。
+目录条目具有 `active/deprecated/revoked` 生命周期；新计划、fallback 和替换目标只接受
+`active`。审批记录固定目录版本和源码 SHA256。`signatureEnforcement: required` 的
+Windows 制品在固定版本、HTTPS Host allowlist、大小上限和 SHA256 之外，还必须通过
+Windows Authenticode 与预期发布者匹配；`checksum-only` 只声明上游固定 SHA256，
+不会伪装成嵌入式签名已验证。
 
 ## SQLite 与历史任务
 
-Electron 主进程使用 `sql.js` 将任务数据写入 `agent-tasks.sqlite`。默认位置是 Electron `userData` 目录，也可通过 `XL_AGENT_TASK_STORE_PATH` 指定绝对路径。当前 schema v3 包含：
+Electron 主进程使用 `sql.js` 将任务数据写入 `agent-tasks.sqlite`。默认位置是 Electron `userData` 目录，也可通过 `XL_AGENT_TASK_STORE_PATH` 指定绝对路径。当前 schema v4 包含：
 
 - `task_snapshots`：每个 task ID 最近一次完整状态快照。
-- `approval_records`：按 task ID 和 revision 保存的本地用户审批。
-- `download_artifacts`：按 task ID、revision 和资源 ID 保存已下载且已校验文件的受控元数据。
-- `download_tasks`：保存流式下载的状态、进度、速度、ETA、错误和重启中断信息。
+- `approval_records`：按 task ID 和 revision 保存本地用户审批、目录版本与目录源码哈希。
+- `download_artifacts`：保存下载校验状态、签名状态、预期/实际发布者、证书指纹和检查时间。
+- `download_tasks`：保存流式下载状态、断点路径、ETag/Last-Modified、速度、ETA、错误和重启中断信息。
 - `local_artifacts`：保存用户显式接入的本地文件哈希、展示路径和可信资源匹配结果；绝对来源路径不写入 Manifest。
 - `resource_manifest_snapshots`：保存独立 Manifest revision、plan revision、整体状态和落盘目录。
 - `agent_b_runs`：保存 Agent B grant、工具结果、结构化答案与失败原因。
+- `operation_events`：保存目录固定/拒绝、断点创建/恢复与签名通过/拒绝事件。
 - `workspace_exports`：按 task ID 和 revision 保存的工作区导出结果。
 - `schema_migrations`：数据库迁移版本和执行记录。
 
@@ -213,6 +233,7 @@ xunlei-ai-task-agent/
   electron/
     agentB.ts
     agentRuntimeHost.ts
+    authenticodeVerifier.ts
     artifactVerifier.ts
     downloadClient.ts
     localArtifacts.ts

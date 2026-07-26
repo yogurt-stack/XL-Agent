@@ -19,6 +19,7 @@ import {
 import type { WorkspaceGuide } from "../src/features/agent-core/domainSkills";
 import type { DownloadArtifactRecord } from "./downloadArtifacts";
 import type { LocalArtifactRecord } from "./localArtifacts";
+import { trustedCatalogMetadata } from "./trustedDownloadCatalog";
 
 export type WorkspaceFileRecord = {
   relativePath: string;
@@ -77,6 +78,9 @@ export type WorkspaceSnapshot = {
     download?: {
       expectedSha256?: string;
     };
+    verification?: {
+      signatureEnforcement?: string;
+    };
   }>;
   localArtifacts: Array<{
     artifactId: string;
@@ -117,6 +121,11 @@ type ManifestArtifact = {
   sourceHost: string;
   verificationStatus: DownloadArtifactRecord["verificationStatus"];
   verifiedAt: string;
+  signatureStatus: DownloadArtifactRecord["signatureStatus"];
+  expectedPublisher: string | null;
+  actualPublisher: string | null;
+  certificateThumbprint: string | null;
+  signatureCheckedAt: string | null;
 };
 
 type ResourceWorkspaceManifest = {
@@ -130,6 +139,10 @@ type ResourceWorkspaceManifest = {
   taskRequirements: unknown;
   planValidation: unknown;
   approvedRevision: number;
+  catalog: {
+    version: string;
+    sourceSha256: string;
+  };
   mode: "electron-controlled-export";
   generatedAt: string;
   resources: Array<{
@@ -393,6 +406,17 @@ async function copyVerifiedArtifacts(
         false
       );
     }
+    if (
+      !fixtureMismatch &&
+      resource.verification?.signatureEnforcement === "required" &&
+      artifact.signatureStatus !== "valid"
+    ) {
+      throw exportError(
+        "WORKSPACE_EXPORT_ARTIFACT_INVALID",
+        `资源 ${resource.id} 尚未通过必需的 Authenticode 与发布者校验。`,
+        false
+      );
+    }
     const manifestArtifact: ManifestArtifact = {
       relativePath,
       fileName: artifact.fileName,
@@ -401,7 +425,12 @@ async function copyVerifiedArtifacts(
       expectedSha256: artifact.expectedSha256.toLowerCase(),
       sourceHost: artifact.sourceHost,
       verificationStatus: artifact.verificationStatus,
-      verifiedAt: artifact.verifiedAt
+      verifiedAt: artifact.verifiedAt,
+      signatureStatus: artifact.signatureStatus,
+      expectedPublisher: artifact.expectedPublisher,
+      actualPublisher: artifact.actualPublisher,
+      certificateThumbprint: artifact.certificateThumbprint,
+      signatureCheckedAt: artifact.signatureCheckedAt
     };
     manifestArtifacts.set(resource.id, manifestArtifact);
     fileRecords.push({
@@ -520,6 +549,10 @@ function createManifest(
     taskRequirements: snapshot.taskRequirements,
     planValidation: snapshot.planValidation,
     approvedRevision: snapshot.revision,
+    catalog: {
+      version: trustedCatalogMetadata.catalogVersion,
+      sourceSha256: trustedCatalogMetadata.sourceSha256
+    },
     mode: "electron-controlled-export",
     generatedAt,
     resources,

@@ -46,7 +46,8 @@ import {
 import type { TaskStore } from "./taskStore";
 import {
   getTrustedCatalogStatus,
-  getTrustedDownloadMetadata,
+  getTrustedResourceMetadata,
+  trustedCatalogMetadata,
   type TrustedDownloadMetadata
 } from "./trustedDownloadCatalog";
 import {
@@ -309,6 +310,12 @@ export class AgentRuntimeHost {
     await this.options.store.recordLocalArtifacts(records);
     for (const record of records) {
       if (!record.matchedResourceId) continue;
+      const trustedResource = getTrustedResourceMetadata(
+        record.matchedResourceId
+      );
+      if (!trustedResource) {
+        throw new Error("本地资源匹配项已不在当前 active 可信目录中。");
+      }
       await this.options.store.recordDownloadArtifact({
         taskId: state.taskId,
         revision: record.planRevision,
@@ -320,7 +327,17 @@ export class AgentRuntimeHost {
         sha256: record.sha256,
         expectedSha256: record.sha256,
         verificationStatus: "local-verified",
-        verifiedAt: record.importedAt
+        verifiedAt: record.importedAt,
+        signatureStatus:
+          trustedResource.verification.signatureEnforcement === "required"
+            ? "pending"
+            : "not-applicable",
+        expectedPublisher:
+          trustedResource.verification.expectedPublisher ?? null,
+        actualPublisher: null,
+        certificateThumbprint: null,
+        signatureMessage: null,
+        signatureCheckedAt: null
       });
     }
     this.runtime.reportExternalEvent({
@@ -498,20 +515,40 @@ export class AgentRuntimeHost {
       );
     }
 
-    const metadata = getTrustedDownloadMetadata(request.resourceId);
-    if (!metadata) {
+    const trustedResource = getTrustedResourceMetadata(request.resourceId);
+    if (!trustedResource) {
       return controlledDownloadError(
         "RESOURCE_NOT_TRUSTED",
         "请求的资源不在 Electron 主进程可信下载目录中。",
         false
       );
     }
+    const metadata = trustedResource.download;
 
     const approval = await this.options.store.hasValidApproval(
       request.taskId,
       request.revision
     );
     if (!approval.valid) {
+      if (approval.status === "catalog-mismatch") {
+        await this.options.store.recordOperationEvent({
+          taskId: request.taskId,
+          revision: request.revision,
+          resourceId: request.resourceId,
+          eventType: "catalog-pin-rejected",
+          outcome: "denied",
+          detail: {
+            approvedCatalogVersion: approval.catalogVersion,
+            activeCatalogVersion: trustedCatalogMetadata.catalogVersion
+          },
+          createdAt: new Date().toISOString()
+        });
+        return controlledDownloadError(
+          "CATALOG_APPROVAL_MISMATCH",
+          "当前审批绑定的可信目录版本与执行目录不一致，请重新生成并确认资源计划。",
+          false
+        );
+      }
       return controlledDownloadError(
         approval.status === "expired"
           ? "APPROVAL_EXPIRED"
@@ -522,7 +559,6 @@ export class AgentRuntimeHost {
         false
       );
     }
-
     const result = await this.downloadAdapter.createDownloadTask({
       ...request,
       metadata
@@ -542,7 +578,17 @@ export class AgentRuntimeHost {
         sha256: result.output.sha256,
         expectedSha256: metadata.expectedSha256,
         verificationStatus: testFixture ? "test-fixture" : "downloaded",
-        verifiedAt: new Date().toISOString()
+        verifiedAt: new Date().toISOString(),
+        signatureStatus:
+          trustedResource.verification.signatureEnforcement === "required"
+            ? "pending"
+            : "not-applicable",
+        expectedPublisher:
+          trustedResource.verification.expectedPublisher ?? null,
+        actualPublisher: null,
+        certificateThumbprint: null,
+        signatureMessage: null,
+        signatureCheckedAt: null
       });
     }
     return result;

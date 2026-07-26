@@ -5,6 +5,12 @@ import type { AgentVerifier } from "../src/features/agent-core/interfaces";
 import type { AgentEvent, AgentState } from "../src/features/agent-core/types";
 import type { DownloadArtifactRecord } from "./downloadArtifacts";
 import type { TaskStore } from "./taskStore";
+import {
+  publisherMatches,
+  WindowsAuthenticodeVerifier,
+  type AuthenticodeVerifier,
+  type AuthenticodeVerificationResult
+} from "./authenticodeVerifier";
 
 async function hashFile(filePath: string) {
   return new Promise<{ sha256: string; bytesWritten: number }>(
@@ -40,7 +46,9 @@ function failure(
 export class ElectronArtifactVerifier implements AgentVerifier {
   constructor(
     private readonly store: TaskStore,
-    private readonly allowTestFixtures = false
+    private readonly allowTestFixtures = false,
+    private readonly signatureVerifier: AuthenticodeVerifier =
+      new WindowsAuthenticodeVerifier()
   ) {}
 
   async verify(
@@ -69,6 +77,11 @@ export class ElectronArtifactVerifier implements AgentVerifier {
       }
       const validation = await this.validateArtifact(resource, artifact);
       if (validation) return validation;
+      const signatureValidation = await this.validateSignature(
+        resource,
+        artifact
+      );
+      if (signatureValidation) return signatureValidation;
       if (artifact.verificationStatus === "downloaded") {
         await this.store.updateDownloadArtifactVerification(
           state.taskId,
@@ -81,6 +94,87 @@ export class ElectronArtifactVerifier implements AgentVerifier {
     }
 
     return { type: "VERIFY_RESOURCES" };
+  }
+
+  private async validateSignature(
+    resource: AgentState["resources"][number],
+    artifact: DownloadArtifactRecord
+  ) {
+    if (
+      artifact.verificationStatus === "test-fixture" &&
+      this.allowTestFixtures
+    ) {
+      return null;
+    }
+    const policy = resource.verification;
+    if (policy.signatureEnforcement !== "required") {
+      await this.store.updateDownloadArtifactSignature(
+        artifact.taskId,
+        artifact.revision,
+        artifact.resourceId,
+        {
+          status: "not-applicable",
+          expectedPublisher: policy.expectedPublisher ?? null,
+          actualPublisher: null,
+          certificateThumbprint: null,
+          message:
+            policy.signatureEnforcement === "checksum-only"
+              ? "该制品使用上游固定 SHA256 校验，不声明嵌入式 Authenticode。"
+              : "该制品不适用嵌入式签名校验。",
+          checkedAt: new Date().toISOString()
+        }
+      );
+      return null;
+    }
+
+    const result = await this.signatureVerifier.verify(
+      artifact.tempFilePath
+    );
+    await this.persistSignatureResult(artifact, policy.expectedPublisher, result);
+    if (result.status !== "valid") {
+      return failure(
+        resource.id,
+        result.status === "unavailable"
+          ? "SIGNATURE_VERIFIER_UNAVAILABLE"
+          : result.status === "unsigned"
+            ? "ARTIFACT_UNSIGNED"
+            : "ARTIFACT_SIGNATURE_INVALID",
+        result.statusMessage,
+        result.status === "unavailable"
+      );
+    }
+    if (
+      !policy.expectedPublisher ||
+      !publisherMatches(result.publisher, policy.expectedPublisher)
+    ) {
+      return failure(
+        resource.id,
+        "ARTIFACT_PUBLISHER_MISMATCH",
+        `签名发布者与可信目录不一致：期望 ${policy.expectedPublisher ?? "未声明"}，实际 ${result.publisher ?? "未知"}。`,
+        false
+      );
+    }
+    return null;
+  }
+
+  private persistSignatureResult(
+    artifact: DownloadArtifactRecord,
+    expectedPublisher: string | undefined,
+    result: AuthenticodeVerificationResult
+  ) {
+    return this.store.updateDownloadArtifactSignature(
+      artifact.taskId,
+      artifact.revision,
+      artifact.resourceId,
+      {
+        status: result.status,
+        expectedPublisher: expectedPublisher ?? null,
+        actualPublisher: result.publisher,
+        certificateThumbprint: result.certificateThumbprint,
+        message: result.statusMessage,
+        checkedAt: result.checkedAt
+      }
+    );
   }
 
   private async validateArtifact(

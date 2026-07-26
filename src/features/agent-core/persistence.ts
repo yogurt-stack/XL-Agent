@@ -135,7 +135,9 @@ export function isRestorableAgentState(value: unknown): value is AgentState {
       typeof resource.sizeMb === "number" &&
       Number.isFinite(resource.sizeMb) &&
       typeof resource.license === "string" &&
-      resource.catalogStatus === "active" &&
+      (resource.catalogStatus === "active" ||
+        resource.catalogStatus === "deprecated" ||
+        resource.catalogStatus === "revoked") &&
       isRecord(resource.verification) &&
       resource.verification.checksumAlgorithm === "sha256" &&
       typeof resource.verification.checksumSource === "string" &&

@@ -3,6 +3,11 @@ import type {
   AgentRuntimeSnapshotResult
 } from "../features/agent-core/runtimeBridge";
 import type { AgentUserEvent } from "../features/agent-core/types";
+import type {
+  TaskHistoryDetailPayload as TaskHistoryDetail,
+  TaskHistoryIpcError,
+  TaskHistorySummary
+} from "../features/task-history/types";
 
 export type XunleiAppInfo = {
   name: string;
@@ -10,55 +15,6 @@ export type XunleiAppInfo = {
   platform: string;
   electron: string;
   chrome: string;
-};
-
-export type TaskHistorySummary = {
-  taskId: string;
-  task: string;
-  phase: string;
-  revision: number;
-  approvedRevision: number | null;
-  updatedAt: string;
-  resourceCount: number;
-  verifiedResourceCount: number;
-  workspaceReady: boolean;
-  hasErrors: boolean;
-};
-
-export type TaskHistoryApproval = {
-  taskId: string;
-  revision: number;
-  actor: "local-user";
-  approvedAt: string;
-  expiresAt: string;
-  status: "active" | "expired" | "revoked";
-};
-
-export type TaskHistoryWorkspaceExport = {
-  taskId: string;
-  revision: number;
-  rootPath: string;
-  generatedAt: string;
-  reusedExisting: boolean;
-  files: Array<{
-    relativePath: string;
-    absolutePath: string;
-    bytesWritten: number;
-    sha256: string;
-  }>;
-};
-
-export type TaskHistoryDetail = {
-  summary: TaskHistorySummary;
-  state: unknown;
-  approvals: TaskHistoryApproval[];
-  workspaceExports: TaskHistoryWorkspaceExport[];
-};
-
-export type TaskHistoryIpcError = {
-  code: "TASK_HISTORY_INVALID_REQUEST" | "TASK_HISTORY_READ_FAILED";
-  message: string;
-  retriable: boolean;
 };
 
 declare global {

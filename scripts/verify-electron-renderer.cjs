@@ -118,7 +118,9 @@ ipcMain.handle("agent:getTaskHistoryDetail", (_event, input) => ({
           },
           state: latestTaskState,
           approvals: [],
-          workspaceExports: []
+          workspaceExports: [],
+          downloadArtifacts: [],
+          operationEvents: []
         }
       : null
 }));

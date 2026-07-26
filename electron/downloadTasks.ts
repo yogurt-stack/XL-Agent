@@ -20,6 +20,10 @@ export type DownloadTaskRecord = {
   tempFilePath: string | null;
   errorCode: string | null;
   errorMessage: string | null;
+  resumeEtag: string | null;
+  resumeLastModified: string | null;
+  resumeCapable: boolean;
+  resumedFromBytes: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -35,4 +39,9 @@ export type DownloadTaskProgress = Pick<
   | "totalBytes"
   | "speedBytesPerSecond"
   | "etaSeconds"
+  | "tempFilePath"
+  | "resumeEtag"
+  | "resumeLastModified"
+  | "resumeCapable"
+  | "resumedFromBytes"
 >;

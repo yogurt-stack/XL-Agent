@@ -18,6 +18,7 @@ import type {
 } from "../src/features/agent-core/types";
 import type { DownloadArtifactRecord } from "./downloadArtifacts";
 import type { LocalArtifactRecord } from "./localArtifacts";
+import { trustedCatalogMetadata } from "./trustedDownloadCatalog";
 
 export type ResourceManifestSnapshot = {
   schemaVersion: "xunlei-agent-manifest-3.0";
@@ -30,6 +31,10 @@ export type ResourceManifestSnapshot = {
   task: string;
   route: string | null;
   approvedRevision: number | null;
+  catalog: {
+    version: string;
+    sourceSha256: string;
+  };
   resources: Array<{
     id: string;
     name: string;
@@ -47,6 +52,11 @@ export type ResourceManifestSnapshot = {
       sha256: string;
       expectedSha256: string;
       verificationStatus: DownloadArtifactRecord["verificationStatus"];
+      signatureStatus: DownloadArtifactRecord["signatureStatus"];
+      expectedPublisher: string | null;
+      actualPublisher: string | null;
+      certificateThumbprint: string | null;
+      signatureCheckedAt: string | null;
     };
   }>;
   localArtifacts: Array<{
@@ -167,7 +177,12 @@ export function createManifestSnapshot(input: {
             bytesWritten: artifact.bytesWritten,
             sha256: artifact.sha256,
             expectedSha256: resource.download.expectedSha256,
-            verificationStatus: artifact.verificationStatus
+            verificationStatus: artifact.verificationStatus,
+            signatureStatus: artifact.signatureStatus,
+            expectedPublisher: artifact.expectedPublisher,
+            actualPublisher: artifact.actualPublisher,
+            certificateThumbprint: artifact.certificateThumbprint,
+            signatureCheckedAt: artifact.signatureCheckedAt
           }
         : null
     };
@@ -204,6 +219,10 @@ export function createManifestSnapshot(input: {
     task: input.state.task,
     route: input.state.route,
     approvedRevision: input.state.approvedRevision,
+    catalog: {
+      version: trustedCatalogMetadata.catalogVersion,
+      sourceSha256: trustedCatalogMetadata.sourceSha256
+    },
     resources,
     localArtifacts,
     missing,

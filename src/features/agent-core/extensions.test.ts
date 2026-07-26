@@ -201,6 +201,35 @@ describe("extensible routing and registries", () => {
     ).toContain("核对 Manifest");
   });
 
+  it("keeps deprecated and revoked catalog entries out of searches", () => {
+    const active = trustedCatalog[0];
+    const provider = new TrustedCatalogSourceProvider([
+      active,
+      {
+        ...structuredClone(active),
+        id: "deprecated-fixture",
+        catalogStatus: "deprecated",
+        statusReason: "superseded"
+      },
+      {
+        ...structuredClone(active),
+        id: "revoked-fixture",
+        catalogStatus: "revoked",
+        statusReason: "compromised"
+      }
+    ]);
+
+    expect(
+      provider.search({
+        resourceIds: [
+          active.id,
+          "deprecated-fixture",
+          "revoked-fixture"
+        ]
+      }).map((resource) => resource.id)
+    ).toEqual([active.id]);
+  });
+
   it("rejects invalid and duplicate registry entries", () => {
     const registry = new DomainSkillRegistry();
     const invalid = {

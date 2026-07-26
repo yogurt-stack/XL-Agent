@@ -29,7 +29,10 @@ import {
   Wrench,
   XCircle
 } from "lucide-react";
-import { catalogById } from "../features/agent-core/catalog";
+import {
+  catalogById,
+  trustedCatalogMetadata
+} from "../features/agent-core/catalog";
 import { createResourceManifest } from "../features/agent-core/manifest";
 import type { ModelConnectionState } from "../features/agent-core/modelConnection";
 import type { PersistenceViewState } from "../features/agent-core/useAgentCore";
@@ -560,6 +563,13 @@ export function SettingsView({
           <div className="settings-row"><div><strong>端点主机</strong><span>仅显示 hostname，不展示完整请求路径。</span></div><code>{modelConnection.endpointHost ?? "未配置"}</code></div>
           <div className="settings-row"><div><strong>模型 ID</strong><span>由 XL_AGENT_LLM_MODEL 提供。</span></div><code>{modelConnection.model ?? "未配置"}</code></div>
           <div className="settings-row"><div><strong>配置方式</strong><span>修改项目根目录 .env 后需要重启 Electron 主进程。</span></div><code>主进程环境变量</code></div>
+        </section>
+        <section className="settings-section">
+          <div className="settings-section-heading"><PackageCheck size={17} /><div><h2>可信目录与制品校验</h2><span>审批固定目录版本；Windows 制品在 SHA256 后继续校验系统 Authenticode 与发布者。</span></div></div>
+          <div className="settings-row"><div><strong>目录版本</strong><span>非 active 条目不会进入新计划。</span></div><code>{trustedCatalogMetadata.catalogVersion}</code></div>
+          <div className="settings-row"><div><strong>目录来源哈希</strong><span>执行时必须与审批记录逐字一致。</span></div><code>{trustedCatalogMetadata.sourceSha256.slice(0, 16)}…</code></div>
+          <div className="settings-row"><div><strong>签名边界</strong><span>不向 Agent 暴露 PowerShell、Shell 或任意命令能力。</span></div><code>fail closed</code></div>
+          <div className="settings-row"><div><strong>恢复边界</strong><span>受控临时文件和服务端 Range 验证通过后才能跨重启续传。</span></div><code>HTTP Range</code></div>
         </section>
         <section className="settings-section">
           <div className="settings-section-heading"><TerminalSquare size={17} /><div><h2>系统画像边界</h2><span>只读主机画像用于审计；资源计划仍使用当前 Windows 目标画像。</span></div></div>

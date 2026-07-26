@@ -2,6 +2,8 @@ import { isRestorableAgentState } from "../agent-core/persistence";
 import type {
   TaskHistoryApproval,
   TaskHistoryDetail,
+  TaskHistoryDownloadArtifact,
+  TaskHistoryOperationEvent,
   TaskHistorySummary,
   TaskHistoryWorkspaceExport
 } from "./types";
@@ -49,9 +51,55 @@ function isApproval(value: unknown): value is TaskHistoryApproval {
     value.actor === "local-user" &&
     typeof value.approvedAt === "string" &&
     typeof value.expiresAt === "string" &&
+    typeof value.catalogVersion === "string" &&
+    typeof value.catalogSourceSha256 === "string" &&
     (value.status === "active" ||
       value.status === "expired" ||
       value.status === "revoked")
+  );
+}
+
+function isDownloadArtifact(
+  value: unknown
+): value is TaskHistoryDownloadArtifact {
+  return (
+    isRecord(value) &&
+    typeof value.taskId === "string" &&
+    Number.isSafeInteger(value.revision) &&
+    typeof value.resourceId === "string" &&
+    (value.signatureStatus === "pending" ||
+      value.signatureStatus === "valid" ||
+      value.signatureStatus === "invalid" ||
+      value.signatureStatus === "unsigned" ||
+      value.signatureStatus === "unavailable" ||
+      value.signatureStatus === "not-applicable") &&
+    (value.expectedPublisher === null ||
+      typeof value.expectedPublisher === "string") &&
+    (value.actualPublisher === null ||
+      typeof value.actualPublisher === "string") &&
+    (value.certificateThumbprint === null ||
+      typeof value.certificateThumbprint === "string") &&
+    (value.signatureMessage === null ||
+      typeof value.signatureMessage === "string") &&
+    (value.signatureCheckedAt === null ||
+      typeof value.signatureCheckedAt === "string")
+  );
+}
+
+function isOperationEvent(
+  value: unknown
+): value is TaskHistoryOperationEvent {
+  return (
+    isRecord(value) &&
+    typeof value.eventId === "string" &&
+    typeof value.taskId === "string" &&
+    Number.isSafeInteger(value.revision) &&
+    (value.resourceId === null || typeof value.resourceId === "string") &&
+    typeof value.eventType === "string" &&
+    (value.outcome === "success" ||
+      value.outcome === "denied" ||
+      value.outcome === "error") &&
+    typeof value.createdAt === "string"
   );
 }
 
@@ -99,6 +147,17 @@ export function parseTaskHistoryDetail(
     !value.workspaceExports.every(
       (output) =>
         isWorkspaceExport(output) && output.taskId === expectedTaskId
+    ) ||
+    !Array.isArray(value.downloadArtifacts) ||
+    !value.downloadArtifacts.every(
+      (artifact) =>
+        isDownloadArtifact(artifact) &&
+        artifact.taskId === expectedTaskId
+    ) ||
+    !Array.isArray(value.operationEvents) ||
+    !value.operationEvents.every(
+      (event) =>
+        isOperationEvent(event) && event.taskId === expectedTaskId
     )
   ) {
     return null;
@@ -108,6 +167,8 @@ export function parseTaskHistoryDetail(
     summary: value.summary,
     state: value.state,
     approvals: value.approvals,
-    workspaceExports: value.workspaceExports
+    workspaceExports: value.workspaceExports,
+    downloadArtifacts: value.downloadArtifacts,
+    operationEvents: value.operationEvents
   };
 }

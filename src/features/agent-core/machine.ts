@@ -177,7 +177,7 @@ function replacementFor(resource: PlannedResource, strategy: ReplanStrategy): Pl
   }
 
   const fallback = resource.fallbackId ? catalogById.get(resource.fallbackId) : undefined;
-  if (!fallback) {
+  if (!fallback || fallback.catalogStatus !== "active") {
     return {
       ...resource,
       selected: true,
