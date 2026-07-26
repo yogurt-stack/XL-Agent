@@ -70,16 +70,15 @@ jobs:
           sudo apt-get install --yes --no-install-recommends fonts-noto-cjk
           fc-cache --force
 
-      - name: Regenerate Linux Electron visual baselines
-        run: npm run build && xvfb-run --auto-servernum npx playwright test --update-snapshots
+      - name: Run Electron E2E with Xvfb
+        run: xvfb-run --auto-servernum npm run test:e2e
 
-      - name: Upload regenerated visual baselines
-        if: ${{ always() }}
+      - name: Upload Playwright failure artifacts
+        if: ${{ failure() }}
         uses: actions/upload-artifact@v7
         with:
-          name: regenerated-linux-visual-baselines
+          name: playwright-failure-artifacts
           path: |
-            e2e/agent-recovery.spec.ts-snapshots/*-linux.png
             playwright-report/
             test-results/
           if-no-files-found: ignore
