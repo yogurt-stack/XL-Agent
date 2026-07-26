@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import {
+  copyFile,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -9,6 +12,12 @@ import {
   writeFile
 } from "node:fs/promises";
 import path from "node:path";
+import {
+  createDefaultWorkspaceTemplateRegistry,
+  type WorkspaceTemplateRegistry
+} from "../src/features/agent-core/workspaceTemplates";
+import type { WorkspaceGuide } from "../src/features/agent-core/domainSkills";
+import type { DownloadArtifactRecord } from "./downloadArtifacts";
 
 export type WorkspaceFileRecord = {
   relativePath: string;
@@ -30,6 +39,8 @@ export type WorkspaceExportError = {
   code:
     | "WORKSPACE_EXPORT_NOT_READY"
     | "WORKSPACE_EXPORT_INVALID_STATE"
+    | "WORKSPACE_EXPORT_ARTIFACT_MISSING"
+    | "WORKSPACE_EXPORT_ARTIFACT_INVALID"
     | "WORKSPACE_EXPORT_CONFLICT"
     | "WORKSPACE_EXPORT_WRITE_FAILED";
   message: string;
@@ -43,6 +54,7 @@ export type WorkspaceSnapshot = {
   revision: number;
   approvedRevision: number | null;
   route: string | null;
+  routeDecision?: unknown;
   systemProfile: unknown;
   taskRequirements: unknown;
   planValidation: unknown;
@@ -50,7 +62,10 @@ export type WorkspaceSnapshot = {
     id: string;
     name: string;
     version: string;
+    publisher?: string;
     source: string;
+    purpose?: string;
+    recommendation?: string;
     sizeMb: number;
     license: string;
     status: string;
@@ -58,6 +73,9 @@ export type WorkspaceSnapshot = {
     attempts: number;
     replacedFrom?: string;
     failureReason?: string;
+    download?: {
+      expectedSha256?: string;
+    };
   }>;
   agentRun: {
     toolResults: unknown[];
@@ -70,8 +88,65 @@ export type WorkspaceSnapshot = {
 
 export type WorkspaceExportOptions = {
   workspaceRoot: string;
+  downloadArtifacts?: DownloadArtifactRecord[];
+  templateRegistry?: WorkspaceTemplateRegistry;
+  workspaceGuide?: WorkspaceGuide;
+  allowTestFixtures?: boolean;
   now?: () => Date;
   beforeCommit?: (stagingRoot: string) => Promise<void> | void;
+};
+
+type ManifestArtifact = {
+  relativePath: string;
+  fileName: string;
+  bytesWritten: number;
+  sha256: string;
+  expectedSha256: string;
+  sourceHost: string;
+  verificationStatus: DownloadArtifactRecord["verificationStatus"];
+  verifiedAt: string;
+};
+
+type ResourceWorkspaceManifest = {
+  schemaVersion: "xunlei-agent-workspace-2.0";
+  taskId: string;
+  revision: number;
+  task: string;
+  route: string | null;
+  routeDecision: unknown;
+  systemProfile: unknown;
+  taskRequirements: unknown;
+  planValidation: unknown;
+  approvedRevision: number;
+  mode: "electron-controlled-export";
+  generatedAt: string;
+  resources: Array<{
+    id: string;
+    replacedFrom: string | null;
+    name: string;
+    version: string;
+    publisher: string | null;
+    source: string;
+    purpose: string | null;
+    recommendation: string | null;
+    sizeMb: number;
+    license: string;
+    status: string;
+    selected: boolean;
+    attempts: number;
+    failureReason: string | null;
+    artifact: ManifestArtifact | null;
+  }>;
+  audit: {
+    toolResults: unknown[];
+    policyDecisions: unknown[];
+  };
+  handoff: {
+    ready: true;
+    files: string[];
+    nextAction: string;
+    missingItems: string[];
+  };
 };
 
 export class WorkspaceExportRequestError extends Error {
@@ -98,11 +173,11 @@ export function toWorkspaceExportError(error: unknown): WorkspaceExportError {
   };
 }
 
-const exportFiles = [
-  "README.md",
-  "RESOURCE_MANIFEST.md",
-  "AGENTS.md",
+const documentFiles = [
   "resource-manifest.json",
+  "RESOURCE_MANIFEST.md",
+  "README.md",
+  "AGENTS.md",
   "scripts/bootstrap.ps1",
   "scripts/verify-environment.ps1"
 ] as const;
@@ -112,8 +187,45 @@ function sanitizeSegment(value: string) {
   return safe || "task";
 }
 
+function sanitizeFileName(value: string) {
+  const safe = path.basename(value)
+    .normalize("NFKC")
+    .replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/g, "-")
+    .replace(/^\.+/, "")
+    .slice(0, 160);
+  return safe || "artifact.download";
+}
+
+function safeRelativePath(value: string) {
+  const normalized = value.replace(/\\/g, "/");
+  return (
+    normalized.length > 0 &&
+    !path.posix.isAbsolute(normalized) &&
+    !normalized.split("/").includes("..")
+  );
+}
+
 function sha256Of(content: string | Uint8Array) {
   return createHash("sha256").update(content).digest("hex");
+}
+
+async function sha256File(filePath: string) {
+  return new Promise<{ bytesWritten: number; sha256: string }>(
+    (resolve, reject) => {
+      const hash = createHash("sha256");
+      let bytesWritten = 0;
+      const stream = createReadStream(filePath);
+      stream.on("data", (chunk: string | Buffer) => {
+        const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+        bytesWritten += buffer.byteLength;
+        hash.update(buffer);
+      });
+      stream.on("error", reject);
+      stream.on("end", () =>
+        resolve({ bytesWritten, sha256: hash.digest("hex") })
+      );
+    }
+  );
 }
 
 function validateSnapshot(snapshot: WorkspaceSnapshot) {
@@ -148,73 +260,252 @@ function validateSnapshot(snapshot: WorkspaceSnapshot) {
   }
 }
 
-function createArtifacts(snapshot: WorkspaceSnapshot, generatedAt: string) {
+function sanitizeToolAudit(value: unknown) {
+  if (typeof value !== "object" || value === null) return null;
+  const item = value as Record<string, unknown>;
+  return {
+    callId: typeof item.callId === "string" ? item.callId : null,
+    tool: typeof item.tool === "string" ? item.tool : null,
+    status: typeof item.status === "string" ? item.status : null,
+    error:
+      typeof item.error === "object" && item.error !== null
+        ? {
+            code:
+              typeof (item.error as Record<string, unknown>).code === "string"
+                ? (item.error as Record<string, unknown>).code
+                : null,
+            message:
+              typeof (item.error as Record<string, unknown>).message === "string"
+                ? (item.error as Record<string, unknown>).message
+                : null
+          }
+        : null
+  };
+}
+
+function sanitizePolicyAudit(value: unknown) {
+  if (typeof value !== "object" || value === null) return null;
+  const item = value as Record<string, unknown>;
+  const decision =
+    typeof item.decision === "object" && item.decision !== null
+      ? item.decision as Record<string, unknown>
+      : {};
+  return {
+    actionId: typeof item.actionId === "string" ? item.actionId : null,
+    outcome: typeof decision.outcome === "string" ? decision.outcome : null,
+    risk: typeof decision.risk === "string" ? decision.risk : null,
+    reason: typeof decision.reason === "string" ? decision.reason : null
+  };
+}
+
+async function copyVerifiedArtifacts(
+  snapshot: WorkspaceSnapshot,
+  artifacts: DownloadArtifactRecord[],
+  stagingRoot: string,
+  taskRoot: string,
+  allowTestFixtures: boolean
+) {
+  const selectedResources = snapshot.resources.filter(
+    (resource) => resource.selected
+  );
+  const byResourceId = new Map(
+    artifacts
+      .filter(
+        (artifact) =>
+          artifact.taskId === snapshot.taskId &&
+          artifact.revision === snapshot.revision
+      )
+      .map((artifact) => [artifact.resourceId, artifact])
+  );
+  const manifestArtifacts = new Map<string, ManifestArtifact>();
+  const fileRecords: WorkspaceFileRecord[] = [];
+
+  for (const resource of selectedResources) {
+    const artifact = byResourceId.get(resource.id);
+    if (!artifact) {
+      throw exportError(
+        "WORKSPACE_EXPORT_ARTIFACT_MISSING",
+        `SQLite 中缺少资源 ${resource.id} 在 revision r${snapshot.revision} 的已验证下载记录。`,
+        false
+      );
+    }
+    if (
+      artifact.verificationStatus !== "verified" &&
+      !(allowTestFixtures && artifact.verificationStatus === "test-fixture")
+    ) {
+      throw exportError(
+        "WORKSPACE_EXPORT_ARTIFACT_INVALID",
+        `资源 ${resource.id} 的下载记录未通过生产校验。`,
+        false
+      );
+    }
+    const sourceInfo = await lstat(artifact.tempFilePath);
+    if (!sourceInfo.isFile() || sourceInfo.isSymbolicLink()) {
+      throw exportError(
+        "WORKSPACE_EXPORT_ARTIFACT_INVALID",
+        `资源 ${resource.id} 的临时下载物不是普通文件。`,
+        false
+      );
+    }
+    const relativePath = path.posix.join(
+      "downloads",
+      `${sanitizeSegment(resource.id)}-${sanitizeFileName(artifact.fileName)}`
+    );
+    const stagingPath = path.join(stagingRoot, relativePath);
+    await mkdir(path.dirname(stagingPath), { recursive: true });
+    await copyFile(artifact.tempFilePath, stagingPath);
+    const actual = await sha256File(stagingPath);
+    const fixtureMismatch =
+      allowTestFixtures && artifact.verificationStatus === "test-fixture";
+    if (
+      !fixtureMismatch &&
+      (actual.sha256.toLowerCase() !== artifact.expectedSha256.toLowerCase() ||
+        actual.sha256.toLowerCase() !== artifact.sha256.toLowerCase() ||
+        actual.bytesWritten !== artifact.bytesWritten)
+    ) {
+      throw exportError(
+        "WORKSPACE_EXPORT_ARTIFACT_INVALID",
+        `资源 ${resource.id} 在工作区写入前的大小或 SHA256 复核失败。`,
+        false
+      );
+    }
+    const manifestArtifact: ManifestArtifact = {
+      relativePath,
+      fileName: artifact.fileName,
+      bytesWritten: actual.bytesWritten,
+      sha256: actual.sha256,
+      expectedSha256: artifact.expectedSha256.toLowerCase(),
+      sourceHost: artifact.sourceHost,
+      verificationStatus: artifact.verificationStatus,
+      verifiedAt: artifact.verifiedAt
+    };
+    manifestArtifacts.set(resource.id, manifestArtifact);
+    fileRecords.push({
+      relativePath,
+      absolutePath: path.join(taskRoot, relativePath),
+      bytesWritten: actual.bytesWritten,
+      sha256: actual.sha256
+    });
+  }
+
+  return { manifestArtifacts, fileRecords };
+}
+
+function createManifest(
+  snapshot: WorkspaceSnapshot,
+  generatedAt: string,
+  manifestArtifacts: Map<string, ManifestArtifact>
+): ResourceWorkspaceManifest {
   const resources = snapshot.resources.map((resource) => ({
     id: resource.id,
     replacedFrom: resource.replacedFrom ?? null,
     name: resource.name,
     version: resource.version,
+    publisher: resource.publisher ?? null,
     source: resource.source,
+    purpose: resource.purpose ?? null,
+    recommendation: resource.recommendation ?? null,
     sizeMb: resource.sizeMb,
     license: resource.license,
     status: resource.status,
     selected: resource.selected,
     attempts: resource.attempts,
-    failureReason: resource.failureReason ?? null
+    failureReason: resource.failureReason ?? null,
+    artifact: manifestArtifacts.get(resource.id) ?? null
   }));
-  const manifest = {
-    schemaVersion: "xunlei-agent-workspace-1.0",
+  const downloadFiles = [...manifestArtifacts.values()].map(
+    (artifact) => artifact.relativePath
+  );
+  return {
+    schemaVersion: "xunlei-agent-workspace-2.0",
     taskId: snapshot.taskId,
     revision: snapshot.revision,
     task: snapshot.task,
     route: snapshot.route,
+    routeDecision: snapshot.routeDecision ?? null,
     systemProfile: snapshot.systemProfile,
     taskRequirements: snapshot.taskRequirements,
     planValidation: snapshot.planValidation,
-    approvedRevision: snapshot.approvedRevision,
+    approvedRevision: snapshot.revision,
     mode: "electron-controlled-export",
     generatedAt,
     resources,
     audit: {
-      toolResults: snapshot.agentRun.toolResults,
-      policyDecisions: snapshot.agentRun.policyAudit
+      toolResults: snapshot.agentRun.toolResults.map(sanitizeToolAudit),
+      policyDecisions: snapshot.agentRun.policyAudit.map(sanitizePolicyAudit)
     },
     handoff: {
       ready: true,
-      files: [...exportFiles],
-      nextAction: "阅读 README.md，再按需运行受控验证脚本。",
+      files: [...documentFiles, ...downloadFiles],
+      nextAction: "先核对 Manifest revision 与 downloads/ 校验信息，再按 README.md 人工处理资源。",
       missingItems: []
     }
   };
-  const resourceRows = resources
+}
+
+function renderResourceManifest(manifest: ResourceWorkspaceManifest) {
+  const resourceRows = manifest.resources
     .filter((resource) => resource.selected)
     .map(
       (resource) =>
-        `| ${resource.name} | ${resource.version} | ${resource.source} | ${resource.status} | ${resource.license} |`
+        `| ${resource.name} | ${resource.version} | ${resource.source} | ${resource.status} | ${resource.artifact?.relativePath ?? "缺失"} | ${resource.artifact?.sha256 ?? "缺失"} |`
     )
     .join("\n");
+  return `# Resource Manifest r${manifest.revision}\n\n生成时间：${manifest.generatedAt}\n\n| 资源 | 版本 | 来源 | 状态 | 工作区文件 | SHA256 |\n| --- | --- | --- | --- | --- | --- |\n${resourceRows}\n`;
+}
 
+function createArtifacts(
+  manifest: ResourceWorkspaceManifest,
+  templateRegistry: WorkspaceTemplateRegistry,
+  workspaceGuide?: WorkspaceGuide
+) {
+  const manifestJson = `${JSON.stringify(manifest, null, 2)}\n`;
+  const skillId =
+    manifest.route === "user-provided-links"
+      ? "user-provided-links"
+      : manifest.route ?? "ai-development-environment";
+  const template =
+    templateRegistry.resolve(skillId) ??
+    templateRegistry.resolve("ai-development-environment");
+  if (!template) {
+    throw exportError(
+      "WORKSPACE_EXPORT_INVALID_STATE",
+      `没有支持 ${skillId} 的 Workspace Template。`,
+      false
+    );
+  }
+  const context = {
+    skillId,
+    manifestJson,
+    title:
+      workspaceGuide?.title ??
+      `${manifest.taskRequirements && typeof manifest.taskRequirements === "object" && "label" in manifest.taskRequirements ? String((manifest.taskRequirements as { label: unknown }).label) : "资源准备"}工作区`,
+    summary:
+      workspaceGuide?.summary ??
+      `任务“${manifest.task}”的资源已按 Manifest r${manifest.revision} 写入 downloads/。当前状态只代表资源已准备，不代表软件已安装。`,
+    nextActions:
+      workspaceGuide?.nextActions ?? [
+        "核对 resource-manifest.json 中每个 artifact 的相对路径与 SHA256。",
+        "按实际需要人工运行安装程序或导入资源。",
+        "如需更换来源，返回 Agent 创建并审批新的 plan revision。"
+      ]
+  };
   return new Map<string, string>([
-    ["resource-manifest.json", `${JSON.stringify(manifest, null, 2)}\n`],
-    [
-      "README.md",
-      `# AI Dev Workspace\n\n任务：${snapshot.task}\n\n计划修订：r${snapshot.revision}\n\n本目录由迅雷 AI Task Agent 在资源下载和校验完成后原子生成。当前阶段不会自动安装软件，也不会自动执行脚本。\n\n## 文件\n\n- \`resource-manifest.json\`：机器可读资源、审批与审计信息。\n- \`RESOURCE_MANIFEST.md\`：面向人工的资源清单。\n- \`AGENTS.md\`：后续 Agent 的受控操作边界。\n- \`scripts/verify-environment.ps1\`：只读检查交接文件是否完整。\n- \`scripts/bootstrap.ps1\`：显示后续人工步骤，不执行安装。\n`
-    ],
-    [
-      "RESOURCE_MANIFEST.md",
-      `# Resource Manifest r${snapshot.revision}\n\n生成时间：${generatedAt}\n\n| 资源 | 版本 | 来源 | 状态 | 授权 |\n| --- | --- | --- | --- | --- |\n${resourceRows}\n`
-    ],
+    ["resource-manifest.json", template.renderManifest(context)],
+    ["RESOURCE_MANIFEST.md", renderResourceManifest(manifest)],
+    ["README.md", template.renderReadme(context)],
     [
       "AGENTS.md",
-      `# Agent Instructions\n\n- 先读取 \`resource-manifest.json\` 和 \`RESOURCE_MANIFEST.md\`。\n- 不得绕过 revision r${snapshot.revision} 的审批和 Policy 审计。\n- 不得自动执行安装程序、未知脚本或任意 Shell。\n- 如需更换资源来源，必须回到 Agent 生成新 revision 并重新审批。\n`
+      template.renderAgents?.(context) ??
+        "先读取 resource-manifest.json，再判断资源状态。\n"
     ],
     [
       "scripts/bootstrap.ps1",
-      `Set-StrictMode -Version Latest\n$ErrorActionPreference = "Stop"\nWrite-Host "Workspace handoff r${snapshot.revision} is ready."\nWrite-Host "No software will be installed automatically. Review resource-manifest.json first."\n`
+      `Set-StrictMode -Version Latest\n$ErrorActionPreference = "Stop"\nWrite-Host "Workspace handoff r${manifest.revision} is ready."\nWrite-Host "No software will be installed automatically. Review resource-manifest.json first."\n`
     ],
     [
       "scripts/verify-environment.ps1",
-      `Set-StrictMode -Version Latest\n$ErrorActionPreference = "Stop"\n$Root = Split-Path -Parent $PSScriptRoot\n$Required = @("README.md", "RESOURCE_MANIFEST.md", "AGENTS.md", "resource-manifest.json")\nforeach ($File in $Required) {\n  $Target = Join-Path $Root $File\n  if (-not (Test-Path -LiteralPath $Target -PathType Leaf)) {\n    throw "Missing handoff file: $File"\n  }\n}\nWrite-Host "Workspace handoff files are present for revision r${snapshot.revision}."\n`
+      `Set-StrictMode -Version Latest\n$ErrorActionPreference = "Stop"\n$Root = Split-Path -Parent $PSScriptRoot\n$Manifest = Get-Content -LiteralPath (Join-Path $Root "resource-manifest.json") -Raw | ConvertFrom-Json\nif ($Manifest.revision -ne ${manifest.revision}) { throw "Manifest revision mismatch." }\nforeach ($Resource in $Manifest.resources | Where-Object { $_.selected }) {\n  $Target = Join-Path $Root $Resource.artifact.relativePath\n  if (-not (Test-Path -LiteralPath $Target -PathType Leaf)) { throw "Missing artifact: $Target" }\n  $Actual = (Get-FileHash -LiteralPath $Target -Algorithm SHA256).Hash.ToLowerInvariant()\n  if ($Actual -ne $Resource.artifact.sha256) { throw "SHA256 mismatch: $Target" }\n}\nWrite-Host "Workspace artifacts verified for revision r${manifest.revision}."\n`
     ]
   ]);
 }
@@ -230,27 +521,32 @@ async function inspectExistingWorkspace(
       taskId?: string;
       revision?: number;
       generatedAt?: string;
+      handoff?: { files?: unknown };
     };
     if (
       manifest.taskId !== taskId ||
       manifest.revision !== revision ||
-      typeof manifest.generatedAt !== "string"
+      typeof manifest.generatedAt !== "string" ||
+      !Array.isArray(manifest.handoff?.files) ||
+      !manifest.handoff.files.every(
+        (file): file is string =>
+          typeof file === "string" && safeRelativePath(file)
+      )
     ) {
       throw exportError(
         "WORKSPACE_EXPORT_CONFLICT",
-        "目标工作区已存在，但不属于当前任务 revision。",
+        "目标工作区已存在，但不属于当前任务 revision 或 Manifest 文件列表无效。",
         false
       );
     }
     const files: WorkspaceFileRecord[] = [];
-    for (const relativePath of exportFiles) {
+    for (const relativePath of manifest.handoff.files) {
       const absolutePath = path.join(targetRoot, relativePath);
-      const content = await readFile(absolutePath);
+      const contentInfo = await sha256File(absolutePath);
       files.push({
         relativePath,
         absolutePath,
-        bytesWritten: content.byteLength,
-        sha256: sha256Of(content)
+        ...contentInfo
       });
     }
     return {
@@ -301,8 +597,6 @@ export async function exportWorkspace(
   );
   if (existing) return existing;
 
-  const generatedAt = (options.now?.() ?? new Date()).toISOString();
-  const artifacts = createArtifacts(snapshot, generatedAt);
   const parentRoot = path.dirname(taskRoot);
   await mkdir(parentRoot, { recursive: true });
   const stagingRoot = await mkdtemp(
@@ -310,8 +604,26 @@ export async function exportWorkspace(
   );
 
   try {
-    const files: WorkspaceFileRecord[] = [];
-    for (const relativePath of exportFiles) {
+    const generatedAt = (options.now?.() ?? new Date()).toISOString();
+    const copied = await copyVerifiedArtifacts(
+      snapshot,
+      options.downloadArtifacts ?? [],
+      stagingRoot,
+      taskRoot,
+      options.allowTestFixtures === true
+    );
+    const manifest = createManifest(
+      snapshot,
+      generatedAt,
+      copied.manifestArtifacts
+    );
+    const artifacts = createArtifacts(
+      manifest,
+      options.templateRegistry ?? createDefaultWorkspaceTemplateRegistry(),
+      options.workspaceGuide
+    );
+    const documentRecords: WorkspaceFileRecord[] = [];
+    for (const relativePath of documentFiles) {
       const content = artifacts.get(relativePath);
       if (content === undefined) {
         throw exportError(
@@ -323,7 +635,7 @@ export async function exportWorkspace(
       const absolutePath = path.join(stagingRoot, relativePath);
       await mkdir(path.dirname(absolutePath), { recursive: true });
       await writeFile(absolutePath, content, { encoding: "utf8", flag: "wx" });
-      files.push({
+      documentRecords.push({
         relativePath,
         absolutePath: path.join(taskRoot, relativePath),
         bytesWritten: Buffer.byteLength(content),
@@ -338,7 +650,7 @@ export async function exportWorkspace(
       rootPath: taskRoot,
       generatedAt,
       reusedExisting: false,
-      files
+      files: [...documentRecords, ...copied.fileRecords]
     };
   } catch (error) {
     await rm(stagingRoot, { force: true, recursive: true });

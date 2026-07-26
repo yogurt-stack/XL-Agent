@@ -212,7 +212,7 @@ function enterReplanning(
   const failedResource = state.resources.find((resource) => resource.id === resourceId);
   const requestedReplanStrategy =
     state.requestedReplanStrategy ??
-    (state.answers["mirror-policy"] === "允许备用镜像" && failedResource?.fallbackId
+    (state.answers["mirror-policy"] !== "仅使用主来源" && failedResource?.fallbackId
       ? "trusted-mirror"
       : "primary-retry");
   const resources = state.resources.map((resource) =>
@@ -287,6 +287,7 @@ export function createInitialAgentState(): AgentState {
     revision: 0,
     task: "",
     route: null,
+    routeDecision: null,
     systemProfile: windows11Profile,
     hostProfile: null,
     clarifications: clarificationQuestions,
@@ -373,11 +374,64 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
 
     case "ROUTE_RESOLVED":
       if (state.phase !== "routing") return state;
+      if (event.decision.status === "unsupported") {
+        return withLog(
+          {
+            ...state,
+            phase: "unsupported",
+            route: null,
+            routeDecision: event.decision,
+            clarifications: [],
+            clarificationIndex: 0,
+            taskRequirements: null,
+            agentRun: { ...state.agentRun, status: "complete" },
+            workspace: {
+              ...state.workspace,
+              nextAction: event.decision.reason
+            }
+          },
+          "warning",
+          event.decision.reason
+        );
+      }
+      if (event.decision.status === "needs_links") {
+        return withLog(
+          {
+            ...state,
+            phase: "planning",
+            route: "user-provided-links",
+            routeDecision: event.decision,
+            clarifications: [],
+            clarificationIndex: 0,
+            taskRequirements: event.decision.requirements,
+            agentRun: { ...state.agentRun, status: "thinking" }
+          },
+          "success",
+          "用户链接已由可信来源 Provider 精确解析，进入基础资源计划流程。"
+        );
+      }
       return withLog(
-        { ...state, phase: "clarifying", route: event.route, clarificationIndex: 0 },
+        {
+          ...state,
+          phase: event.decision.clarifications.length > 0 ? "clarifying" : "planning",
+          route: event.decision.skillId,
+          routeDecision: event.decision,
+          clarifications: event.decision.clarifications,
+          clarificationIndex: 0,
+          taskRequirements: event.decision.requirements
+        },
         "success",
-        "已路由到 Windows AI 开发环境准备 Skill，开始逐项澄清。"
+        `已路由到 ${event.decision.skillId ?? "未知"} Domain Skill。`
       );
+
+    case "TASK_REQUIREMENTS_RESOLVED":
+      if (state.phase !== "planning" || state.taskRequirements !== null) {
+        return state;
+      }
+      return {
+        ...state,
+        taskRequirements: event.requirements
+      };
 
     case "ANSWER_CLARIFICATION": {
       const question = getActiveClarification(state);
@@ -409,7 +463,7 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       if (state.phase !== "planning") return state;
       const revision = state.revision + 1;
       const resources = createInitialPlan(state);
-      const taskRequirements = deriveTaskRequirements(state);
+      const taskRequirements = state.taskRequirements ?? deriveTaskRequirements(state);
       const planValidation = validatePlannedResources(resources, {
         requirements: taskRequirements,
         systemProfile: state.systemProfile,
@@ -496,7 +550,7 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         {
           ...state,
           phase: "clarifying",
-          route: "windows-ai-development",
+          route: state.route ?? "ai-development-environment",
           clarifications: [event.question],
           clarificationIndex: 0,
           agentRun: { ...state.agentRun, status: "idle" }
@@ -508,7 +562,7 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
     case "MODEL_PLAN_PROPOSED": {
       if (state.phase !== "planning") return state;
       const revision = state.revision + 1;
-      const taskRequirements = deriveTaskRequirements(state);
+      const taskRequirements = state.taskRequirements ?? deriveTaskRequirements(state);
       const planValidation = validatePlanResourceIds(event.resourceIds, {
         requirements: taskRequirements,
         systemProfile: state.systemProfile,
@@ -532,7 +586,7 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         {
           ...state,
           phase: "waiting_approval",
-          route: "windows-ai-development",
+          route: state.route ?? "ai-development-environment",
           revision,
           resources,
           planExplanation: event.explanation,
@@ -928,7 +982,7 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
             ready: true,
             generatedAt: event.output.generatedAt,
             files: event.output.files.map((file) => file.relativePath),
-            nextAction: "阅读 README.md，再执行 scripts/bootstrap.ps1。",
+            nextAction: "核对 resource-manifest.json 与 downloads/ 校验信息，再按 README.md 人工处理资源。",
             exportStatus: "ready",
             rootPath: event.output.rootPath,
             fileRecords: event.output.files,

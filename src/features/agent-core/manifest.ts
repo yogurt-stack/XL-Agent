@@ -2,11 +2,12 @@ import type { AgentState } from "./types";
 
 export function createResourceManifest(state: AgentState) {
   return {
-    schemaVersion: "agent-core-demo-1.0",
+    schemaVersion: "xunlei-agent-workspace-2.0",
     taskId: state.taskId,
     revision: state.revision,
     task: state.task,
     route: state.route,
+    routeDecision: state.routeDecision,
     systemProfile: state.systemProfile,
     taskRequirements: state.taskRequirements,
     planValidation: state.planValidation,

@@ -1,8 +1,16 @@
-import type { AgentPhase, AgentState, ResourceStatus } from "./types";
+import type {
+  AgentPhase,
+  AgentState,
+  ClarificationQuestion,
+  ResourceStatus,
+  RouteDecision,
+  TaskRequirements
+} from "./types";
 
 const phases = new Set<AgentPhase>([
   "intake",
   "routing",
+  "unsupported",
   "clarifying",
   "planning",
   "waiting_approval",
@@ -53,6 +61,13 @@ export function isRestorableAgentState(value: unknown): value is AgentState {
     (value.activeResourceId !== null &&
       typeof value.activeResourceId !== "string") ||
     typeof value.route !== "string" && value.route !== null ||
+    !(
+      value.routeDecision === null ||
+      (isRecord(value.routeDecision) &&
+        (value.routeDecision.status === "supported" ||
+          value.routeDecision.status === "needs_links" ||
+          value.routeDecision.status === "unsupported"))
+    ) ||
     !isRecord(value.systemProfile) ||
     !isRecord(value.workspace) ||
     !isRecord(value.agentRun)
@@ -100,10 +115,20 @@ export function isRestorableAgentState(value: unknown): value is AgentState {
       typeof resource.id === "string" &&
       typeof resource.name === "string" &&
       typeof resource.version === "string" &&
+      typeof resource.publisher === "string" &&
       typeof resource.source === "string" &&
+      typeof resource.homepage === "string" &&
+      typeof resource.releasePage === "string" &&
       typeof resource.sizeMb === "number" &&
       Number.isFinite(resource.sizeMb) &&
       typeof resource.license === "string" &&
+      resource.catalogStatus === "active" &&
+      isRecord(resource.verification) &&
+      resource.verification.checksumAlgorithm === "sha256" &&
+      typeof resource.verification.checksumSource === "string" &&
+      typeof resource.verification.checksumSourceUrl === "string" &&
+      typeof resource.verification.signatureType === "string" &&
+      typeof resource.verification.signatureEnforcement === "string" &&
       typeof resource.selected === "boolean" &&
       typeof resource.status === "string" &&
       resourceStatuses.has(resource.status as ResourceStatus) &&
@@ -114,7 +139,56 @@ export function isRestorableAgentState(value: unknown): value is AgentState {
       isRecord(resource.download) &&
       typeof resource.download.url === "string" &&
       typeof resource.download.expectedSha256 === "string" &&
+      /^[a-f0-9]{64}$/i.test(resource.download.expectedSha256) &&
       typeof resource.download.maxSizeMb === "number" &&
       isStringArray(resource.download.allowedHosts)
   );
+}
+
+/**
+ * 将旧版持久化状态补齐到当前协议，再执行完整恢复校验。
+ *
+ * 2026-07 主进程迁移前的快照使用 `windows-ai-development` 固定路由，
+ * 且没有 `routeDecision`。这里仅补齐可确定推导的路由元数据，不修改
+ * revision、审批、资源或执行进度；无法安全推导的损坏状态仍会被拒绝。
+ */
+export function normalizeRestorableAgentState(
+  value: unknown
+): AgentState | null {
+  if (!isRecord(value)) return null;
+
+  const hasRouteDecision = Object.prototype.hasOwnProperty.call(
+    value,
+    "routeDecision"
+  );
+  const legacyRoute =
+    value.route === "windows-ai-development"
+      ? "ai-development-environment"
+      : value.route;
+
+  let candidate: unknown =
+    legacyRoute === value.route ? value : { ...value, route: legacyRoute };
+
+  if (!hasRouteDecision) {
+    let routeDecision: RouteDecision | null = null;
+    if (typeof legacyRoute === "string" && legacyRoute) {
+      routeDecision = {
+        status: "supported",
+        reason: "由旧版固定路由快照迁移到 Domain Skill 路由。",
+        skillId: legacyRoute,
+        sourceProviderId: "trusted-catalog",
+        userLinks: [],
+        resourceIds: [],
+        clarifications: Array.isArray(value.clarifications)
+          ? (value.clarifications as ClarificationQuestion[])
+          : [],
+        requirements: isRecord(value.taskRequirements)
+          ? (value.taskRequirements as TaskRequirements)
+          : null
+      };
+    }
+    candidate = { ...(candidate as Record<string, unknown>), routeDecision };
+  }
+
+  return isRestorableAgentState(candidate) ? candidate : null;
 }

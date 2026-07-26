@@ -1,88 +1,43 @@
 import type { ModelRuntime, RemoteModelTransport } from "./interfaces";
+import { parseModelDecision } from "./agentSchemas";
 import { ModelConnectionRequestError } from "./modelConnection";
-import type { AgentAction, ModelContext, ModelDecision } from "./types";
+import type { ModelContext, ModelDecision } from "./types";
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
-}
-
-function isAgentAction(value: unknown): value is AgentAction {
-  if (!isRecord(value) || typeof value.actionId !== "string" || typeof value.type !== "string") return false;
-
-  if (value.type === "ask_clarification") {
-    return (
-      typeof value.questionId === "string" &&
-      typeof value.question === "string" &&
-      typeof value.reason === "string" &&
-      typeof value.required === "boolean" &&
-      isStringArray(value.options)
-    );
-  }
-  if (value.type === "create_plan") {
-    return isStringArray(value.resourceIds) && typeof value.explanation === "string";
-  }
-  if (value.type === "create_replan") {
-    return (
-      (value.strategy === "trusted-mirror" || value.strategy === "primary-retry") &&
-      typeof value.explanation === "string"
-    );
-  }
-  if (value.type === "call_tool") {
-    if (
-      typeof value.purpose !== "string" ||
-      !isRecord(value.call) ||
-      typeof value.call.callId !== "string" ||
-      !isRecord(value.call.input)
-    ) {
-      return false;
+function collectResourceIds(context: ModelContext) {
+  const ids = new Set<string>([
+    ...context.state.resources.flatMap((resource) => [
+      resource.id,
+      ...(resource.fallbackId ? [resource.fallbackId] : [])
+    ]),
+    ...(context.state.routeDecision?.resourceIds ?? [])
+  ]);
+  const collect = (value: unknown) => {
+    if (Array.isArray(value)) {
+      value.forEach(collect);
+      return;
     }
-    if (value.call.name === "read_system_profile") return true;
-    if (value.call.name === "search_trusted_catalog") {
-      return (
-        typeof value.call.input.query === "string" &&
-        (value.call.input.resourceIds === undefined || isStringArray(value.call.input.resourceIds))
-      );
+    if (typeof value !== "object" || value === null) return;
+    const record = value as Record<string, unknown>;
+    for (const key of ["id", "resourceId", "fallbackId"]) {
+      if (typeof record[key] === "string") ids.add(record[key]);
     }
-    if (value.call.name === "export_workspace") {
-      return (
-        typeof value.call.input.taskId === "string" &&
-        typeof value.call.input.revision === "number"
-      );
-    }
-    return (
-      (value.call.name === "simulate_download" || value.call.name === "controlled_download") &&
-      typeof value.call.input.resourceId === "string"
-    );
-  }
-  return value.type === "finish" && typeof value.summary === "string";
+    Object.values(record).forEach(collect);
+  };
+  context.toolResults.forEach((result) => collect(result.output));
+  return ids;
 }
 
 export function parseRemoteDecision(value: unknown): ModelDecision {
-  if (
-    !isRecord(value) ||
-    typeof value.decisionId !== "string" ||
-    typeof value.model !== "string" ||
-    typeof value.explanation !== "string" ||
-    !isAgentAction(value.action)
-  ) {
+  try {
+    const decision = parseModelDecision(value);
+    return { ...decision, provider: "remote-llm" };
+  } catch {
     throw new ModelConnectionRequestError({
       code: "MODEL_INVALID_DECISION",
       message: "远程模型没有返回合法的 ModelDecision。",
       retriable: true
     });
   }
-
-  return {
-    decisionId: value.decisionId,
-    provider: "remote-llm",
-    model: value.model,
-    explanation: value.explanation,
-    action: value.action
-  };
 }
 
 /** 通过注入的安全传输调用远程 LLM，并校验其结构化输出。 */
@@ -94,6 +49,27 @@ export class RemoteLlmModelRuntime implements ModelRuntime {
       await this.transport.requestDecision(context)
     );
     const action = decision.action;
+    const availableResourceIds = collectResourceIds(context);
+    const proposedResourceIds =
+      action.type === "create_plan"
+        ? action.resourceIds
+        : action.type === "call_tool" &&
+            "resourceId" in action.call.input
+          ? [action.call.input.resourceId]
+          : action.type === "call_tool" &&
+              action.call.name === "search_trusted_catalog"
+            ? action.call.input.resourceIds ?? []
+            : [];
+    const unknownResourceId = proposedResourceIds.find(
+      (resourceId) => !availableResourceIds.has(resourceId)
+    );
+    if (unknownResourceId) {
+      throw new ModelConnectionRequestError({
+        code: "MODEL_INVALID_DECISION",
+        message: `远程模型提出了上下文中不存在的资源 ID：${unknownResourceId}。`,
+        retriable: true
+      });
+    }
     const readOnlyToolName =
       action.type === "call_tool" &&
       (action.call.name === "read_system_profile" ||

@@ -6,6 +6,7 @@ import type {
   ModelContext,
   ModelDecision,
   PolicyDecision,
+  TaskRequirements,
   ToolResult
 } from "./types";
 
@@ -35,6 +36,7 @@ export interface AgentScheduler {
 
 export interface AgentRouter {
   route(state: AgentState): Extract<AgentEvent, { type: "ROUTE_RESOLVED" }> | null;
+  resolveRequirements?(state: AgentState): TaskRequirements | null;
 }
 
 export interface AgentPlanner {

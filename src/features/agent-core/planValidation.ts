@@ -48,16 +48,21 @@ function sameMetadata(resource: TrustedResource, canonical: TrustedResource) {
   const scalarKeys: (keyof TrustedResource)[] = [
     "name",
     "version",
+    "publisher",
     "source",
+    "homepage",
+    "releasePage",
     "sizeMb",
     "license",
     "purpose",
     "recommendation",
     "required",
     "sourceTrust",
+    "catalogStatus",
     "fallbackId"
   ];
   if (scalarKeys.some((key) => resource[key] !== canonical[key])) return false;
+  if (JSON.stringify(resource.verification) !== JSON.stringify(canonical.verification)) return false;
   if (JSON.stringify(resource.download) !== JSON.stringify(canonical.download)) return false;
 
   const arrayKeys: (keyof TrustedResource)[] = [

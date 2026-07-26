@@ -208,6 +208,7 @@ describe("agent runtime recovery", () => {
         ok: true,
         output: {
           resourceId,
+          fileName: `${resourceId}.download`,
           urlHost: new URL(resource.download.url).host,
           bytesWritten: 7,
           sha256: resource.download.expectedSha256,

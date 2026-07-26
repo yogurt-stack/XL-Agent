@@ -10,11 +10,11 @@
 - React + TypeScript + Vite renderer
 - lucide-react 图标
 - 原生 CSS 样式
-- IPC 示例：`getAppInfo`、`readSystemProfile`
+- 白名单 IPC：Runtime 快照/用户事件、模型连接测试、历史查询和工作区只读访问
 - `nodeIntegration: false`
-- 纯 TypeScript Agent Core 状态机
+- Electron Main 托管的纯 TypeScript Agent Core 状态机
 - 每轮最多 6 步的异步模型决策循环（用户批准新 revision 后重新计数）
-- 本地规则模型与可选远程 LLM 自动回退
+- 本地规则模型与支持原生 `tools/tool_calls` 的 OpenAI Chat Completions 兼容模型自动回退
 - 应用级模型连接状态、测试连接、结构化错误和失败熔断
 - 受控工具、权限策略和内存审计轨迹
 - Electron 主进程只读采集脱敏主机画像，不暴露用户名、主机名、Home 路径、环境变量或完整 shell 路径
@@ -106,7 +106,7 @@ XL_AGENT_LLM_API_KEY=your-secret
 
 可参考 `.env.example`。保存后需要重新运行 `npm run dev`，因为 Electron 主进程只在启动时加载 `.env`。这些变量只由 Electron 主进程读取，不使用 `VITE_` 前缀，也不会进入 renderer bundle。远程请求失败、未配置或返回结构不合法时，`FallbackModelRuntime` 会自动使用本地规则模型继续演示。
 
-应用顶部和“设置”页面会显示当前 provider、脱敏端点主机、模型 ID 和回退原因。“测试连接”会通过 Electron 主进程验证 HTTPS、鉴权、Chat Completions 响应和 `ModelDecision` 结构，API Key 不会返回 renderer。远程失败后当前任务会使用本地规则模型，避免每个模型步骤重复等待失败端点；重新测试成功后恢复远程优先。
+应用顶部和“设置”页面会显示当前 provider、脱敏端点主机、模型 ID 和回退原因。“测试连接”会通过 Electron 主进程验证 HTTPS、鉴权、Chat Completions 响应和原生 `tool_call` 结构，API Key 不会返回 renderer。远程失败后当前任务会使用本地规则模型，避免每个模型步骤重复等待失败端点；重新测试成功后恢复远程优先。
 
 模型连接和 Electron renderer 验证：
 
@@ -117,16 +117,40 @@ npm run verify:electron-renderer
 
 ## 系统画像边界
 
-`read_system_profile` 已经不再只是回传固定状态。Electron 环境会通过主进程读取平台、架构、系统版本、CPU 数、内存 GB 和默认 shell 文件名，并通过 preload 返回 renderer。该结果进入 `ToolResult` 和设置页审计，但不会暴露用户名、主机名、Home 路径、环境变量或完整 shell 路径。
+`read_system_profile` 已经不再只是回传固定状态。Electron Main 会读取平台、架构、系统版本、CPU 数、内存 GB 和默认 shell 文件名，将脱敏结果写入 `ToolResult` 和 Runtime 快照供设置页审计，但不会暴露用户名、主机名、Home 路径、环境变量或完整 shell 路径。
 
 当前可信目录仍只覆盖 Windows 11 x64 目标资源，因此计划校验继续使用锁定的 Windows 目标画像。真实主机画像用于证明只读采集和脱敏边界，不会把当前 macOS/Linux 运行机直接变成资源计划目标。
 
+## 可信资源目录
+
+`catalog/trusted-resources.json` 是资源目录的唯一事实源，Schema 位于
+`catalog/trusted-resources.schema.json`。第一批固定版本资源覆盖 Python、VS Code、Git for
+Windows、Node.js LTS、PowerShell、Miniforge 及项目固定提交快照；每项都声明 HTTPS 下载地址、
+允许的重定向主机、SHA256、大小上限、来源、授权、能力和回退关系。
+
+Agent 只能查询并选择目录中的资源 ID。Renderer 不提交任意 URL；Electron 主进程会再次通过
+同一目录生成物解析 ID，并在下载前后校验 HTTPS Host、大小和 SHA256。目录过期或生成物与
+JSON 不一致时会失败关闭。
+
+```bash
+# 修改 JSON 后重新生成 renderer 和 Electron 目录
+npm run generate:catalog
+
+# 只校验 Schema、不变量、目录有效期和生成物一致性
+npm run verify:catalog
+```
+
+目录目前记录 Authenticode/上游签名预期，但签名执行仍标记为 `planned`；当前强制执行的是
+固定版本、HTTPS Host allowlist、大小上限与 SHA256。正式安装阶段接入前还需在 Windows
+主进程侧加入 `WinVerifyTrust`。
+
 ## SQLite 与历史任务
 
-Electron 主进程使用 `sql.js` 将任务数据写入 `agent-tasks.sqlite`。默认位置是 Electron `userData` 目录，也可通过 `XL_AGENT_TASK_STORE_PATH` 指定绝对路径。当前 schema v1 包含：
+Electron 主进程使用 `sql.js` 将任务数据写入 `agent-tasks.sqlite`。默认位置是 Electron `userData` 目录，也可通过 `XL_AGENT_TASK_STORE_PATH` 指定绝对路径。当前 schema v2 包含：
 
 - `task_snapshots`：每个 task ID 最近一次完整状态快照。
 - `approval_records`：按 task ID 和 revision 保存的本地用户审批。
+- `download_artifacts`：按 task ID、revision 和资源 ID 保存已下载且已校验文件的受控元数据。
 - `workspace_exports`：按 task ID 和 revision 保存的工作区导出结果。
 - `schema_migrations`：数据库迁移版本和执行记录。
 
@@ -136,16 +160,19 @@ Electron 主进程使用 `sql.js` 将任务数据写入 `agent-tasks.sqlite`。�
 
 ## Agent Runtime 接口
 
-React 不再自行维护计时器或自动状态流转；它只订阅 `AgentRuntime` 的状态并派发用户事件。运行时接口位于 `src/features/agent-core/interfaces.ts`，固定 Mock 实现位于 `mockServices.ts`。
+React 不再创建或持有 Runtime；Renderer 只通过 preload 白名单桥接读取 Electron Main 发布的快照，并派发经过 Zod 校验的用户事件。`AgentRuntimeHost` 是模型、路由、状态机、Policy、Tool、SQLite、下载与工作区导出的唯一编排宿主。
 
-- `AgentRuntimePort`：Agent Core 的唯一使用入口。提供读取状态、派发事件、订阅状态变化、启动和停止循环的能力。
+- `AgentRuntimeHost`：Electron Main 中的 Orchestrator，负责 Runtime 生命周期、持久化与受控副作用。
+- `AgentRuntimePort`：Main 内部 Agent Core 的统一入口。提供读取状态、派发事件、订阅状态变化、启动和停止循环的能力。
 - `AgentScheduler`：控制自动步骤何时执行。Demo 使用 `setTimeout`；测试可注入手动调度器，未来可替换成队列或 Electron 调度服务。
-- `AgentRouter`：在 `routing` 阶段选择 Skill/路由，并返回 `ROUTE_RESOLVED` 事件。当前固定选择 Windows AI 开发环境。
+- `AgentRouter`：通过注册表返回 `supported`、`needs_links` 或 `unsupported` 三态路由；核心流程不硬编码单一路由。
+- `DomainSkillRegistry`：注册可匹配任务、澄清需求和生成工作区指南的领域 Skill。
+- `SourceProviderRegistry`：注册可信资源来源，并负责精确解析用户提供的 HTTPS 链接。
+- `WorkspaceTemplateRegistry`：按路由选择 Manifest 派生的工作区模板。
 - `AgentPlanner`：只在未配置模型的兼容路径中生成固定计划和替代计划。
-- `ModelRuntime`：在 `routing`、`planning` 和 `replanning` 阶段生成结构化决策；下载失败后先等待用户选择，模型只能按用户选择生成新 revision。
+- `ModelRuntime`：在 `planning` 和 `replanning` 阶段生成结构化决策；远程模型必须返回且只返回一个原生 `tool_call`，参数由严格 Zod Schema 校验。
 - `AgentVerifier`：在 `verifying` 阶段生成验证结果。当前默认验证通过；UI/测试可显式派发版本不匹配事件以进入重规划。
-- `ModelRuntime`：根据当前状态、工具历史和剩余步数生成一项结构化 `ModelDecision`。
-- `AgentToolExecutor`：执行协议允许的脱敏系统画像读取、可信目录查询和模拟下载工具；全部下载进度与失败都由 `simulate_download` ToolResult 驱动。
+- `AgentToolExecutor`：通过工具注册表执行脱敏系统画像、可信目录查询、受控下载和工作区导出。
 - `AgentPolicy`：在执行动作前返回允许、需要审批或拒绝的策略结果。
 - `TaskRequirements`：把自然语言意图和澄清答案转换为确定性的必需能力集合。
 - `PlanValidationResult`：在计划生成和审批时记录结构化验证问题；只有当前 revision 验证通过并完成审批后才能执行下载工具。
@@ -156,6 +183,9 @@ React 不再自行维护计时器或自动状态流转；它只订阅 `AgentRunt
 
 ```text
 xunlei-ai-task-agent/
+  catalog/
+    trusted-resources.json
+    trusted-resources.schema.json
   electron/
     main.ts
     preload.ts
@@ -180,8 +210,8 @@ xunlei-ai-task-agent/
 ## Demo 流程
 
 1. 输入任务，例如“帮我准备一个 Windows 下的 AI 开发环境”。
-2. Agent 固定路由到 Windows AI 开发环境 Skill，并一次询问一个澄清问题。
+2. Agent 通过 Domain Skill/Source Provider 注册表做三态路由，并一次询问一个澄清问题；不支持的任务会明确停止。
 3. 生成可信资源计划 r1，并验证任务能力、依赖、系统、来源和授权；取消必需资源或版本不匹配会进入重规划。
 4. 下载失败后暂停在人工决策点，可选择重试原来源、可信替代来源或交给 Agent B。
 5. 重试和替代来源由模型生成新计划，严格验证后进入 `waiting_approval`；审批事件必须绑定当前 revision，Agent B 分支生成未完成交接。
-6. 验证通过后生成含 `revision` 字段的 `resource-manifest.json` 和工作区交接预览。
+6. 验证通过后，Main 从 SQLite 的已校验制品记录复制真实文件到 `downloads/`，重新计算 SHA256，并以 Manifest v2 为单一事实源生成交接文档。

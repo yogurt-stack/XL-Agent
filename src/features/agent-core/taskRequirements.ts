@@ -1,3 +1,4 @@
+import { trustedCatalog } from "./catalog";
 import type { AgentState, LocalTaskIntent, ResourceCapability, TaskRequirements } from "./types";
 
 type SupportedLocalIntent = Exclude<LocalTaskIntent, "ambiguous">;
@@ -66,6 +67,48 @@ export function resourceIdsForTask(
     workloadAnswer === "skipped" ? undefined : workloadAnswer
   );
   return resourceIdsForTaskIntent(intent, state.answers);
+}
+
+/**
+ * 为扩展 Domain Skill 的能力需求选择可信目录主来源，并闭包补齐资源依赖能力。
+ * 显式的领域规则仍可通过任务意图给出更精确组合；该函数是新增 Skill 的安全本地兜底。
+ */
+export function resourceIdsForCapabilities(
+  requiredCapabilities: ResourceCapability[]
+) {
+  const fallbackIds = new Set(
+    trustedCatalog.flatMap((resource) =>
+      resource.fallbackId ? [resource.fallbackId] : []
+    )
+  );
+  const selectedIds: string[] = [];
+  const covered = new Set<ResourceCapability>();
+  const pending = [...new Set(requiredCapabilities)];
+
+  while (pending.length > 0) {
+    const capability = pending.shift()!;
+    if (covered.has(capability)) continue;
+    const resource =
+      trustedCatalog.find(
+        (candidate) =>
+          candidate.catalogStatus === "active" &&
+          !fallbackIds.has(candidate.id) &&
+          candidate.provides.includes(capability)
+      ) ??
+      trustedCatalog.find(
+        (candidate) =>
+          candidate.catalogStatus === "active" &&
+          candidate.provides.includes(capability)
+      );
+    if (!resource) continue;
+    if (!selectedIds.includes(resource.id)) selectedIds.push(resource.id);
+    resource.provides.forEach((provided) => covered.add(provided));
+    resource.requiresCapabilities.forEach((required) => {
+      if (!covered.has(required)) pending.push(required);
+    });
+  }
+
+  return selectedIds;
 }
 
 function uniqueCapabilities(capabilities: ResourceCapability[]) {

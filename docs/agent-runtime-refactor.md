@@ -1,152 +1,136 @@
-# Agent Runtime 改造说明
+# Agent Runtime 当前架构说明
 
-## 背景
+## 目标
 
-本次改造将原先放在 React Hook 中的自动计时和 Mock 事件推进逻辑迁移到独立的 TypeScript Agent Runtime。目标是让 React 只负责渲染 `AgentState` 与派发用户操作，而状态流转、自动步骤和 Mock 执行策略保持在可测试、可替换的 Agent Core 中。
+当前实现遵循计划书中的安全边界：Renderer 只负责展示状态和发送用户操作，
+Electron Main 是 Agent Orchestrator 的唯一宿主。模型、路由、状态机、Policy、Tool、
+SQLite、真实下载、校验与工作区导出均在 Main 内闭环。
 
-本文记录的是第一阶段 Runtime 拆分。当时仍是纯前端内存模拟；后续最小 Agent 阶段已增加本地模型和可选远程 LLM，详见 `minimal-agent-six-step-report.md`。真实下载、SQLite 和文件写入仍未接入。
+本文描述当前架构。早期“Renderer 内存 Runtime”阶段的历史实现记录见
+`minimal-agent-six-step-report.md`，不再代表现行边界。
 
-## 改造前后
+## 进程职责
 
-改造前，`useAgentCore.ts` 同时负责：
+### Renderer
 
-- 保存 React 状态。
-- 调用状态机 `transition`。
-- 使用 `setTimeout` 推进路由、计划、下载、重规划和验证。
-- 调用单一的 `getNextMockEvent` 生成所有自动事件。
+- 通过 preload 白名单获取 `AgentRuntimeSnapshot`。
+- 订阅 Main 发布的 Runtime 快照。
+- 派发受支持的 `AgentUserEvent`。
+- 查询只读任务历史和工作区文本预览。
+- 不创建 Runtime，不直接访问 Node、网络、文件系统或 SQLite。
 
-改造后，职责划分如下：
+### Preload
 
-- React Hook 订阅 `AgentRuntime`，并将用户操作转发为 `AgentEvent`。
-- `AgentRuntime` 负责状态、订阅、自动事件调度以及生命周期。
-- 路由、规划、下载和验证分别由独立接口及 Mock 实现提供。
-- `machine.ts` 继续作为纯状态机，不依赖 React、定时器或 Electron API。
+- 使用 `contextBridge` 暴露有限、具名的 IPC 方法。
+- 不暴露通用 `ipcRenderer`、任意频道或任意文件路径。
 
-## 新增模块
+### Electron Main
 
-| 文件 | 作用 |
-| --- | --- |
-| `src/features/agent-core/interfaces.ts` | 定义 Runtime、调度器及路由、规划、下载、验证服务的边界。 |
-| `src/features/agent-core/runtime.ts` | 实现 `AgentRuntime`，负责订阅、事件分发、自动步骤与取消待执行步骤。 |
-| `src/features/agent-core/mockServices.ts` | 提供无模型兼容路径中的固定路由、资源计划和验证服务。 |
-| `src/features/agent-core/useAgentCore.ts` | React 适配层，只订阅 Runtime 状态并派发事件。 |
-| `src/features/agent-core/machine.ts` | 根据事件执行纯状态转换；现在接收路由结果和重规划策略。 |
-| `scripts/verify-agent-core.mjs` | 使用手动调度器验证完整运行时流程，避免依赖真实等待时间。 |
+`electron/agentRuntimeHost.ts` 承担唯一 Orchestrator：
 
-旧的 `mockRunner.ts` 已删除。路由、无模型计划和验证由 `FixedWindowsRouter`、`FixedWindowsPlanner`、`MockVerifier` 提供，模拟下载统一通过 `AgentToolExecutor` 执行。
+- 创建并驱动 `AgentRuntime` 与纯状态机。
+- 执行三态路由、模型循环、Policy 和 Tool。
+- 对 Renderer 用户事件与模型动作执行 Zod 校验。
+- 执行可信目录下载、SHA256 校验与 SQLite 持久化。
+- 从已验证下载制品原子生成 Agent Ready Workspace。
+- 广播不可变的 Runtime 快照。
 
-## 接口职责
+## 路由与扩展注册表
 
-### `AgentRuntimePort`
+`ExtensibleAgentRouter` 返回以下三种结果：
 
-前端使用 Agent Core 的统一入口：
+| 状态 | 含义 | 后续动作 |
+| --- | --- | --- |
+| `supported` | 已匹配安装的 Domain Skill | 澄清需求并规划 |
+| `needs_links` | 未匹配 Skill，但用户 HTTPS 链接均可由可信 Source Provider 精确解析 | 仅规划解析出的可信资源 |
+| `unsupported` | 既无匹配 Skill，也无可验证可信链接 | 明确停止，不调用模型猜测 |
 
-- `getState()`：读取当前 `AgentState`。
-- `dispatch(event)`：派发用户或系统事件，并触发状态转换。
-- `subscribe(listener)`：订阅状态变化，供 React 更新界面。
-- `start()`：启动自动步骤循环。
-- `stop()`：停止循环，并取消尚未执行的自动步骤。
+扩展点均通过注册表添加，不修改状态机主流程：
 
-### `AgentScheduler`
+- `DomainSkillRegistry`：任务匹配、澄清、能力需求和工作区指南。
+- `SourceProviderRegistry`：可信资源查询与用户链接解析。
+- `WorkspaceTemplateRegistry`：Manifest 派生的交接文件模板。
+- `AgentToolRegistry`：受控工具名、输入 Schema 和执行器。
 
-抽象自动步骤的延迟调度：
+当前首个 Domain Skill 是 `ai-development-environment`，首个 Source Provider 是
+`trusted-catalog`。
 
-- Demo 使用 `createTimeoutScheduler()`，底层为 `setTimeout`。
-- 核心验证使用手动调度器，不需要真实等待。
-- 后续可以替换为 Electron 主进程队列、任务队列或受控测试时钟，而不用修改状态机和 UI。
+路由完成且澄清结束后，Runtime 会调用当前 Skill 的 `buildRequirements()` 写入能力约束；
+本地或远程模型只能在该约束下查询 Provider 并创建计划。工作区导出时，Main 再调用同一
+Skill 的 `generateGuide()`，把领域说明交给匹配的 Workspace Template 渲染。因此新增
+Skill 不是只增加一个路由标签，而能贯穿规划、验证和交接。
 
-### `AgentRouter`
+## 模型协议
 
-负责 `routing` 阶段的路由判断，返回 `ROUTE_RESOLVED` 事件。当前固定路由到 `windows-ai-development`，并使用 Windows 11 x64 系统画像。
+远程模型使用 OpenAI Chat Completions 兼容 HTTP 协议，并要求原生
+`tools/tool_calls`：
 
-### `AgentPlanner`
+- Host 每轮声明允许的 function tools。
+- `tool_choice: "required"` 且 `parallel_tool_calls: false`。
+- 响应必须且只能包含一个 `tool_call`。
+- action 与 runtime tool 共用同一工具调用通道。
+- tool 名和 `arguments` 使用严格 Zod Schema 校验，未知字段、未知工具、多工具调用或
+  content-only JSON 均拒绝。
+- Host Policy 与状态机仍会再次验证动作，模型不能绕过审批或可信目录。
 
-负责计划阶段的自动事件：
+本地规则模型与远程模型实现同一 `ModelRuntime` 契约；远程失败后可安全回退本地模型。
 
-- `createPlan()`：在 `planning` 阶段生成 `PLAN_GENERATED`。
-- `createReplan()`：在 `replanning` 阶段生成带策略的 `REPLAN_GENERATED`。
+## 状态机与审批
 
-规划器不直接修改状态。它只提供事件，最终状态仍由 `transition()` 统一处理。
-
-### `AgentToolExecutor`
-
-负责执行经过策略检查的受控工具。`downloading` 阶段由 Runtime 构造 `simulate_download` 调用，工具返回进度或结构化失败；当前实现会固定让 `sample-project` 在 56% 后返回 SHA256 校验错误。
-
-### `AgentVerifier`
-
-负责 `verifying` 阶段的验证事件。当前 Mock 默认生成通过事件；UI 或测试可以显式派发包含 `versionMismatchResourceId` 的事件，以模拟版本不匹配并进入重规划。
-
-## 状态流与控制规则
-
-核心流程保持为：
+`machine.ts` 保持纯函数 `transition(state, event)`。自动流程由 Main 中的 Runtime 编排：
 
 ```text
-任务输入
-  -> 路由判断
-  -> 需求澄清
-  -> 资源计划
-  -> 等待确认
-  -> 模拟下载
-  -> 下载失败时等待人工处置
-  -> 验证
-  -> 工作区交接
+intake
+  -> routing
+  -> unsupported
+  -> clarifying
+  -> planning
+  -> waiting_approval
+  -> downloading
+  -> awaiting_failure_action / replanning
+  -> verifying
+  -> exporting
+  -> handoff
 ```
 
-以下情况会进入 `replanning`：
+取消必需资源、下载失败和版本不匹配都会触发重规划。任何新计划都会增加 revision，并
+重新进入 `waiting_approval`；旧 revision 的批准不能授权新计划。旧版 SQLite 快照在恢复
+时会将 `windows-ai-development` 固定路由无损映射到当前 Domain Skill 路由。
 
-- 用户取消必需资源。
-- 验证发现版本不匹配。
-- 下载任务失败后，用户选择“重试原来源”或“可信替代来源”。
+## SQLite 与下载制品
 
-下载失败会先进入 `awaiting_failure_action`，不会立即触发模型。用户也可以选择“交给 Agent B”，生成保留失败上下文的未完成交接。无论采用哪种重规划策略，新计划都必须回到 `waiting_approval`，产生新的 `revision`，等待用户重新确认后才能继续下载。
+SQLite schema v2 包含：
 
-## 备用镜像策略
+- `task_snapshots`
+- `approval_records`
+- `download_artifacts`
+- `workspace_exports`
+- `schema_migrations`
 
-澄清问题“是否允许在可信目录内使用备用镜像？”现在已连接到重规划逻辑：
+受控下载成功后，Main 会先记录资源 ID、文件名、临时文件路径、实际 SHA256、字节数和
+验证时间。工作区导出时不信任 Renderer 或状态文本，而是：
 
-- 选择“允许备用镜像”：规划器发出 `strategy: "trusted-mirror"`，状态机会采用资源目录中的 `fallbackId`，例如将 `Python 3.12` 替换为 `Miniforge Python Runtime`。
-- 选择“仅使用主来源”或跳过：规划器发出 `strategy: "primary-retry"`，状态机会保留原资源并生成主来源重试计划。
+1. 按 task/revision/resource 从 SQLite 读取已验证制品。
+2. 再次计算源文件 SHA256 和大小。
+3. 原子复制到工作区 `downloads/`。
+4. 生成 `xunlei-agent-workspace-2.0` JSON Manifest。
+5. 由该 Manifest 派生 Markdown、AGENTS 和人工执行脚本。
 
-两种策略都会创建新的计划 revision，并再次进入 `waiting_approval`。
+最终工作区含真实下载文件，但不会自动运行安装包或脚本。
 
-## React 边界
-
-`useAgentCore()` 不再包含 `setTimeout`、`transition()` 调用或 Mock 业务判断。它仅执行以下工作：
-
-1. 创建一次 `AgentRuntime`。
-2. 订阅 Runtime 的状态更新。
-3. 在组件挂载时启动 Runtime，在卸载时停止 Runtime。
-4. 将组件操作转发给 `runtime.dispatch()`。
-
-因此首页、澄清页、资源计划页、执行页和工作区页仍由同一份 `AgentState` 驱动，但不会直接掌握流程推进规则。
-
-## 验证
-
-已执行并通过：
+## 验证入口
 
 ```bash
-npm run verify:agent-core
 npm run typecheck
-npm run build
+npm run test:run
+npm run verify:model-client
+npm run verify:download-client
+npm run verify:persistence
+npm run verify:agent-core
+npm run verify:production-build
+npm run verify:electron-renderer
+npm run test:e2e
 ```
 
-核心场景验证覆盖：
-
-- 初始计划生成并等待确认。
-- 取消必需资源后进入重规划。
-- 允许备用镜像时，Python 替换为可信 Miniforge 运行时。
-- 示例项目代码包在下载中途失败，生成新的待确认计划。
-- 版本不匹配后再次重规划。
-- 选择仅主来源时保留原资源进行重试。
-- 最终交接状态与 `resource-manifest.json` 的 revision 一致。
-
-## 后续替换方向
-
-接入真实能力时，应替换 `mockServices.ts` 中对应的实现，而不是让 React 直接调用后端或下载器：
-
-- 用真实意图识别或规则引擎替换 `AgentRouter`。
-- 用资源目录服务替换 `AgentPlanner`。
-- 用 Electron 主进程 IPC 实现真实 `AgentToolExecutor` 下载工具。
-- 用安装包哈希、版本探测或环境检测替换 `AgentVerifier`。
-
-状态机、UI 的事件契约与 Manifest 计算可以保持不变。
+覆盖重点包括严格模型工具调用、路由注册表扩展、revision 审批、旧快照迁移、SQLite
+schema v2、下载制品重哈希、Manifest 派生、原子回滚、重启恢复和完整 Electron 交接流程。

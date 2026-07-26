@@ -1,11 +1,12 @@
 import type { AgentPlanner, AgentRouter, AgentVerifier } from "./interfaces";
 import type { AgentEvent, AgentState, ReplanStrategy } from "./types";
-
-const windowsAiDevelopmentRoute = "windows-ai-development";
+import { ExtensibleAgentRouter } from "./router";
 
 export class FixedWindowsRouter implements AgentRouter {
+  private readonly router = new ExtensibleAgentRouter();
+
   route(state: AgentState): Extract<AgentEvent, { type: "ROUTE_RESOLVED" }> | null {
-    return state.phase === "routing" ? { type: "ROUTE_RESOLVED", route: windowsAiDevelopmentRoute } : null;
+    return this.router.route(state);
   }
 }
 

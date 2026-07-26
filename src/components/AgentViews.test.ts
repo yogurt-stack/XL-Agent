@@ -23,9 +23,9 @@ describe("clarification view", () => {
     );
 
     const html = renderToStaticMarkup(createElement(ClarificationView, {
-      dispatch: (event) => transition(cancelled, event),
+      dispatch: async (event) => transition(cancelled, event),
       onNavigate: () => undefined,
-      onRetryLocally: () => cancelled,
+      onRetryLocally: async () => cancelled,
       state: cancelled
     }));
 

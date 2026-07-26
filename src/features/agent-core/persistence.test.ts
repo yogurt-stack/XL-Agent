@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { createInitialAgentState, transition } from "./machine";
-import { isRestorableAgentState } from "./persistence";
+import {
+  isRestorableAgentState,
+  normalizeRestorableAgentState
+} from "./persistence";
+import { ExtensibleAgentRouter } from "./router";
 
 function createPersistableState() {
   let state = createInitialAgentState();
@@ -9,10 +13,7 @@ function createPersistableState() {
     task: "准备 Windows AI 环境",
     taskId: "task-persistence-test"
   });
-  state = transition(state, {
-    type: "ROUTE_RESOLVED",
-    route: "windows-ai-development"
-  });
+  state = transition(state, new ExtensibleAgentRouter().route(state)!);
   state = transition(state, {
     type: "ANSWER_CLARIFICATION",
     questionId: "primary-workload",
@@ -47,5 +48,39 @@ describe("persisted AgentState validation", () => {
         )
       })
     ).toBe(false);
+  });
+
+  it("migrates the legacy fixed route snapshot without changing task progress", () => {
+    const current = createPersistableState();
+    const legacy = {
+      ...current,
+      route: "windows-ai-development"
+    } as Record<string, unknown>;
+    delete legacy.routeDecision;
+
+    const restored = normalizeRestorableAgentState(legacy);
+
+    expect(restored).not.toBeNull();
+    expect(restored?.route).toBe("ai-development-environment");
+    expect(restored?.routeDecision).toMatchObject({
+      status: "supported",
+      skillId: "ai-development-environment",
+      sourceProviderId: "trusted-catalog"
+    });
+    expect(restored?.revision).toBe(current.revision);
+    expect(restored?.approvedRevision).toBe(current.approvedRevision);
+    expect(restored?.resources).toEqual(current.resources);
+  });
+
+  it("does not disguise a structurally damaged legacy snapshot as migrated", () => {
+    const current = createPersistableState();
+    const legacy = {
+      ...current,
+      route: "windows-ai-development",
+      resources: null
+    } as Record<string, unknown>;
+    delete legacy.routeDecision;
+
+    expect(normalizeRestorableAgentState(legacy)).toBeNull();
   });
 });
