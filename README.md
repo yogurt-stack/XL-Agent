@@ -137,7 +137,7 @@ GitHub Actions 会在推送到 `main`、针对 `main` 的 Pull Request 以及手
 
 - `quality`：类型检查、Vitest 覆盖率、Agent Core、模型客户端、下载客户端、SQLite、P0/P1/P2/P3 专项验证、Windows 打包配置和 production build。
 - `electron-e2e`：在 Linux Xvfb 环境中运行 Electron 状态机、恢复、Agent B、历史查阅、无障碍扫描和视觉基线比较。
-- `windows-package`：在 Windows x64 runner 构建 NSIS/ZIP，检查 ASAR 和密钥排除，启动 packaged exe 并上传 unsigned Demo 产物。
+- `windows-package`：在 Windows x64 runner 构建 NSIS/ZIP，检查 ASAR 和密钥排除，并在 packaged exe 内完成失败恢复、工作区落盘和 Agent B 校验后上传 unsigned Demo 产物。
 
 本地可以运行与快速质量门禁相同的命令：
 

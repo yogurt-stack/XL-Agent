@@ -67,7 +67,7 @@ npm run package:win
 
 配置明确只包含 production renderer、Electron Main/preload、`package.json` 和生产依赖，并排除 `.env`、`.env.*` 和 source map。
 
-`verify-windows-packaging` 检查 appId、产品名、版本、x64 target、交互式安装边界、ASAR 中的 Main/preload、SQLite 等运行依赖和密钥排除。`test:packaged:win` 启动 `win-unpacked` 中的真实 exe，检查窗口、preload/Main bridge、应用版本和 `win32` 平台。
+`verify-windows-packaging` 检查 appId、产品名、版本、x64 target、交互式安装边界、ASAR 中的 Main/preload、SQLite 等运行依赖和密钥排除。`test:packaged:win` 启动 `win-unpacked` 中的真实 exe，在离线 fixture 上完成自然语言任务、澄清、r1 审批、受控失败、r2 重规划、真实工作区导出和 Agent B Manifest 校验；同时检查窗口、preload/Main bridge、应用版本和 `win32` 平台。
 
 ## 4. CI 与产物
 
@@ -76,7 +76,7 @@ CI 新增 `Windows x64 package and smoke`：
 1. 在全新 `windows-2022` runner 上执行 `npm ci`。
 2. 构建 NSIS、ZIP 和 unpacked app。
 3. 检查 ASAR。
-4. 启动打包后的 Electron 应用。
+4. 启动打包后的 Electron 应用并完成带失败恢复、工作区落盘和 Agent B 检查的离线流程。
 5. 上传 `windows-x64-demo-unsigned`，保留 14 天。
 
 该 runner 是可重复的干净 Windows 打包/启动证据，但不是 Windows 11 实体机兼容矩阵。

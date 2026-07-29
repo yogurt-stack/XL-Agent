@@ -107,7 +107,7 @@ jobs:
       - name: Verify packaged ASAR
         run: npm run verify:windows-packaging -- release/win-unpacked
 
-      - name: Smoke packaged Electron app
+      - name: Run packaged offline Demo flow
         run: npm run test:packaged:win
 
       - name: Upload Windows demo artifacts
