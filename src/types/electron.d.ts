@@ -25,6 +25,21 @@ declare global {
       dispatchAgentEvent: (event: AgentUserEvent) => Promise<AgentRuntimeSnapshotResult>;
       retryTaskLocally: () => Promise<AgentRuntimeSnapshotResult>;
       testModelConnection: () => Promise<AgentRuntimeSnapshotResult>;
+      resetDemoData: () => Promise<
+        | {
+            ok: true;
+            snapshot: AgentRuntimeSnapshot;
+            reset: {
+              resetAt: string;
+              removedRecords: number;
+              cleanupWarning: string | null;
+            };
+          }
+        | {
+            ok: false;
+            error: { code: string; message: string; retriable: boolean };
+          }
+      >;
       onAgentRuntimeSnapshot: (
         listener: (snapshot: AgentRuntimeSnapshot) => void
       ) => () => void;

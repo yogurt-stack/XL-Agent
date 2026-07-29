@@ -20,6 +20,8 @@ let modelConnection = {
   configured: true,
   endpointHost: "models.example.test",
   model: "renderer-smoke-model",
+  providerId: "openai-compatible",
+  endpointMode: "endpoint",
   lastCheckedAt: null
 };
 
@@ -32,7 +34,21 @@ const runtimeSnapshot = () => ({
     lastSavedAt: latestTaskState.taskId === "unassigned"
       ? null
       : "2026-07-24T00:00:00.000Z",
+    lastResetAt: null,
+    lastResetRemovedRecords: 0,
     error: null
+  },
+  capabilities: {
+    domainSkills: [
+      { id: "ai-development-environment", displayName: "AI 开发环境" },
+      { id: "research-data-environment", displayName: "科研数据环境" }
+    ],
+    sourceProviders: [{ id: "trusted-catalog" }],
+    workspaceTemplates: [
+      { id: "ai-development-workspace" },
+      { id: "research-data-workspace" },
+      { id: "user-provided-links-workspace" }
+    ]
   }
 });
 
@@ -74,6 +90,16 @@ ipcMain.handle("agent:testModelConnection", () => {
   broadcastRuntimeSnapshot();
   return { ok: true, snapshot: runtimeSnapshot() };
 });
+
+ipcMain.handle("agent:resetDemoData", () => ({
+  ok: true,
+  snapshot: runtimeSnapshot(),
+  reset: {
+    resetAt: "2026-07-29T00:00:00.000Z",
+    removedRecords: 0,
+    cleanupWarning: null
+  }
+}));
 
 ipcMain.handle("agent:listTaskHistory", () => ({
   ok: true,

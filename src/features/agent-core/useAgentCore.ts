@@ -1,14 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createInitialAgentState } from "./machine";
 import type { ModelConnectionState } from "./modelConnection";
-import type { AgentRuntimeSnapshot } from "./runtimeBridge";
+import type {
+  AgentRuntimeSnapshot,
+  PlatformCapabilitySummary
+} from "./runtimeBridge";
 import type { AgentState, AgentUserEvent } from "./types";
 
 export type PersistenceViewState = {
   status: "browser_only" | "loading" | "ready" | "error";
   restoredAt: string | null;
   lastSavedAt: string | null;
+  lastResetAt: string | null;
+  lastResetRemovedRecords: number;
   error: string | null;
+};
+
+const browserCapabilities: PlatformCapabilitySummary = {
+  domainSkills: [],
+  sourceProviders: [],
+  workspaceTemplates: []
 };
 
 function createInitialModelConnectionState(
@@ -21,6 +32,8 @@ function createInitialModelConnectionState(
         configured: false,
         endpointHost: null,
         model: null,
+        providerId: null,
+        endpointMode: null,
         lastCheckedAt: null
       }
     : {
@@ -29,6 +42,8 @@ function createInitialModelConnectionState(
         configured: false,
         endpointHost: null,
         model: null,
+        providerId: null,
+        endpointMode: null,
         lastCheckedAt: null,
         error: {
           code: "MODEL_BRIDGE_UNAVAILABLE",
@@ -56,15 +71,20 @@ export function useAgentCore() {
       status: bridge ? "loading" : "browser_only",
       restoredAt: null,
       lastSavedAt: null,
+      lastResetAt: null,
+      lastResetRemovedRecords: 0,
       error: bridge ? null : "浏览器模式不运行 Agent Runtime。"
     })
   );
+  const [capabilities, setCapabilities] =
+    useState<PlatformCapabilitySummary>(browserCapabilities);
 
   const applySnapshot = useCallback((snapshot: AgentRuntimeSnapshot) => {
     stateRef.current = snapshot.state;
     setState(snapshot.state);
     setModelConnectionState(snapshot.modelConnection);
     setPersistenceState(snapshot.persistence);
+    setCapabilities(snapshot.capabilities);
   }, []);
 
   const dispatch = useCallback(
@@ -97,6 +117,22 @@ export function useAgentCore() {
     const result = await bridge.retryTaskLocally();
     if (result.ok) applySnapshot(result.snapshot);
     return stateRef.current;
+  }, [applySnapshot, bridge]);
+
+  const resetDemoData = useCallback(async () => {
+    if (!bridge) {
+      return {
+        ok: false as const,
+        error: {
+          code: "ELECTRON_BRIDGE_UNAVAILABLE",
+          message: "浏览器模式不能重置 Electron Demo 数据。",
+          retriable: false
+        }
+      };
+    }
+    const result = await bridge.resetDemoData();
+    if (result.ok) applySnapshot(result.snapshot);
+    return result;
   }, [applySnapshot, bridge]);
 
   const flushPersistence = useCallback(async () => {
@@ -200,8 +236,10 @@ export function useAgentCore() {
     dispatch,
     modelConnectionState,
     persistenceState,
+    capabilities,
     testModelConnection,
     retryTaskLocally,
+    resetDemoData,
     flushPersistence,
     readWorkspaceFile,
     openWorkspace,

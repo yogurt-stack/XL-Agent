@@ -293,11 +293,11 @@ try {
   });
   const freshSchema = await store.getSchemaInfo();
   assert(
-    freshSchema.version === 4 &&
+    freshSchema.version === 5 &&
       freshSchema.supportedVersion === TASK_STORE_SCHEMA_VERSION &&
-      freshSchema.migrations.length === 4 &&
-      freshSchema.migrations[3].name === "p1-supply-chain-resilience",
-    "Fresh stores must apply and record SQLite schema v4"
+      freshSchema.migrations.length === 5 &&
+      freshSchema.migrations[4].name === "p3-demo-operations",
+    "Fresh stores must apply and record SQLite schema v5"
   );
 
   await store.saveSnapshot(exportSnapshot);
@@ -387,9 +387,10 @@ try {
   });
   const migratedSchema = await migratedLegacyStore.getSchemaInfo();
   assert(
-    migratedSchema.version === 4 &&
-      migratedSchema.migrations.some((migration) => migration.version === 4),
-    "A v1 database must migrate forward to v4"
+    migratedSchema.version === 5 &&
+      migratedSchema.migrations.some((migration) => migration.version === 4) &&
+      migratedSchema.migrations.some((migration) => migration.version === 5),
+    "A v1 database must migrate forward to v5"
   );
   assert(
     (await migratedLegacyStore.getTaskState(exportSnapshot.taskId))?.taskId === exportSnapshot.taskId,
@@ -416,5 +417,5 @@ try {
 }
 
 console.log(
-  "Persistence passed: SQLite v4 tasks/artifacts, atomic workspace export, recovery, catalog-pinned approvals and expiry verified"
+  "Persistence passed: SQLite v5 tasks/artifacts, atomic workspace export, recovery, catalog-pinned approvals, demo reset and expiry verified"
 );

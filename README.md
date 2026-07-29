@@ -30,6 +30,9 @@
 - 目录条目 `active/deprecated/revoked` 生命周期、审批目录版本固定和 P1 供应链操作审计
 - Windows Authenticode、预期发布者与 SHA256 三层制品校验，以及可失败关闭的平台边界
 - HTTP Range / If-Range 断点恢复；服务端忽略 Range 时安全重下，区间不一致时拒绝写入
+- 已安装的科研数据第二 Domain Skill、专属工作区模板与 Main 动态能力清单
+- OpenAI-compatible Endpoint/Base URL 双配置模式和未知 Provider 失败关闭
+- SQLite v5 两步 Demo 重置、维护审计与 Windows x64 NSIS/ZIP 打包链路
 
 ## P0 资源编排
 
@@ -57,6 +60,28 @@ P1 在保持“只准备资源、不自动安装或执行”的前提下完成�
 签名检查是 Electron Main 内部的固定用途系统检查：它只调用固定编码的 `Get-AuthenticodeSignature` 读取系统信任结果，文件绝对路径通过子进程环境变量传递，不接受模型、用户或资源内容提供的命令文本，也不注册 Shell/PowerShell Tool。非 Windows 主机对 `required` Authenticode 返回 `unavailable` 并失败关闭；测试只能通过显式注入的验证器替身覆盖该平台边界。
 
 完整实现与验收矩阵见 [`docs/p1-supply-chain-resilience-2026-07-26.md`](docs/p1-supply-chain-resilience-2026-07-26.md)。
+
+## P2 平台扩展
+
+P2 将原计划中的“第二领域 Skill 不修改 Core”从单元测试骨架提升为默认产品能力：
+
+1. `research-data-environment` 拥有独立匹配、澄清、能力需求、指南和 `research-data-workspace` 模板。
+2. 离线模型对所有 Domain Skill 统一按能力集合选择 active 可信资源，不再把新领域重新解释成旧 AI 开发意图。
+3. Main 进程通过 Runtime snapshot 发布 Skill、Source Provider 和 Workspace Template 清单；首页和设置页不再硬编码已安装能力。
+4. 远程模型支持完整 Endpoint 或 Base URL 二选一；当前只注册 `openai-compatible`，配置冲突和未知 Provider 都会失败关闭。
+
+完整说明见 [`docs/p2-platform-extensibility-2026-07-29.md`](docs/p2-platform-extensibility-2026-07-29.md)。
+
+## P3 Demo 与 Windows 分发
+
+P3 完成原计划阶段 5 的 Demo 重置、固定演示脚本与 Windows 打包：
+
+1. 设置页两步确认后，由 Main 在 SQLite v5 事务中清除任务运行数据；独立维护事件保留重置时间和数量。
+2. 文件清理只覆盖应用管理的临时下载与默认工作区，显式配置或用户自选目录不会被递归删除。
+3. `electron-builder` 生成 Windows x64 NSIS、ZIP 与 unpacked 应用；ASAR 验证明确拒绝 `.env`。
+4. CI 在全新 Windows runner 上构建、验包并启动打包后的 exe，再上传 14 天内部 Demo 产物。
+
+当前产物未配置项目签名证书，只是内部 unsigned Demo；公开发布前仍需签名和 Windows 11 实体机验收。完整说明见 [`docs/p3-demo-distribution-2026-07-29.md`](docs/p3-demo-distribution-2026-07-29.md)，固定演示流程见 [`docs/p3-three-minute-demo-script.md`](docs/p3-three-minute-demo-script.md)。
 
 ## 启动
 
@@ -108,10 +133,11 @@ E2E 固定单 worker 运行，显式禁用远程模型配置，并向真实 Elec
 
 ## 持续集成
 
-GitHub Actions 会在推送到 `main`、针对 `main` 的 Pull Request 以及手动触发时运行两个独立 Job：
+GitHub Actions 会在推送到 `main`、针对 `main` 的 Pull Request 以及手动触发时运行三个独立 Job：
 
-- `quality`：类型检查、Vitest 覆盖率、Agent Core、模型客户端、下载客户端、SQLite、P0 资源编排、P1 供应链恢复和 production build。
+- `quality`：类型检查、Vitest 覆盖率、Agent Core、模型客户端、下载客户端、SQLite、P0/P1/P2/P3 专项验证、Windows 打包配置和 production build。
 - `electron-e2e`：在 Linux Xvfb 环境中运行 Electron 状态机、恢复、Agent B、历史查阅、无障碍扫描和视觉基线比较。
+- `windows-package`：在 Windows x64 runner 构建 NSIS/ZIP，检查 ASAR 和密钥排除，启动 packaged exe 并上传 unsigned Demo 产物。
 
 本地可以运行与快速质量门禁相同的命令：
 
@@ -127,6 +153,9 @@ Electron E2E 失败时，CI 会保留 `playwright-report/`、`test-results/`、�
 npm run verify:agent-core
 npm run verify:p0-resource-orchestration
 npm run verify:p1-supply-chain-resilience
+npm run verify:p2-platform-extensibility
+npm run verify:p3-demo-distribution
+npm run verify:windows-packaging
 ```
 
 该场景覆盖未知/重复资源、任务能力和依赖闭包、系统/来源/授权策略、revision 审批绑定、必需资源取消、下载失败暂停、主来源重试、可信替代来源、Agent B 未完成交接和最终 Manifest。
@@ -136,14 +165,19 @@ npm run verify:p1-supply-chain-resilience
 默认不需要任何配置，应用使用 `LocalRuleModelRuntime` 离线运行。若要连接兼容 Chat Completions 请求格式的 HTTPS 模型端点，在项目根目录 `.env` 中填写：
 
 ```dotenv
+XL_AGENT_LLM_PROVIDER=openai-compatible
+
+# 下面二选一
 XL_AGENT_LLM_ENDPOINT=https://your-model-host.example/v1/chat/completions
+# XL_AGENT_LLM_BASE_URL=https://your-model-host.example/v1
+
 XL_AGENT_LLM_MODEL=your-model-id
 XL_AGENT_LLM_API_KEY=your-secret
 ```
 
 可参考 `.env.example`。保存后需要重新运行 `npm run dev`，因为 Electron 主进程只在启动时加载 `.env`。这些变量只由 Electron 主进程读取，不使用 `VITE_` 前缀，也不会进入 renderer bundle。远程请求失败、未配置或返回结构不合法时，`FallbackModelRuntime` 会自动使用本地规则模型继续演示。
 
-应用顶部和“设置”页面会显示当前 provider、脱敏端点主机、模型 ID 和回退原因。“测试连接”会通过 Electron 主进程验证 HTTPS、鉴权、Chat Completions 响应和原生 `tool_call` 结构，API Key 不会返回 renderer。远程失败后当前任务会使用本地规则模型，避免每个模型步骤重复等待失败端点；重新测试成功后恢复远程优先。
+Endpoint 与 Base URL 只能配置一个；Base URL 会由 Main 规范化并追加 `/chat/completions`。应用顶部和“设置”页面会显示当前 provider、端点模式、脱敏主机、模型 ID 和回退原因。“测试连接”会通过 Electron 主进程验证 HTTPS、鉴权、Chat Completions 响应和原生 `tool_call` 结构，API Key 不会返回 renderer。远程失败后当前任务会使用本地规则模型，避免每个模型步骤重复等待失败端点；重新测试成功后恢复远程优先。
 
 模型连接和 Electron renderer 验证：
 
@@ -185,7 +219,7 @@ Windows Authenticode 与预期发布者匹配；`checksum-only` 只声明上游�
 
 ## SQLite 与历史任务
 
-Electron 主进程使用 `sql.js` 将任务数据写入 `agent-tasks.sqlite`。默认位置是 Electron `userData` 目录，也可通过 `XL_AGENT_TASK_STORE_PATH` 指定绝对路径。当前 schema v4 包含：
+Electron 主进程使用 `sql.js` 将任务数据写入 `agent-tasks.sqlite`。默认位置是 Electron `userData` 目录，也可通过 `XL_AGENT_TASK_STORE_PATH` 指定绝对路径。当前 schema v5 包含：
 
 - `task_snapshots`：每个 task ID 最近一次完整状态快照。
 - `approval_records`：按 task ID 和 revision 保存本地用户审批、目录版本与目录源码哈希。
@@ -195,12 +229,28 @@ Electron 主进程使用 `sql.js` 将任务数据写入 `agent-tasks.sqlite`。�
 - `resource_manifest_snapshots`：保存独立 Manifest revision、plan revision、整体状态和落盘目录。
 - `agent_b_runs`：保存 Agent B grant、工具结果、结构化答案与失败原因。
 - `operation_events`：保存目录固定/拒绝、断点创建/恢复与签名通过/拒绝事件。
+- `maintenance_events`：独立保存 Demo 重置时间、操作者和清理数量，不会被重置操作自身删除。
 - `workspace_exports`：按 task ID 和 revision 保存的工作区导出结果。
 - `schema_migrations`：数据库迁移版本和执行记录。
 
 侧边栏“历史”页面会按最近保存时间倒序读取任务，显示最新阶段、资源进度、审批、工作区导出、模型/工具审计和运行日志。该页面只有查询权限，不会恢复旧快照、切换当前任务、删除数据或触发模型与工具。
 
 历史任务在当前版本中表示“每个任务的最新快照”，不是每次状态转换的完整事件流。实现与后续边界见 [`docs/task-history-implementation-plan-2026-07-25.md`](docs/task-history-implementation-plan-2026-07-25.md)。
+
+## Windows 打包
+
+```bash
+# 生成可启动的 win-unpacked，适合验包
+npm run package:win:dir
+
+# 生成 NSIS 安装器、ZIP 和 win-unpacked
+npm run package:win
+
+npm run verify:windows-packaging -- release/win-unpacked
+npm run test:packaged:win
+```
+
+`release/` 不进入版本管理。CI 产物当前未签名；不能将其描述为正式公开发行版。生产依赖审计命令为 `npm audit --omit=dev`，构建工具链的完整审计边界见 P3 文档。
 
 ## Agent Runtime 接口
 
@@ -227,6 +277,7 @@ React 不再创建或持有 Runtime；Renderer 只通过 preload 白名单桥接
 
 ```text
 xunlei-ai-task-agent/
+  electron-builder.config.cjs
   catalog/
     trusted-resources.json
     trusted-resources.schema.json

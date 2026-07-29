@@ -83,3 +83,40 @@ jobs:
             test-results/
           if-no-files-found: ignore
           retention-days: 14
+
+  windows-package:
+    name: Windows x64 package and smoke
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Build NSIS and ZIP
+        run: npm run package:win
+
+      - name: Verify packaged ASAR
+        run: npm run verify:windows-packaging -- release/win-unpacked
+
+      - name: Smoke packaged Electron app
+        run: npm run test:packaged:win
+
+      - name: Upload Windows demo artifacts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-x64-demo-unsigned
+          path: |
+            release/*.exe
+            release/*.zip
+          if-no-files-found: error
+          retention-days: 14

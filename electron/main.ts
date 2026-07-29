@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { config as loadEnv } from "dotenv";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { ZodError } from "zod";
@@ -58,6 +58,43 @@ function getWorkspaceRoot() {
   return configuredRoot && path.isAbsolute(configuredRoot)
     ? configuredRoot
     : path.join(app.getPath("userData"), "workspaces");
+}
+
+async function cleanupManagedDemoFiles() {
+  const roots: Array<{ root: string; parent: string }> = [
+    {
+      root: path.join(os.tmpdir(), "xunlei-ai-task-agent-downloads"),
+      parent: os.tmpdir()
+    }
+  ];
+  if (!process.env.XL_AGENT_WORKSPACE_ROOT) {
+    roots.push({
+      root: getWorkspaceRoot(),
+      parent: app.getPath("userData")
+    });
+  }
+  if (
+    process.env.NODE_ENV === "test" &&
+    process.env.XL_AGENT_E2E_DOWNLOAD_FIXTURE === "1"
+  ) {
+    roots.push({
+      root: path.join(os.tmpdir(), "xunlei-agent-e2e"),
+      parent: os.tmpdir()
+    });
+  }
+
+  for (const candidate of roots) {
+    const relative = path.relative(candidate.parent, candidate.root);
+    if (
+      !path.isAbsolute(candidate.root) ||
+      !relative ||
+      relative.startsWith("..") ||
+      path.isAbsolute(relative)
+    ) {
+      throw new Error("Demo 重置拒绝清理受控目录之外的路径。");
+    }
+    await rm(candidate.root, { force: true, recursive: true });
+  }
 }
 
 function getTaskRevisionInput(value: unknown) {
@@ -193,6 +230,7 @@ function getAgentRuntimeHost() {
         modelClient: remoteModelClient,
         workspaceRoot: getWorkspaceRoot(),
         performDownload: performTrustedDownload,
+        cleanupManagedDemoFiles,
         onSnapshot: broadcastRuntimeSnapshot
       })
     );
@@ -317,6 +355,43 @@ ipcMain.handle("agent:testModelConnection", async () => {
         code: "AGENT_RUNTIME_UNAVAILABLE" as const,
         message: error instanceof Error ? error.message : "模型连接测试失败。",
         retriable: true
+      }
+    };
+  }
+});
+
+ipcMain.handle("agent:resetDemoData", async (_event, input: unknown) => {
+  const confirmation =
+    typeof input === "object" &&
+    input !== null &&
+    !Array.isArray(input) &&
+    (input as Record<string, unknown>).confirmation ===
+      "RESET_DEMO_DATA";
+  if (!confirmation) {
+    return {
+      ok: false as const,
+      error: {
+        code: "DEMO_RESET_CONFIRMATION_REQUIRED",
+        message: "Demo 数据重置需要显式确认。",
+        retriable: false
+      }
+    };
+  }
+  try {
+    return {
+      ok: true as const,
+      ...(await (await getAgentRuntimeHost()).resetDemoData())
+    };
+  } catch (error) {
+    return {
+      ok: false as const,
+      error: {
+        code: "DEMO_RESET_REJECTED",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Electron Main 拒绝重置 Demo 数据。",
+        retriable: false
       }
     };
   }

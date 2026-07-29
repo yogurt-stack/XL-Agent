@@ -201,8 +201,71 @@ export class AiDevelopmentEnvironmentSkill implements DomainSkill {
   }
 }
 
+const researchKeywords = [
+  "科研",
+  "研究环境",
+  "论文复现",
+  "数据分析",
+  "数据科学",
+  "jupyter",
+  "notebook",
+  "research"
+];
+
+export class ResearchDataEnvironmentSkill implements DomainSkill {
+  readonly id = "research-data-environment";
+  readonly displayName = "科研数据环境";
+
+  matches(goal: UserGoal) {
+    const task = normalizedTask(goal.text);
+    return researchKeywords.some((keyword) => task.includes(keyword));
+  }
+
+  clarify(_goal: UserGoal, _profile: SystemProfile) {
+    return [{
+      id: "research-template",
+      prompt: "科研数据环境是否需要包含可验证的示例工作区？",
+      reason: "示例工作区便于后续 Agent 核对资源交接；只准备基础工具时可以省略。",
+      required: true,
+      options: ["包含示例工作区", "只准备科研基础工具"]
+    }];
+  }
+
+  buildRequirements(context: PlanningContext): ResourceRequirement[] {
+    const requirements: ResourceRequirement[] = [
+      { capability: "python-runtime", required: true },
+      { capability: "code-editor", required: true },
+      { capability: "source-control", required: true }
+    ];
+    if (
+      context.answers["research-template"] !==
+      "只准备科研基础工具"
+    ) {
+      requirements.push({
+        capability: "workspace-template",
+        required: true
+      });
+    }
+    return requirements;
+  }
+
+  generateGuide(context: WorkspaceContext): WorkspaceGuide {
+    return {
+      title: "科研数据资源工作区",
+      summary:
+        "已准备经过可信目录校验的 Python、编辑器与版本管理资源；数据分析包仍需由用户后续人工配置。",
+      nextActions: [
+        `先核对 ${context.requirements.label} 的 resource-manifest.json。`,
+        "按 README.md 人工安装基础工具，再创建隔离的 Python 环境。",
+        "不要把资源已准备描述为科研环境已经安装完成。"
+      ]
+    };
+  }
+}
+
 export function createDefaultDomainSkillRegistry() {
   return new DomainSkillRegistry([
+    new ResearchDataEnvironmentSkill(),
     new AiDevelopmentEnvironmentSkill()
   ]);
 }

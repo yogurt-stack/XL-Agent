@@ -35,6 +35,7 @@ import {
 } from "../features/agent-core/catalog";
 import { createResourceManifest } from "../features/agent-core/manifest";
 import type { ModelConnectionState } from "../features/agent-core/modelConnection";
+import type { PlatformCapabilitySummary } from "../features/agent-core/runtimeBridge";
 import type { PersistenceViewState } from "../features/agent-core/useAgentCore";
 import {
   estimatedMinutes,
@@ -170,11 +171,11 @@ export function AgentTopBar({
   );
 }
 
-export function AgentHomeView({ state, dispatch, onNavigate }: { state: AgentState; dispatch: Dispatch; onNavigate: Navigate }) {
+export function AgentHomeView({ capabilities, state, dispatch, onNavigate }: { capabilities: PlatformCapabilitySummary; state: AgentState; dispatch: Dispatch; onNavigate: Navigate }) {
   const recentTasks = [
     "帮我准备一个 Windows 下的 AI 开发环境",
     "为全栈 AI 原型准备 Windows 工具链",
-    "准备可交接的 Python AI 示例项目"
+    "准备一个科研数据分析工作区"
   ];
   const downloadCount = state.resources.filter((resource) => resource.status === "downloading").length;
   const taskSubmissionLocked =
@@ -215,7 +216,14 @@ export function AgentHomeView({ state, dispatch, onNavigate }: { state: AgentSta
         </section>
         <section className="agent-panel">
           <div className="agent-panel-heading"><Route size={17} /><h2>支持的领域 Skill</h2></div>
-          <div className="skill-list"><span><Bot size={16} />Windows AI 开发环境</span><span><GitBranch size={16} />可信资源准备</span><span><PackageCheck size={16} />工作区交接</span></div>
+          <div className="skill-list">
+            {capabilities.domainSkills.length
+              ? capabilities.domainSkills.map((skill) => (
+                  <span key={skill.id}><Bot size={16} />{skill.displayName}</span>
+                ))
+              : <span><Bot size={16} />等待 Main 进程能力清单</span>}
+            <span><GitBranch size={16} />{capabilities.sourceProviders.length} 个 Provider · {capabilities.workspaceTemplates.length} 个模板</span>
+          </div>
         </section>
         <section className="agent-panel agent-download-summary">
           <div className="agent-panel-heading"><Gauge size={17} /><h2>当前下载状态</h2></div>
@@ -525,12 +533,29 @@ export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: 
 }
 
 export function SettingsView({
+  capabilities,
   modelConnection,
+  onResetDemoData,
   onTestConnection,
   persistence,
   state
 }: {
+  capabilities: PlatformCapabilitySummary;
   modelConnection: ModelConnectionState;
+  onResetDemoData: () => Promise<
+    | {
+        ok: true;
+        reset: {
+          resetAt: string;
+          removedRecords: number;
+          cleanupWarning: string | null;
+        };
+      }
+    | {
+        ok: false;
+        error: { code: string; message: string; retriable: boolean };
+      }
+  >;
   onTestConnection: () => Promise<ModelConnectionState>;
   persistence: PersistenceViewState;
   state: AgentState;
@@ -538,6 +563,29 @@ export function SettingsView({
   const meta = modelConnectionMeta[modelConnection.status];
   const testing = modelConnection.status === "checking";
   const canTest = modelConnection.configured && !testing;
+  const [resetArmed, setResetArmed] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [resetMessage, setResetMessage] = useState<string | null>(null);
+  const resetBlocked =
+    state.phase === "downloading" ||
+    state.phase === "verifying" ||
+    state.phase === "exporting" ||
+    state.agentB.status === "running";
+
+  const confirmReset = async () => {
+    setResetting(true);
+    setResetMessage(null);
+    const result = await onResetDemoData();
+    setResetting(false);
+    setResetArmed(false);
+    setResetMessage(
+      result.ok
+        ? result.reset.cleanupWarning
+          ? `SQLite 已重置，但文件清理需要人工检查：${result.reset.cleanupWarning}`
+          : `Demo 数据已重置，共清除 ${result.reset.removedRecords} 条运行记录。`
+        : `${result.error.code}: ${result.error.message}`
+    );
+  };
 
   return (
     <section className="agent-view settings-center">
@@ -562,7 +610,15 @@ export function SettingsView({
           <div className="settings-section-heading"><ShieldCheck size={17} /><div><h2>安全配置摘要</h2><span>API Key 不会通过 contextBridge 暴露给 renderer。</span></div></div>
           <div className="settings-row"><div><strong>端点主机</strong><span>仅显示 hostname，不展示完整请求路径。</span></div><code>{modelConnection.endpointHost ?? "未配置"}</code></div>
           <div className="settings-row"><div><strong>模型 ID</strong><span>由 XL_AGENT_LLM_MODEL 提供。</span></div><code>{modelConnection.model ?? "未配置"}</code></div>
+          <div className="settings-row"><div><strong>Provider</strong><span>只加载 Main 进程注册的模型协议适配器。</span></div><code>{modelConnection.providerId ?? "未配置"}</code></div>
+          <div className="settings-row"><div><strong>端点模式</strong><span>Base URL 会在 Main 进程规范化为 Chat Completions 路径。</span></div><code>{modelConnection.endpointMode ?? "未配置"}</code></div>
           <div className="settings-row"><div><strong>配置方式</strong><span>修改项目根目录 .env 后需要重启 Electron 主进程。</span></div><code>主进程环境变量</code></div>
+        </section>
+        <section className="settings-section">
+          <div className="settings-section-heading"><Route size={17} /><div><h2>平台扩展能力</h2><span>清单由 Main 进程注册表生成；Renderer 不自行声明已安装能力。</span></div></div>
+          <div className="settings-row"><div><strong>Domain Skills</strong><span>{capabilities.domainSkills.map((skill) => skill.displayName).join("、") || "尚未加载"}</span></div><code>{capabilities.domainSkills.length}</code></div>
+          <div className="settings-row"><div><strong>Source Providers</strong><span>{capabilities.sourceProviders.map((provider) => provider.id).join("、") || "尚未加载"}</span></div><code>{capabilities.sourceProviders.length}</code></div>
+          <div className="settings-row"><div><strong>Workspace Templates</strong><span>{capabilities.workspaceTemplates.map((template) => template.id).join("、") || "尚未加载"}</span></div><code>{capabilities.workspaceTemplates.length}</code></div>
         </section>
         <section className="settings-section">
           <div className="settings-section-heading"><PackageCheck size={17} /><div><h2>可信目录与制品校验</h2><span>审批固定目录版本；Windows 制品在 SHA256 后继续校验系统 Authenticode 与发布者。</span></div></div>
@@ -583,6 +639,24 @@ export function SettingsView({
           <div className="settings-row"><div><strong>持久化状态</strong><span>{persistence.error ?? "任务状态在每次状态转换后保存。"}</span></div><code>{persistence.status}</code></div>
           <div className="settings-row"><div><strong>最近保存</strong><span>保存内容包含恢复上下文和当前 revision。</span></div><code>{persistence.lastSavedAt ? new Date(persistence.lastSavedAt).toLocaleString("zh-CN") : "尚未保存"}</code></div>
           <div className="settings-row"><div><strong>最近恢复</strong><span>只自动恢复未完成任务；已交接或取消任务不会自动恢复。</span></div><code>{persistence.restoredAt ? new Date(persistence.restoredAt).toLocaleString("zh-CN") : "本次未恢复"}</code></div>
+          <div className="settings-row"><div><strong>最近 Demo 重置</strong><span>维护审计会保留，但任务、审批、下载和工作区记录会清空。</span></div><code>{persistence.lastResetAt ? `${new Date(persistence.lastResetAt).toLocaleString("zh-CN")} · ${persistence.lastResetRemovedRecords} 条` : "尚未重置"}</code></div>
+          {!resetArmed ? (
+            <button className="btn btn-ghost" disabled={resetBlocked || resetting} type="button" onClick={() => setResetArmed(true)}>
+              <RefreshCw size={16} />重置 Demo 数据
+            </button>
+          ) : (
+            <div className="failure-resolution-panel" role="alert">
+              <p>这会永久清除 SQLite 中的任务、审批、下载、Manifest、Agent B 和工作区记录，并删除应用管理的 Demo 文件；不会删除用户自选目录。</p>
+              <div className="failure-actions">
+                <button className="btn btn-primary" disabled={resetting} type="button" onClick={() => void confirmReset()}>
+                  {resetting ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+                  {resetting ? "正在重置" : "确认永久清除"}
+                </button>
+                <button className="btn btn-ghost" disabled={resetting} type="button" onClick={() => setResetArmed(false)}>取消</button>
+              </div>
+            </div>
+          )}
+          {resetMessage ? <p aria-live="polite" className="agent-empty-copy">{resetMessage}</p> : null}
         </section>
       </div>
     </section>

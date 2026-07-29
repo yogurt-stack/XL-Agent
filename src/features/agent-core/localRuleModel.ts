@@ -173,16 +173,9 @@ export class LocalRuleModelRuntime implements ModelRuntime {
     }
 
     if (state.taskRequirements?.intent.startsWith("skill:")) {
-      const inferredIntent = inferLocalTaskIntent(
-        state.task,
-        workloadAnswerFrom(state)
+      const resourceIds = resourceIdsForCapabilities(
+        state.taskRequirements.requiredCapabilities
       );
-      const resourceIds =
-        inferredIntent === "ambiguous"
-          ? resourceIdsForCapabilities(
-              state.taskRequirements.requiredCapabilities
-            )
-          : resourceIdsForTaskIntent(inferredIntent, state.answers);
       if (!hasSuccessfulResult(context.toolResults, "search_trusted_catalog")) {
         return createDecision(
           context,

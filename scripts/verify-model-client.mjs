@@ -26,6 +26,7 @@ const assert = (condition, message) => {
   if (!condition) throw new Error(message);
 };
 const environment = {
+  XL_AGENT_LLM_PROVIDER: "openai-compatible",
   XL_AGENT_LLM_ENDPOINT: "https://models.example.test/v1/chat/completions",
   XL_AGENT_LLM_API_KEY: "test-secret-that-must-not-leak",
   XL_AGENT_LLM_MODEL: "test-model"
@@ -73,6 +74,49 @@ const missingInfo = missingConfig.getSafeConnectionInfo();
 assert(
   !missingInfo.configured && missingInfo.error?.code === "MODEL_UNCONFIGURED",
   "Missing configuration must be reported safely"
+);
+
+let baseUrlRequest = "";
+const baseUrlClient = new RemoteModelClient(
+  {
+    ...environment,
+    XL_AGENT_LLM_ENDPOINT: "",
+    XL_AGENT_LLM_BASE_URL: "https://models.example.test/v1/"
+  },
+  async (input) => {
+    baseUrlRequest = String(input);
+    return toolResponse("base-url-test", "finish", {
+      summary: "Connection test succeeded.",
+      explanation: "Connection test succeeded."
+    });
+  }
+);
+await baseUrlClient.testConnection();
+assert(
+  baseUrlRequest ===
+    "https://models.example.test/v1/chat/completions" &&
+    baseUrlClient.getSafeConnectionInfo().endpointMode === "base-url",
+  "Base URL mode must append the Chat Completions path in Main."
+);
+
+const conflictingConfig = new RemoteModelClient({
+  ...environment,
+  XL_AGENT_LLM_BASE_URL: "https://models.example.test/v1"
+});
+assert(
+  conflictingConfig.getSafeConnectionInfo().error?.code ===
+    "MODEL_CONFIGURATION_CONFLICT",
+  "Endpoint and Base URL must not be accepted together."
+);
+
+const unsupportedProvider = new RemoteModelClient({
+  ...environment,
+  XL_AGENT_LLM_PROVIDER: "unregistered"
+});
+assert(
+  unsupportedProvider.getSafeConnectionInfo().error?.code ===
+    "MODEL_PROVIDER_UNSUPPORTED",
+  "Unregistered provider adapters must fail closed."
 );
 
 const invalidEndpoint = new RemoteModelClient(
@@ -246,5 +290,5 @@ assert(
 );
 
 console.log(
-  "Remote model client passed: native tools/tool_calls, strict schemas, configuration and safe errors verified"
+  "Remote model client passed: native tools/tool_calls, strict schemas, provider/Base URL configuration and safe errors verified"
 );
