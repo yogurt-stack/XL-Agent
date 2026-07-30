@@ -68,7 +68,7 @@ export type TrustedResourceVerification = {
   checksumSourceUrl: string;
   signatureType: "authenticode" | "upstream-release" | "none";
   expectedPublisher?: string;
-  signatureEnforcement: "planned" | "not-applicable";
+  signatureEnforcement: "required" | "checksum-only" | "not-applicable";
 };
 
 export type LocalTaskIntent = "python-ai" | "fullstack-ai" | "base-development" | "ambiguous";
@@ -147,7 +147,9 @@ export type TrustedResource = {
   supportedOperatingSystems: TargetOperatingSystem[];
   supportedArchitectures: TargetArchitecture[];
   sourceTrust: ResourceSourceTrust;
-  catalogStatus: "active";
+  catalogStatus: "active" | "deprecated" | "revoked";
+  statusReason?: string;
+  replacedBy?: string;
   verification: TrustedResourceVerification;
   download: TrustedDownloadMetadata;
   fallbackId?: string;
@@ -405,6 +407,7 @@ export type ControlledDownloadOutput = {
   sha256: string;
   tempFilePath: string;
   elapsedMs: number;
+  resumedFromBytes?: number;
 };
 
 export type ControlledDownloadError = {

@@ -57,7 +57,11 @@ describe("agent state machine", () => {
 
     expect(profiled.systemProfile).toEqual(initial.systemProfile);
     expect(profiled.hostProfile).toEqual(linuxHostProfile);
-    expect(profiled.agentRun.toolResults.at(-1)?.output).toMatchObject({
+    expect(
+      profiled.agentRun.toolResults[
+        profiled.agentRun.toolResults.length - 1
+      ]?.output
+    ).toMatchObject({
       hostProfile: linuxHostProfile,
       planningProfileSource: "locked-demo-target"
     });
@@ -76,7 +80,8 @@ describe("agent state machine", () => {
     const staleApproval = transition(waitingApproval, { type: "APPROVE_PLAN", revision: 0 });
     expect(staleApproval.phase).toBe("waiting_approval");
     expect(staleApproval.approvedRevision).toBeNull();
-    expect(staleApproval.logs.at(-1)?.message).toContain("审批被拒绝");
+    expect(staleApproval.logs[staleApproval.logs.length - 1]?.message)
+      .toContain("审批被拒绝");
 
     const approved = transition(staleApproval, { type: "APPROVE_PLAN", revision: 1 });
     expect(approved.phase).toBe("downloading");

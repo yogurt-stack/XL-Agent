@@ -1,4 +1,5 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import initSqlJs = require("sql.js/dist/sql-asm.js");
 import type { Database, ParamsObject, SqlValue } from "sql.js";
@@ -21,6 +22,7 @@ import {
   type ManifestSnapshotRecord,
   type ResourceManifestSnapshot
 } from "./manifestSnapshots";
+import { trustedCatalogMetadata } from "./trustedDownloadCatalog";
 
 export type PersistedAgentState = WorkspaceSnapshot & {
   activeResourceId: string | null;
@@ -42,6 +44,8 @@ export type ApprovalRecord = {
   approvedAt: string;
   expiresAt: string;
   status: "active" | "expired" | "revoked";
+  catalogVersion: string;
+  catalogSourceSha256: string;
 };
 
 export type RestoredTask = {
@@ -72,6 +76,7 @@ export type TaskHistoryDetail = {
   approvals: ApprovalRecord[];
   workspaceExports: WorkspaceExportOutput[];
   downloadArtifacts: DownloadArtifactRecord[];
+  operationEvents: OperationEventRecord[];
 };
 
 export type TaskStoreOptions = {
@@ -80,7 +85,7 @@ export type TaskStoreOptions = {
   now?: () => number;
 };
 
-export const TASK_STORE_SCHEMA_VERSION = 3;
+export const TASK_STORE_SCHEMA_VERSION = 5;
 
 export type TaskStoreSchemaInfo = {
   version: number;
@@ -90,6 +95,20 @@ export type TaskStoreSchemaInfo = {
     name: string;
     appliedAt: string;
   }>;
+};
+
+export type MaintenanceEventRecord = {
+  eventId: string;
+  eventType: "demo-reset";
+  detail: unknown;
+  createdAt: string;
+};
+
+export type DemoResetResult = {
+  eventId: string;
+  resetAt: string;
+  removedRecords: number;
+  removedByTable: Record<string, number>;
 };
 
 export type AgentBRunRecord = {
@@ -106,7 +125,35 @@ export type AgentBRunRecord = {
   completedAt: string | null;
 };
 
+export type OperationEventRecord = {
+  eventId: string;
+  taskId: string;
+  revision: number;
+  resourceId: string | null;
+  eventType:
+    | "catalog-approval-pinned"
+    | "catalog-pin-rejected"
+    | "download-checkpointed"
+    | "download-resumed"
+    | "signature-verified"
+    | "signature-rejected";
+  outcome: "success" | "denied" | "error";
+  detail: unknown;
+  createdAt: string;
+};
+
 const terminalPhases = new Set(["intake", "unsupported", "handoff", "cancelled"]);
+const demoDataTables = [
+  "agent_b_runs",
+  "operation_events",
+  "resource_manifest_snapshots",
+  "local_artifacts",
+  "download_tasks",
+  "download_artifacts",
+  "workspace_exports",
+  "approval_records",
+  "task_snapshots"
+] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -161,6 +208,35 @@ function firstRow(
     return statement.step() ? statement.getAsObject() : null;
   } finally {
     statement.free();
+  }
+}
+
+function tableHasColumn(
+  database: Database,
+  tableName: string,
+  columnName: string
+) {
+  const statement = database.prepare(`PRAGMA table_info(${tableName})`);
+  try {
+    while (statement.step()) {
+      if (asString(statement.getAsObject().name) === columnName) return true;
+    }
+    return false;
+  } finally {
+    statement.free();
+  }
+}
+
+function addColumnIfMissing(
+  database: Database,
+  tableName: string,
+  columnName: string,
+  declaration: string
+) {
+  if (!tableHasColumn(database, tableName, columnName)) {
+    database.run(
+      `ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${declaration}`
+    );
   }
 }
 
@@ -223,7 +299,24 @@ function isDownloadArtifactRecord(
       value.verificationStatus === "local-verified" ||
       value.verificationStatus === "test-fixture") &&
     typeof value.verifiedAt === "string" &&
-    Number.isFinite(Date.parse(value.verifiedAt))
+    Number.isFinite(Date.parse(value.verifiedAt)) &&
+    (value.signatureStatus === "pending" ||
+      value.signatureStatus === "valid" ||
+      value.signatureStatus === "invalid" ||
+      value.signatureStatus === "unsigned" ||
+      value.signatureStatus === "unavailable" ||
+      value.signatureStatus === "not-applicable") &&
+    (value.expectedPublisher === null ||
+      typeof value.expectedPublisher === "string") &&
+    (value.actualPublisher === null ||
+      typeof value.actualPublisher === "string") &&
+    (value.certificateThumbprint === null ||
+      typeof value.certificateThumbprint === "string") &&
+    (value.signatureMessage === null ||
+      typeof value.signatureMessage === "string") &&
+    (value.signatureCheckedAt === null ||
+      (typeof value.signatureCheckedAt === "string" &&
+        Number.isFinite(Date.parse(value.signatureCheckedAt))))
   );
 }
 
@@ -241,7 +334,13 @@ function downloadArtifactFromRow(
     sha256: asString(row.sha256),
     expectedSha256: asString(row.expected_sha256),
     verificationStatus: asString(row.verification_status),
-    verifiedAt: asString(row.verified_at)
+    verifiedAt: asString(row.verified_at),
+    signatureStatus: asString(row.signature_status),
+    expectedPublisher: asString(row.expected_publisher),
+    actualPublisher: asString(row.actual_publisher),
+    certificateThumbprint: asString(row.certificate_thumbprint),
+    signatureMessage: asString(row.signature_message),
+    signatureCheckedAt: asString(row.signature_checked_at)
   };
   return isDownloadArtifactRecord(candidate) ? candidate : null;
 }
@@ -296,6 +395,10 @@ function downloadTaskFromRow(row: ParamsObject): DownloadTaskRecord | null {
     tempFilePath: asString(row.temp_file_path),
     errorCode: asString(row.error_code),
     errorMessage: asString(row.error_message),
+    resumeEtag: asString(row.resume_etag),
+    resumeLastModified: asString(row.resume_last_modified),
+    resumeCapable: asNumber(row.resume_capable) === 1,
+    resumedFromBytes: asNumber(row.resumed_from_bytes) ?? 0,
     createdAt,
     updatedAt
   };
@@ -549,6 +652,84 @@ const schemaMigrations: SchemaMigration[] = [
           ON agent_b_runs (task_id, plan_revision);
       `);
     }
+  },
+  {
+    version: 4,
+    name: "p1-supply-chain-resilience",
+    up(database) {
+      addColumnIfMissing(
+        database,
+        "approval_records",
+        "catalog_version",
+        "TEXT NOT NULL DEFAULT 'legacy-unpinned'"
+      );
+      addColumnIfMissing(
+        database,
+        "approval_records",
+        "catalog_source_sha256",
+        "TEXT NOT NULL DEFAULT 'legacy-unpinned'"
+      );
+      addColumnIfMissing(
+        database,
+        "download_artifacts",
+        "signature_status",
+        "TEXT NOT NULL DEFAULT 'pending'"
+      );
+      addColumnIfMissing(database, "download_artifacts", "expected_publisher", "TEXT");
+      addColumnIfMissing(database, "download_artifacts", "actual_publisher", "TEXT");
+      addColumnIfMissing(database, "download_artifacts", "certificate_thumbprint", "TEXT");
+      addColumnIfMissing(database, "download_artifacts", "signature_message", "TEXT");
+      addColumnIfMissing(database, "download_artifacts", "signature_checked_at", "TEXT");
+      addColumnIfMissing(database, "download_tasks", "resume_etag", "TEXT");
+      addColumnIfMissing(database, "download_tasks", "resume_last_modified", "TEXT");
+      addColumnIfMissing(
+        database,
+        "download_tasks",
+        "resume_capable",
+        "INTEGER NOT NULL DEFAULT 0"
+      );
+      addColumnIfMissing(
+        database,
+        "download_tasks",
+        "resumed_from_bytes",
+        "INTEGER NOT NULL DEFAULT 0"
+      );
+      database.run(`
+        CREATE TABLE IF NOT EXISTS operation_events (
+          event_id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL,
+          revision INTEGER NOT NULL,
+          resource_id TEXT,
+          event_type TEXT NOT NULL,
+          outcome TEXT NOT NULL,
+          detail_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS operation_events_task
+          ON operation_events (task_id, revision, created_at);
+
+        UPDATE approval_records
+        SET status = 'revoked'
+        WHERE status = 'active'
+          AND catalog_version = 'legacy-unpinned';
+      `);
+    }
+  },
+  {
+    version: 5,
+    name: "p3-demo-operations",
+    up(database) {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS maintenance_events (
+          event_id TEXT PRIMARY KEY,
+          event_type TEXT NOT NULL,
+          detail_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS maintenance_events_created
+          ON maintenance_events (created_at, event_id);
+      `);
+    }
   }
 ];
 
@@ -644,6 +825,17 @@ export class TaskStore {
          WHERE status IN ('downloading', 'paused')`,
         [new Date(resolvedOptions.now()).toISOString()]
       );
+      database.run(
+        `UPDATE approval_records
+         SET status = 'revoked'
+         WHERE status = 'active'
+           AND task_id IN (
+             SELECT DISTINCT task_id
+             FROM download_tasks
+             WHERE status = 'interrupted'
+               AND error_code = 'APPLICATION_RESTARTED'
+           )`
+      );
     } catch (error) {
       database.close();
       throw error;
@@ -660,6 +852,169 @@ export class TaskStore {
       () => undefined
     );
     return result;
+  }
+
+  private insertOperationEvent(
+    value: Omit<OperationEventRecord, "eventId"> & { eventId?: string }
+  ) {
+    const eventId = value.eventId ?? `operation-${randomUUID()}`;
+    this.database.run(
+      `INSERT INTO operation_events (
+        event_id, task_id, revision, resource_id, event_type,
+        outcome, detail_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        eventId,
+        value.taskId,
+        value.revision,
+        value.resourceId,
+        value.eventType,
+        value.outcome,
+        JSON.stringify(value.detail),
+        value.createdAt
+      ]
+    );
+    return eventId;
+  }
+
+  private listOperationEventsFromDatabase(taskId: string) {
+    const records: OperationEventRecord[] = [];
+    const statement = this.database.prepare(
+      `SELECT event_id, task_id, revision, resource_id, event_type,
+              outcome, detail_json, created_at
+       FROM operation_events
+       WHERE task_id = ?
+       ORDER BY created_at DESC, event_id DESC`
+    );
+    try {
+      statement.bind([taskId]);
+      while (statement.step()) {
+        const row = statement.getAsObject();
+        const eventId = asString(row.event_id);
+        const storedTaskId = asString(row.task_id);
+        const revision = asNumber(row.revision);
+        const eventType = asString(row.event_type) as
+          | OperationEventRecord["eventType"]
+          | null;
+        const outcome = asString(row.outcome) as
+          | OperationEventRecord["outcome"]
+          | null;
+        const createdAt = asString(row.created_at);
+        if (
+          !eventId ||
+          !storedTaskId ||
+          revision === null ||
+          !eventType ||
+          !outcome ||
+          !createdAt
+        ) {
+          continue;
+        }
+        records.push({
+          eventId,
+          taskId: storedTaskId,
+          revision,
+          resourceId: asString(row.resource_id),
+          eventType,
+          outcome,
+          detail: parseJson(asString(row.detail_json)),
+          createdAt
+        });
+      }
+    } finally {
+      statement.free();
+    }
+    return records;
+  }
+
+  async recordOperationEvent(
+    value: Omit<OperationEventRecord, "eventId">
+  ) {
+    return this.enqueue(async () => {
+      const eventId = this.insertOperationEvent(value);
+      await this.persist();
+      return eventId;
+    });
+  }
+
+  async listOperationEvents(taskId: string) {
+    return this.enqueue(() =>
+      this.listOperationEventsFromDatabase(taskId)
+    );
+  }
+
+  async getLatestMaintenanceEvent(): Promise<MaintenanceEventRecord | null> {
+    return this.enqueue(() => {
+      const row = firstRow(
+        this.database,
+        `SELECT event_id, event_type, detail_json, created_at
+         FROM maintenance_events
+         ORDER BY created_at DESC, event_id DESC
+         LIMIT 1`
+      );
+      const eventId = row ? asString(row.event_id) : null;
+      const eventType = row ? asString(row.event_type) : null;
+      const createdAt = row ? asString(row.created_at) : null;
+      const detail = row ? parseJson(asString(row.detail_json)) : null;
+      if (!eventId || eventType !== "demo-reset" || !createdAt) return null;
+      return {
+        eventId,
+        eventType,
+        detail,
+        createdAt
+      };
+    });
+  }
+
+  async resetDemoData(): Promise<DemoResetResult> {
+    return this.enqueue(async () => {
+      const resetAt = new Date(this.options.now()).toISOString();
+      const eventId = `maintenance-${randomUUID()}`;
+      const removedByTable: Record<string, number> = {};
+      for (const table of demoDataTables) {
+        const row = firstRow(
+          this.database,
+          `SELECT COUNT(*) AS record_count FROM ${table}`
+        );
+        removedByTable[table] = row
+          ? asNumber(row.record_count) ?? 0
+          : 0;
+      }
+      const removedRecords = Object.values(removedByTable)
+        .reduce((total, count) => total + count, 0);
+
+      this.database.run("BEGIN IMMEDIATE");
+      try {
+        for (const table of demoDataTables) {
+          this.database.run(`DELETE FROM ${table}`);
+        }
+        this.database.run(
+          `INSERT INTO maintenance_events (
+            event_id, event_type, detail_json, created_at
+          ) VALUES (?, 'demo-reset', ?, ?)`,
+          [
+            eventId,
+            JSON.stringify({
+              actor: "local-user",
+              removedRecords,
+              removedByTable
+            }),
+            resetAt
+          ]
+        );
+        this.database.run("COMMIT");
+      } catch (error) {
+        this.database.run("ROLLBACK");
+        throw error;
+      }
+      await this.persist();
+      return {
+        eventId,
+        resetAt,
+        removedRecords,
+        removedByTable
+      };
+    });
   }
 
   private async persist() {
@@ -732,17 +1087,39 @@ export class TaskStore {
           const expiresAt = new Date(nowMs + this.options.approvalTtlMs).toISOString();
           this.database.run(
             `INSERT INTO approval_records (
-              task_id, revision, actor, approved_at, expires_at, status
-            ) VALUES (?, ?, 'local-user', ?, ?, 'active')
+              task_id, revision, actor, approved_at, expires_at, status,
+              catalog_version, catalog_source_sha256
+            ) VALUES (?, ?, 'local-user', ?, ?, 'active', ?, ?)
             ON CONFLICT(task_id, revision) DO UPDATE SET
               actor = excluded.actor,
               approved_at = excluded.approved_at,
               expires_at = excluded.expires_at,
-              status = 'active'
+              status = 'active',
+              catalog_version = excluded.catalog_version,
+              catalog_source_sha256 = excluded.catalog_source_sha256
             WHERE approval_records.status != 'active'
                OR approval_records.expires_at <= excluded.approved_at`,
-            [state.taskId, state.revision, savedAt, expiresAt]
+            [
+              state.taskId,
+              state.revision,
+              savedAt,
+              expiresAt,
+              trustedCatalogMetadata.catalogVersion,
+              trustedCatalogMetadata.sourceSha256
+            ]
           );
+          this.insertOperationEvent({
+            taskId: state.taskId,
+            revision: state.revision,
+            resourceId: null,
+            eventType: "catalog-approval-pinned",
+            outcome: "success",
+            detail: {
+              catalogVersion: trustedCatalogMetadata.catalogVersion,
+              sourceSha256: trustedCatalogMetadata.sourceSha256
+            },
+            createdAt: savedAt
+          });
           for (const resource of state.resources) {
             if (
               !resource.selected ||
@@ -754,7 +1131,10 @@ export class TaskStore {
             const previousArtifact = firstRow(
               this.database,
               `SELECT file_name, source_host, temp_file_path, bytes_written,
-                      sha256, expected_sha256, verification_status, verified_at
+                      sha256, expected_sha256, verification_status, verified_at,
+                      signature_status, expected_publisher, actual_publisher,
+                      certificate_thumbprint, signature_message,
+                      signature_checked_at
                FROM download_artifacts
                WHERE task_id = ? AND resource_id = ? AND revision < ?
                ORDER BY revision DESC
@@ -766,8 +1146,10 @@ export class TaskStore {
               `INSERT OR IGNORE INTO download_artifacts (
                 task_id, revision, resource_id, file_name, source_host,
                 temp_file_path, bytes_written, sha256, expected_sha256,
-                verification_status, verified_at
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                verification_status, verified_at, signature_status,
+                expected_publisher, actual_publisher, certificate_thumbprint,
+                signature_message, signature_checked_at
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               [
                 state.taskId,
                 state.revision,
@@ -779,7 +1161,13 @@ export class TaskStore {
                 asString(previousArtifact.sha256),
                 asString(previousArtifact.expected_sha256),
                 asString(previousArtifact.verification_status),
-                asString(previousArtifact.verified_at)
+                asString(previousArtifact.verified_at),
+                asString(previousArtifact.signature_status),
+                asString(previousArtifact.expected_publisher),
+                asString(previousArtifact.actual_publisher),
+                asString(previousArtifact.certificate_thumbprint),
+                asString(previousArtifact.signature_message),
+                asString(previousArtifact.signature_checked_at)
               ]
             );
           }
@@ -822,14 +1210,19 @@ export class TaskStore {
         ? "expired"
         : storedStatus === "revoked"
           ? "revoked"
-          : "active"
+          : "active",
+      catalogVersion:
+        asString(row.catalog_version) ?? "legacy-unpinned",
+      catalogSourceSha256:
+        asString(row.catalog_source_sha256) ?? "legacy-unpinned"
     };
   }
 
   private approvalRecord(taskId: string, revision: number): ApprovalRecord | null {
     const row = firstRow(
       this.database,
-      `SELECT task_id, revision, actor, approved_at, expires_at, status
+      `SELECT task_id, revision, actor, approved_at, expires_at, status,
+              catalog_version, catalog_source_sha256
        FROM approval_records
        WHERE task_id = ? AND revision = ?`,
       [taskId, revision]
@@ -855,10 +1248,18 @@ export class TaskStore {
 
   async hasValidApproval(taskId: string, revision: number) {
     const record = await this.getApproval(taskId, revision);
+    const catalogPinned =
+      record?.catalogVersion === trustedCatalogMetadata.catalogVersion &&
+      record.catalogSourceSha256 === trustedCatalogMetadata.sourceSha256;
     return {
-      valid: record?.status === "active",
+      valid: record?.status === "active" && catalogPinned,
       expiresAt: record?.expiresAt ?? null,
-      status: record?.status ?? "missing"
+      status:
+        record?.status === "active" && !catalogPinned
+          ? "catalog-mismatch"
+          : record?.status ?? "missing",
+      catalogVersion: record?.catalogVersion ?? null,
+      catalogSourceSha256: record?.catalogSourceSha256 ?? null
     };
   }
 
@@ -951,7 +1352,8 @@ export class TaskStore {
 
       const approvals: ApprovalRecord[] = [];
       const approvalStatement = this.database.prepare(
-        `SELECT task_id, revision, actor, approved_at, expires_at, status
+        `SELECT task_id, revision, actor, approved_at, expires_at, status,
+                catalog_version, catalog_source_sha256
          FROM approval_records
          WHERE task_id = ?
          ORDER BY revision DESC`
@@ -991,7 +1393,9 @@ export class TaskStore {
       const artifactStatement = this.database.prepare(
         `SELECT task_id, revision, resource_id, file_name, source_host,
                 temp_file_path, bytes_written, sha256, expected_sha256,
-                verification_status, verified_at
+                verification_status, verified_at, signature_status,
+                expected_publisher, actual_publisher, certificate_thumbprint,
+                signature_message, signature_checked_at
          FROM download_artifacts
          WHERE task_id = ?
          ORDER BY revision DESC, resource_id`
@@ -1013,7 +1417,8 @@ export class TaskStore {
         state,
         approvals,
         workspaceExports,
-        downloadArtifacts
+        downloadArtifacts,
+        operationEvents: this.listOperationEventsFromDatabase(taskId)
       };
     });
   }
@@ -1036,8 +1441,9 @@ export class TaskStore {
         `INSERT INTO download_tasks (
           task_id, revision, resource_id, status, progress, bytes_written,
           total_bytes, speed_bytes_per_second, eta_seconds, temp_file_path,
-          error_code, error_message, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          error_code, error_message, resume_etag, resume_last_modified,
+          resume_capable, resumed_from_bytes, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(task_id, revision, resource_id) DO UPDATE SET
           status = excluded.status,
           progress = excluded.progress,
@@ -1048,6 +1454,10 @@ export class TaskStore {
           temp_file_path = excluded.temp_file_path,
           error_code = excluded.error_code,
           error_message = excluded.error_message,
+          resume_etag = excluded.resume_etag,
+          resume_last_modified = excluded.resume_last_modified,
+          resume_capable = excluded.resume_capable,
+          resumed_from_bytes = excluded.resumed_from_bytes,
           updated_at = excluded.updated_at`,
         [
           value.taskId,
@@ -1062,6 +1472,10 @@ export class TaskStore {
           value.tempFilePath,
           value.errorCode,
           value.errorMessage,
+          value.resumeEtag ?? null,
+          value.resumeLastModified ?? null,
+          value.resumeCapable ? 1 : 0,
+          value.resumedFromBytes ?? 0,
           value.createdAt,
           value.updatedAt
         ]
@@ -1201,6 +1615,11 @@ export class TaskStore {
       | "totalBytes"
       | "speedBytesPerSecond"
       | "etaSeconds"
+      | "tempFilePath"
+      | "resumeEtag"
+      | "resumeLastModified"
+      | "resumeCapable"
+      | "resumedFromBytes"
       | "updatedAt"
     >
   ) {
@@ -1211,7 +1630,9 @@ export class TaskStore {
       this.database.run(
         `UPDATE download_tasks
          SET status = ?, progress = ?, bytes_written = ?, total_bytes = ?,
-             speed_bytes_per_second = ?, eta_seconds = ?, updated_at = ?
+             speed_bytes_per_second = ?, eta_seconds = ?, temp_file_path = ?,
+             resume_etag = ?, resume_last_modified = ?, resume_capable = ?,
+             resumed_from_bytes = ?, updated_at = ?
          WHERE task_id = ? AND revision = ? AND resource_id = ?`,
         [
           value.status,
@@ -1220,6 +1641,11 @@ export class TaskStore {
           value.totalBytes,
           value.speedBytesPerSecond,
           value.etaSeconds,
+          value.tempFilePath,
+          value.resumeEtag,
+          value.resumeLastModified,
+          value.resumeCapable ? 1 : 0,
+          value.resumedFromBytes,
           value.updatedAt,
           value.taskId,
           value.revision,
@@ -1349,8 +1775,10 @@ export class TaskStore {
         `INSERT INTO download_artifacts (
           task_id, revision, resource_id, file_name, source_host,
           temp_file_path, bytes_written, sha256, expected_sha256,
-          verification_status, verified_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          verification_status, verified_at, signature_status,
+          expected_publisher, actual_publisher, certificate_thumbprint,
+          signature_message, signature_checked_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(task_id, revision, resource_id) DO UPDATE SET
           file_name = excluded.file_name,
           source_host = excluded.source_host,
@@ -1359,7 +1787,13 @@ export class TaskStore {
           sha256 = excluded.sha256,
           expected_sha256 = excluded.expected_sha256,
           verification_status = excluded.verification_status,
-          verified_at = excluded.verified_at`,
+          verified_at = excluded.verified_at,
+          signature_status = excluded.signature_status,
+          expected_publisher = excluded.expected_publisher,
+          actual_publisher = excluded.actual_publisher,
+          certificate_thumbprint = excluded.certificate_thumbprint,
+          signature_message = excluded.signature_message,
+          signature_checked_at = excluded.signature_checked_at`,
         [
           value.taskId,
           value.revision,
@@ -1371,7 +1805,13 @@ export class TaskStore {
           value.sha256.toLowerCase(),
           value.expectedSha256.toLowerCase(),
           value.verificationStatus,
-          value.verifiedAt
+          value.verifiedAt,
+          value.signatureStatus,
+          value.expectedPublisher,
+          value.actualPublisher,
+          value.certificateThumbprint,
+          value.signatureMessage,
+          value.signatureCheckedAt
         ]
       );
       await this.persist();
@@ -1384,7 +1824,9 @@ export class TaskStore {
       const statement = this.database.prepare(
         `SELECT task_id, revision, resource_id, file_name, source_host,
                 temp_file_path, bytes_written, sha256, expected_sha256,
-                verification_status, verified_at
+                verification_status, verified_at, signature_status,
+                expected_publisher, actual_publisher, certificate_thumbprint,
+                signature_message, signature_checked_at
          FROM download_artifacts
          WHERE task_id = ? AND revision = ?
          ORDER BY resource_id`
@@ -1426,6 +1868,61 @@ export class TaskStore {
     });
   }
 
+  async updateDownloadArtifactSignature(
+    taskId: string,
+    revision: number,
+    resourceId: string,
+    result: {
+      status: DownloadArtifactRecord["signatureStatus"];
+      expectedPublisher: string | null;
+      actualPublisher: string | null;
+      certificateThumbprint: string | null;
+      message: string | null;
+      checkedAt: string;
+    }
+  ) {
+    return this.enqueue(async () => {
+      this.database.run(
+        `UPDATE download_artifacts
+         SET signature_status = ?, expected_publisher = ?,
+             actual_publisher = ?, certificate_thumbprint = ?,
+             signature_message = ?, signature_checked_at = ?
+         WHERE task_id = ? AND revision = ? AND resource_id = ?`,
+        [
+          result.status,
+          result.expectedPublisher,
+          result.actualPublisher,
+          result.certificateThumbprint,
+          result.message,
+          result.checkedAt,
+          taskId,
+          revision,
+          resourceId
+        ]
+      );
+      this.insertOperationEvent({
+        taskId,
+        revision,
+        resourceId,
+        eventType:
+          result.status === "valid"
+            ? "signature-verified"
+            : result.status === "not-applicable"
+              ? "signature-verified"
+              : "signature-rejected",
+        outcome:
+          result.status === "valid" || result.status === "not-applicable"
+            ? "success"
+            : result.status === "unavailable"
+              ? "error"
+              : "denied",
+        detail: result,
+        createdAt: result.checkedAt
+      });
+      await this.persist();
+    });
+  }
+
   async createManifestSnapshotRecord(
     state: PersistedAgentState
   ): Promise<ManifestSnapshotRecord> {
@@ -1444,7 +1941,9 @@ export class TaskStore {
       const artifactStatement = this.database.prepare(
         `SELECT task_id, revision, resource_id, file_name, source_host,
                 temp_file_path, bytes_written, sha256, expected_sha256,
-                verification_status, verified_at
+                verification_status, verified_at, signature_status,
+                expected_publisher, actual_publisher, certificate_thumbprint,
+                signature_message, signature_checked_at
          FROM download_artifacts
          WHERE task_id = ? AND revision = ?
          ORDER BY resource_id`

@@ -157,6 +157,12 @@ function createArtifact(taskId = "task-persistence", revision = 2, overrides = {
     expectedSha256: artifactSha256,
     verificationStatus: "verified",
     verifiedAt: "2026-07-24T00:00:00.000Z",
+    signatureStatus: "not-applicable",
+    expectedPublisher: null,
+    actualPublisher: null,
+    certificateThumbprint: null,
+    signatureMessage: "not applicable",
+    signatureCheckedAt: "2026-07-24T00:00:00.000Z",
     ...overrides
   };
 }
@@ -287,11 +293,11 @@ try {
   });
   const freshSchema = await store.getSchemaInfo();
   assert(
-    freshSchema.version === 3 &&
+    freshSchema.version === 5 &&
       freshSchema.supportedVersion === TASK_STORE_SCHEMA_VERSION &&
-      freshSchema.migrations.length === 3 &&
-      freshSchema.migrations[2].name === "p0-resource-orchestration",
-    "Fresh stores must apply and record SQLite schema v3"
+      freshSchema.migrations.length === 5 &&
+      freshSchema.migrations[4].name === "p3-demo-operations",
+    "Fresh stores must apply and record SQLite schema v5"
   );
 
   await store.saveSnapshot(exportSnapshot);
@@ -381,9 +387,10 @@ try {
   });
   const migratedSchema = await migratedLegacyStore.getSchemaInfo();
   assert(
-    migratedSchema.version === 3 &&
-      migratedSchema.migrations.some((migration) => migration.version === 3),
-    "A v1 database must migrate forward to v3"
+    migratedSchema.version === 5 &&
+      migratedSchema.migrations.some((migration) => migration.version === 4) &&
+      migratedSchema.migrations.some((migration) => migration.version === 5),
+    "A v1 database must migrate forward to v5"
   );
   assert(
     (await migratedLegacyStore.getTaskState(exportSnapshot.taskId))?.taskId === exportSnapshot.taskId,
@@ -410,5 +417,5 @@ try {
 }
 
 console.log(
-  "Persistence passed: SQLite v3 tasks/artifacts, atomic workspace export, recovery and approval expiry verified"
+  "Persistence passed: SQLite v5 tasks/artifacts, atomic workspace export, recovery, catalog-pinned approvals, demo reset and expiry verified"
 );

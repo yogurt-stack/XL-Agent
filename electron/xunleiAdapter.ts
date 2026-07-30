@@ -71,6 +71,23 @@ export class LocalXunleiAdapter {
     }
 
     const startedAt = this.now().toISOString();
+    const previous = (
+      await this.options.store.listDownloadTasks(
+        input.taskId,
+        input.revision
+      )
+    ).find((record) => record.resourceId === input.resourceId);
+    const resume =
+      previous?.tempFilePath &&
+      previous.bytesWritten > 0 &&
+      previous.resumeCapable &&
+      (previous.status === "interrupted" || previous.status === "failed")
+        ? {
+            tempFilePath: previous.tempFilePath,
+            etag: previous.resumeEtag,
+            lastModified: previous.resumeLastModified
+          }
+        : undefined;
     const control: ActiveDownloadControl = {
       taskId: input.taskId,
       revision: input.revision,
@@ -85,20 +102,25 @@ export class LocalXunleiAdapter {
       revision: input.revision,
       resourceId: input.resourceId,
       status: "downloading",
-      progress: 0,
-      bytesWritten: 0,
-      totalBytes: null,
+      progress: resume ? previous?.progress ?? 0 : 0,
+      bytesWritten: resume ? previous?.bytesWritten ?? 0 : 0,
+      totalBytes: resume ? previous?.totalBytes ?? null : null,
       speedBytesPerSecond: 0,
       etaSeconds: null,
-      tempFilePath: null,
+      tempFilePath: resume?.tempFilePath ?? null,
       errorCode: null,
       errorMessage: null,
-      createdAt: startedAt,
+      resumeEtag: resume?.etag ?? null,
+      resumeLastModified: resume?.lastModified ?? null,
+      resumeCapable: Boolean(resume),
+      resumedFromBytes: resume ? previous?.bytesWritten ?? 0 : 0,
+      createdAt: previous?.createdAt ?? startedAt,
       updatedAt: startedAt
     });
 
     let lastPersistedProgress = -1;
     let lastPersistedAt = 0;
+    let checkpointRecorded = Boolean(resume);
     const reportProgress = async (progress: ControlledDownloadProgress) => {
       const now = this.now();
       const record: DownloadTaskProgress = {
@@ -110,7 +132,12 @@ export class LocalXunleiAdapter {
         bytesWritten: progress.bytesWritten,
         totalBytes: progress.totalBytes,
         speedBytesPerSecond: progress.speedBytesPerSecond,
-        etaSeconds: progress.etaSeconds
+        etaSeconds: progress.etaSeconds,
+        tempFilePath: progress.tempFilePath,
+        resumeEtag: progress.etag,
+        resumeLastModified: progress.lastModified,
+        resumeCapable: progress.resumeCapable,
+        resumedFromBytes: progress.resumedFromBytes
       };
       const shouldPersist =
         progress.progress >= lastPersistedProgress + 2 ||
@@ -123,14 +150,38 @@ export class LocalXunleiAdapter {
           ...record,
           updatedAt: now.toISOString()
         });
+        if (
+          !checkpointRecorded &&
+          record.resumeCapable &&
+          record.bytesWritten > 0
+        ) {
+          checkpointRecorded = true;
+          await this.options.store.recordOperationEvent({
+            taskId: input.taskId,
+            revision: input.revision,
+            resourceId: input.resourceId,
+            eventType: "download-checkpointed",
+            outcome: "success",
+            detail: {
+              bytesWritten: record.bytesWritten,
+              validator: record.resumeEtag
+                ? "etag"
+                : record.resumeLastModified
+                  ? "last-modified"
+                  : "range-only"
+            },
+            createdAt: now.toISOString()
+          });
+        }
       }
     };
 
     try {
       const executionOptions: ControlledDownloadOptions = {
-          signal: control.abortController.signal,
-          waitIfPaused: () => this.waitIfPaused(control),
-          onProgress: reportProgress
+        signal: control.abortController.signal,
+        waitIfPaused: () => this.waitIfPaused(control),
+        onProgress: reportProgress,
+        resume
       };
       const result = this.options.performDownload
         ? await this.options.performDownload(
@@ -164,6 +215,7 @@ export class LocalXunleiAdapter {
         return result;
       }
       const output = result.output;
+      const resumedFromBytes = output.resumedFromBytes ?? 0;
       const completedAt = this.now().toISOString();
       await this.options.store.completeDownloadTask({
         taskId: input.taskId,
@@ -182,8 +234,24 @@ export class LocalXunleiAdapter {
         bytesWritten: output.bytesWritten,
         totalBytes: output.bytesWritten,
         speedBytesPerSecond: 0,
-        etaSeconds: 0
+        etaSeconds: 0,
+        tempFilePath: output.tempFilePath,
+        resumeEtag: null,
+        resumeLastModified: null,
+        resumeCapable: resumedFromBytes > 0,
+        resumedFromBytes
       });
+      if (resumedFromBytes > 0) {
+        await this.options.store.recordOperationEvent({
+          taskId: input.taskId,
+          revision: input.revision,
+          resourceId: input.resourceId,
+          eventType: "download-resumed",
+          outcome: "success",
+          detail: { resumedFromBytes },
+          createdAt: completedAt
+        });
+      }
       return { ok: true, output };
     } catch (error) {
       const detail = toControlledDownloadError(error);
@@ -274,6 +342,10 @@ export class LocalXunleiAdapter {
       tempFilePath: null,
       errorCode: null,
       errorMessage: null,
+      resumeEtag: null,
+      resumeLastModified: null,
+      resumeCapable: false,
+      resumedFromBytes: 0,
       createdAt: now,
       updatedAt: now
     };

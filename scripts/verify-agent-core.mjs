@@ -414,7 +414,9 @@ const configuredConnection = new ModelConnectionController(
     getConnectionInfo: async () => ({
       configured: true,
       endpointHost: "models.example.test",
-      model: "remote-test"
+      model: "remote-test",
+      providerId: "openai-compatible",
+      endpointMode: "endpoint"
     }),
     testConnection: async () => ({ ok: true })
   },
@@ -438,7 +440,9 @@ const failedConnection = new ModelConnectionController(
     getConnectionInfo: async () => ({
       configured: true,
       endpointHost: "models.example.test",
-      model: "remote-test"
+      model: "remote-test",
+      providerId: "openai-compatible",
+      endpointMode: "endpoint"
     }),
     testConnection: async () => ({
       ok: false,
@@ -460,7 +464,9 @@ const fallbackConnection = new ModelConnectionController({
   getConnectionInfo: async () => ({
     configured: true,
     endpointHost: "models.example.test",
-    model: "remote-test"
+    model: "remote-test",
+    providerId: "openai-compatible",
+    endpointMode: "endpoint"
   }),
   testConnection: async () => ({ ok: true })
 });

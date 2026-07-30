@@ -19,8 +19,10 @@ export function App() {
     dispatch,
     modelConnectionState,
     persistenceState,
+    capabilities,
     testModelConnection,
     retryTaskLocally,
+    resetDemoData,
     readWorkspaceFile,
     openWorkspace,
     selectLocalResources,
@@ -42,13 +44,13 @@ export function App() {
       <Sidebar activeView={activeView} onViewChange={setActiveView} />
       <AgentTopBar modelConnection={modelConnectionState} state={state} />
       <main className="main-panel" ref={mainPanelRef}>
-        {activeView === "home" && <AgentHomeView dispatch={dispatch} state={state} onNavigate={setActiveView} />}
+        {activeView === "home" && <AgentHomeView capabilities={capabilities} dispatch={dispatch} state={state} onNavigate={setActiveView} />}
         {activeView === "clarification" && <ClarificationView dispatch={dispatch} state={state} onNavigate={setActiveView} onRetryLocally={retryTaskLocally} />}
         {activeView === "plan" && <ResourcePlanView dispatch={dispatch} state={state} onNavigate={setActiveView} onSelectLocalResources={selectLocalResources} onSelectWorkspaceRoot={selectWorkspaceRoot} />}
         {activeView === "execution" && <ExecutionView dispatch={dispatch} state={state} onNavigate={setActiveView} modelConnection={modelConnectionState} />}
         {activeView === "workspace" && <WorkspaceView dispatch={dispatch} onOpenWorkspace={openWorkspace} onReadFile={readWorkspaceFile} onSelectWorkspaceRoot={selectWorkspaceRoot} state={state} />}
         {activeView === "history" && <TaskHistoryView historyState={historyState} />}
-        {activeView === "settings" && <SettingsView modelConnection={modelConnectionState} onTestConnection={testModelConnection} persistence={persistenceState} state={state} />}
+        {activeView === "settings" && <SettingsView capabilities={capabilities} modelConnection={modelConnectionState} onResetDemoData={resetDemoData} onTestConnection={testModelConnection} persistence={persistenceState} state={state} />}
       </main>
     </div>
   );

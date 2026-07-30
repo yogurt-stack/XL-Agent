@@ -133,6 +133,8 @@ Agent B 没有 `controlled_download`、`export_workspace`、Shell、安装或写
 
 ## 9. P0 之外
 
+> 更新：Windows Authenticode 强制校验和 HTTP Range 跨重启续传已在后续 P1 完成，详见 `docs/p1-supply-chain-resilience-2026-07-26.md`。下列清单保留用于说明 P0 当时的交付边界。
+
 以下功能明确不属于本次交付：
 
 - 自动安装、解压或执行下载资源。

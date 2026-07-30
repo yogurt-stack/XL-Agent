@@ -76,6 +76,24 @@ contextBridge.exposeInMainWorld("xunleiAgent", {
     ipcRenderer.invoke("agent:retryTaskLocally") as Promise<AgentRuntimeSnapshotResult>,
   testModelConnection: () =>
     ipcRenderer.invoke("agent:testModelConnection") as Promise<AgentRuntimeSnapshotResult>,
+  resetDemoData: () =>
+    ipcRenderer.invoke("agent:resetDemoData", {
+      confirmation: "RESET_DEMO_DATA"
+    }) as Promise<
+      | {
+          ok: true;
+          snapshot: AgentRuntimeSnapshot;
+          reset: {
+            resetAt: string;
+            removedRecords: number;
+            cleanupWarning: string | null;
+          };
+        }
+      | {
+          ok: false;
+          error: { code: string; message: string; retriable: boolean };
+        }
+    >,
   onAgentRuntimeSnapshot: (listener: (snapshot: AgentRuntimeSnapshot) => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, snapshot: AgentRuntimeSnapshot) => {
       listener(snapshot);

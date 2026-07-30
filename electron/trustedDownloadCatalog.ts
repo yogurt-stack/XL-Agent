@@ -1,6 +1,6 @@
 import {
   trustedCatalogMetadata,
-  trustedDownloads
+  trustedResources
 } from "./generatedTrustedDownloadCatalog";
 
 export type TrustedDownloadMetadata = {
@@ -13,6 +13,20 @@ export type TrustedDownloadMetadata = {
 export type TrustedCatalogStatus = "active" | "not-yet-valid" | "expired" | "invalid";
 
 export { trustedCatalogMetadata };
+
+export type TrustedSignatureMetadata = {
+  signatureType: "authenticode" | "upstream-release" | "none";
+  expectedPublisher?: string;
+  signatureEnforcement: "required" | "checksum-only" | "not-applicable";
+};
+
+export type TrustedResourceMetadata = {
+  catalogStatus: "active" | "deprecated" | "revoked";
+  statusReason?: string;
+  replacedBy?: string;
+  verification: TrustedSignatureMetadata;
+  download: TrustedDownloadMetadata;
+};
 
 export function getTrustedCatalogStatus(now = new Date()): TrustedCatalogStatus {
   const generatedAt = Date.parse(trustedCatalogMetadata.generatedAt);
@@ -30,8 +44,22 @@ export function getTrustedDownloadMetadata(
   resourceId: string,
   now = new Date()
 ): TrustedDownloadMetadata | null {
+  return getTrustedResourceMetadata(resourceId, now)?.download ?? null;
+}
+
+export function getTrustedResourceMetadata(
+  resourceId: string,
+  now = new Date()
+): TrustedResourceMetadata | null {
   if (getTrustedCatalogStatus(now) !== "active") return null;
-  const metadata = trustedDownloads[resourceId];
-  if (!metadata) return null;
-  return { ...metadata, allowedHosts: [...metadata.allowedHosts] };
+  const metadata = trustedResources[resourceId];
+  if (!metadata || metadata.catalogStatus !== "active") return null;
+  return {
+    ...metadata,
+    verification: { ...metadata.verification },
+    download: {
+      ...metadata.download,
+      allowedHosts: [...metadata.download.allowedHosts]
+    }
+  };
 }

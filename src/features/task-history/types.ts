@@ -20,6 +20,37 @@ export type TaskHistoryApproval = {
   approvedAt: string;
   expiresAt: string;
   status: "active" | "expired" | "revoked";
+  catalogVersion: string;
+  catalogSourceSha256: string;
+};
+
+export type TaskHistoryDownloadArtifact = {
+  taskId: string;
+  revision: number;
+  resourceId: string;
+  signatureStatus:
+    | "pending"
+    | "valid"
+    | "invalid"
+    | "unsigned"
+    | "unavailable"
+    | "not-applicable";
+  expectedPublisher: string | null;
+  actualPublisher: string | null;
+  certificateThumbprint: string | null;
+  signatureMessage: string | null;
+  signatureCheckedAt: string | null;
+};
+
+export type TaskHistoryOperationEvent = {
+  eventId: string;
+  taskId: string;
+  revision: number;
+  resourceId: string | null;
+  eventType: string;
+  outcome: "success" | "denied" | "error";
+  detail: unknown;
+  createdAt: string;
 };
 
 export type TaskHistoryWorkspaceExport = {
@@ -41,6 +72,8 @@ export type TaskHistoryDetailPayload = {
   state: unknown;
   approvals: TaskHistoryApproval[];
   workspaceExports: TaskHistoryWorkspaceExport[];
+  downloadArtifacts: TaskHistoryDownloadArtifact[];
+  operationEvents: TaskHistoryOperationEvent[];
 };
 
 export type TaskHistoryDetail = Omit<TaskHistoryDetailPayload, "state"> & {

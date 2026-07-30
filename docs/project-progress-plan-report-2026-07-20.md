@@ -1,5 +1,7 @@
 # 迅雷 AI Task Agent 项目进度、计划与功能完成情况报告
 
+> 历史快照说明：本文主体保留 2026-07-24 时点的判断，不再作为当前完成度依据。P0–P3 的现状与验收边界以 README、`p0-resource-orchestration-2026-07-26.md`、`p1-supply-chain-resilience-2026-07-26.md`、`p2-platform-extensibility-2026-07-29.md` 和 `p3-demo-distribution-2026-07-29.md` 为准。当前项目已补齐真实可信目录生命周期与签名校验、历史任务、Agent B 只读执行、第二领域 Skill、模型 Base URL 配置、Demo 重置和 Windows 分发链路；自动安装、任意 Shell、Agent B 写入及正式签名发行仍明确不在当前边界内。
+
 ## 1. 报告快照
 
 - 报告日期：2026-07-20；最近更新：2026-07-24

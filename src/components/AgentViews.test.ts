@@ -4,7 +4,12 @@ import { describe, expect, it } from "vitest";
 import { catalogById } from "../features/agent-core/catalog";
 import { createInitialAgentState, transition } from "../features/agent-core/machine";
 import type { ModelConnectionState } from "../features/agent-core/modelConnection";
-import { ClarificationView, ExecutionView } from "./AgentViews";
+import {
+  AgentHomeView,
+  ClarificationView,
+  ExecutionView,
+  SettingsView
+} from "./AgentViews";
 
 const localModelConnection: ModelConnectionState = {
   status: "unconfigured",
@@ -12,10 +17,70 @@ const localModelConnection: ModelConnectionState = {
   configured: false,
   endpointHost: null,
   model: null,
+  providerId: null,
+  endpointMode: null,
   lastCheckedAt: null
 };
 
 describe("clarification view", () => {
+  it("renders Main-registered P2 capabilities and the P3 reset control", () => {
+    const state = createInitialAgentState();
+    const capabilities = {
+      domainSkills: [
+        {
+          id: "ai-development-environment",
+          displayName: "AI 开发环境"
+        },
+        {
+          id: "research-data-environment",
+          displayName: "科研数据环境"
+        }
+      ],
+      sourceProviders: [{ id: "trusted-catalog" }],
+      workspaceTemplates: [
+        { id: "ai-development-workspace" },
+        { id: "research-data-workspace" }
+      ]
+    };
+    const homeHtml = renderToStaticMarkup(
+      createElement(AgentHomeView, {
+        capabilities,
+        dispatch: async (event) => transition(state, event),
+        onNavigate: () => undefined,
+        state
+      })
+    );
+    const settingsHtml = renderToStaticMarkup(
+      createElement(SettingsView, {
+        capabilities,
+        modelConnection: localModelConnection,
+        onResetDemoData: async () => ({
+          ok: true as const,
+          reset: {
+            resetAt: "2026-07-29T00:00:00.000Z",
+            removedRecords: 0,
+            cleanupWarning: null
+          }
+        }),
+        onTestConnection: async () => localModelConnection,
+        persistence: {
+          status: "ready",
+          restoredAt: null,
+          lastSavedAt: null,
+          lastResetAt: null,
+          lastResetRemovedRecords: 0,
+          error: null
+        },
+        state
+      })
+    );
+
+    expect(homeHtml).toContain("科研数据环境");
+    expect(homeHtml).toContain("1 个 Provider · 2 个模板");
+    expect(settingsHtml).toContain("平台扩展能力");
+    expect(settingsHtml).toContain("重置 Demo 数据");
+  });
+
   it("shows recovery actions instead of an infinite loader after the model step limit", () => {
     const submitted = transition(createInitialAgentState(), {
       type: "SUBMIT_TASK",
