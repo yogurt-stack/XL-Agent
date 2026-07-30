@@ -20,6 +20,7 @@ import {
 } from "../src/features/agent-core/runtime";
 import type {
   AgentRuntimeSnapshot,
+  PlatformCapabilitySummary,
   RuntimePersistenceState
 } from "../src/features/agent-core/runtimeBridge";
 import { createSystemProfileToolOutput } from "../src/features/agent-core/systemProfile";
@@ -73,6 +74,7 @@ export type AgentRuntimeHostOptions = {
   onSnapshot?: (snapshot: AgentRuntimeSnapshot) => void;
   stepDelayMs?: number;
   createTaskId?: () => string;
+  cleanupManagedDemoFiles?: () => Promise<void>;
 };
 
 function controlledDownloadError(
@@ -103,6 +105,8 @@ export class AgentRuntimeHost {
     status: "loading",
     restoredAt: null,
     lastSavedAt: null,
+    lastResetAt: null,
+    lastResetRemovedRecords: 0,
     error: null
   };
   private persistenceQueue: Promise<unknown> = Promise.resolve();
@@ -110,6 +114,8 @@ export class AgentRuntimeHost {
   private readonly workspaceTemplates =
     createDefaultWorkspaceTemplateRegistry();
   private readonly domainSkills = createDefaultDomainSkillRegistry();
+  private readonly sourceProviders =
+    createDefaultSourceProviderRegistry();
   private readonly downloadAdapter: LocalXunleiAdapter;
   private readonly agentB: WorkspaceInspectorAgent;
   private suppressNextManifestGeneration = false;
@@ -152,9 +158,22 @@ export class AgentRuntimeHost {
 
   private async initialize() {
     await this.modelConnection.initialize();
+    const lastMaintenanceEvent =
+      await this.options.store.getLatestMaintenanceEvent();
+    if (lastMaintenanceEvent?.eventType === "demo-reset") {
+      const detail =
+        typeof lastMaintenanceEvent.detail === "object" &&
+        lastMaintenanceEvent.detail !== null
+          ? lastMaintenanceEvent.detail as Record<string, unknown>
+          : {};
+      this.persistence.lastResetAt = lastMaintenanceEvent.createdAt;
+      this.persistence.lastResetRemovedRecords =
+        typeof detail.removedRecords === "number"
+          ? detail.removedRecords
+          : 0;
+    }
 
     const localModel = new LocalRuleModelRuntime();
-    const sourceProviders = createDefaultSourceProviderRegistry();
     const remoteModel = new RemoteLlmModelRuntime({
       requestDecision: (context) => this.options.modelClient.requestDecision(context)
     });
@@ -171,11 +190,14 @@ export class AgentRuntimeHost {
       () => createSystemProfileToolOutput(readHostSystemProfile()),
       (request) => this.runControlledDownload(request),
       (request) => this.runWorkspaceExport(request),
-      sourceProviders.get("trusted-catalog") ?? undefined
+      this.sourceProviders.get("trusted-catalog") ?? undefined
     );
 
     this.runtime = new AgentRuntime({
-      router: new ExtensibleAgentRouter(this.domainSkills, sourceProviders),
+      router: new ExtensibleAgentRouter(
+        this.domainSkills,
+        this.sourceProviders
+      ),
       planner: new FixedWindowsPlanner(),
       verifier: new ElectronArtifactVerifier(
         this.options.store,
@@ -221,7 +243,23 @@ export class AgentRuntimeHost {
     return {
       state: this.runtime.getState(),
       modelConnection: this.modelConnection.getState(),
-      persistence: { ...this.persistence }
+      persistence: { ...this.persistence },
+      capabilities: this.getPlatformCapabilities()
+    };
+  }
+
+  private getPlatformCapabilities(): PlatformCapabilitySummary {
+    return {
+      domainSkills: this.domainSkills.list().map((skill) => ({
+        id: skill.id,
+        displayName: skill.displayName
+      })),
+      sourceProviders: this.sourceProviders.list().map((provider) => ({
+        id: provider.id
+      })),
+      workspaceTemplates: this.workspaceTemplates.list().map((template) => ({
+        id: template.id
+      }))
     };
   }
 
@@ -292,6 +330,58 @@ export class AgentRuntimeHost {
   async testModelConnection() {
     await this.modelConnection.testConnection();
     return this.getSnapshot();
+  }
+
+  async resetDemoData() {
+    const state = this.runtime.getState();
+    if (
+      state.phase === "downloading" ||
+      state.phase === "verifying" ||
+      state.phase === "exporting" ||
+      state.agentB.status === "running"
+    ) {
+      throw new Error(
+        "当前存在运行中的下载、验证、导出或 Agent B 检查，不能重置 Demo 数据。"
+      );
+    }
+    this.runtime.stop();
+    let result;
+    try {
+      await this.waitForPersistence();
+      result = await this.options.store.resetDemoData();
+      this.runtime.dispatch({ type: "RESET" });
+    } catch (error) {
+      this.runtime.start();
+      throw error;
+    }
+    let cleanupWarning: string | null = null;
+    try {
+      await this.options.cleanupManagedDemoFiles?.();
+    } catch (error) {
+      cleanupWarning =
+        error instanceof Error
+          ? error.message
+          : "受控 Demo 文件清理失败。";
+    }
+    this.persistence = {
+      ...this.persistence,
+      status: cleanupWarning ? "error" : "ready",
+      restoredAt: null,
+      lastSavedAt: null,
+      lastResetAt: result.resetAt,
+      lastResetRemovedRecords: result.removedRecords,
+      error: cleanupWarning
+    };
+    this.emitSnapshot();
+    this.runtime.start();
+    return {
+      snapshot: this.getSnapshot(),
+      reset: {
+        resetAt: result.resetAt,
+        removedRecords: result.removedRecords,
+        cleanupWarning
+      }
+    };
   }
 
   async addLocalArtifacts(records: LocalArtifactRecord[]) {

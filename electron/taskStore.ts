@@ -85,7 +85,7 @@ export type TaskStoreOptions = {
   now?: () => number;
 };
 
-export const TASK_STORE_SCHEMA_VERSION = 4;
+export const TASK_STORE_SCHEMA_VERSION = 5;
 
 export type TaskStoreSchemaInfo = {
   version: number;
@@ -95,6 +95,20 @@ export type TaskStoreSchemaInfo = {
     name: string;
     appliedAt: string;
   }>;
+};
+
+export type MaintenanceEventRecord = {
+  eventId: string;
+  eventType: "demo-reset";
+  detail: unknown;
+  createdAt: string;
+};
+
+export type DemoResetResult = {
+  eventId: string;
+  resetAt: string;
+  removedRecords: number;
+  removedByTable: Record<string, number>;
 };
 
 export type AgentBRunRecord = {
@@ -129,6 +143,17 @@ export type OperationEventRecord = {
 };
 
 const terminalPhases = new Set(["intake", "unsupported", "handoff", "cancelled"]);
+const demoDataTables = [
+  "agent_b_runs",
+  "operation_events",
+  "resource_manifest_snapshots",
+  "local_artifacts",
+  "download_tasks",
+  "download_artifacts",
+  "workspace_exports",
+  "approval_records",
+  "task_snapshots"
+] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -689,6 +714,22 @@ const schemaMigrations: SchemaMigration[] = [
           AND catalog_version = 'legacy-unpinned';
       `);
     }
+  },
+  {
+    version: 5,
+    name: "p3-demo-operations",
+    up(database) {
+      database.run(`
+        CREATE TABLE IF NOT EXISTS maintenance_events (
+          event_id TEXT PRIMARY KEY,
+          event_type TEXT NOT NULL,
+          detail_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS maintenance_events_created
+          ON maintenance_events (created_at, event_id);
+      `);
+    }
   }
 ];
 
@@ -900,6 +941,80 @@ export class TaskStore {
     return this.enqueue(() =>
       this.listOperationEventsFromDatabase(taskId)
     );
+  }
+
+  async getLatestMaintenanceEvent(): Promise<MaintenanceEventRecord | null> {
+    return this.enqueue(() => {
+      const row = firstRow(
+        this.database,
+        `SELECT event_id, event_type, detail_json, created_at
+         FROM maintenance_events
+         ORDER BY created_at DESC, event_id DESC
+         LIMIT 1`
+      );
+      const eventId = row ? asString(row.event_id) : null;
+      const eventType = row ? asString(row.event_type) : null;
+      const createdAt = row ? asString(row.created_at) : null;
+      const detail = row ? parseJson(asString(row.detail_json)) : null;
+      if (!eventId || eventType !== "demo-reset" || !createdAt) return null;
+      return {
+        eventId,
+        eventType,
+        detail,
+        createdAt
+      };
+    });
+  }
+
+  async resetDemoData(): Promise<DemoResetResult> {
+    return this.enqueue(async () => {
+      const resetAt = new Date(this.options.now()).toISOString();
+      const eventId = `maintenance-${randomUUID()}`;
+      const removedByTable: Record<string, number> = {};
+      for (const table of demoDataTables) {
+        const row = firstRow(
+          this.database,
+          `SELECT COUNT(*) AS record_count FROM ${table}`
+        );
+        removedByTable[table] = row
+          ? asNumber(row.record_count) ?? 0
+          : 0;
+      }
+      const removedRecords = Object.values(removedByTable)
+        .reduce((total, count) => total + count, 0);
+
+      this.database.run("BEGIN IMMEDIATE");
+      try {
+        for (const table of demoDataTables) {
+          this.database.run(`DELETE FROM ${table}`);
+        }
+        this.database.run(
+          `INSERT INTO maintenance_events (
+            event_id, event_type, detail_json, created_at
+          ) VALUES (?, 'demo-reset', ?, ?)`,
+          [
+            eventId,
+            JSON.stringify({
+              actor: "local-user",
+              removedRecords,
+              removedByTable
+            }),
+            resetAt
+          ]
+        );
+        this.database.run("COMMIT");
+      } catch (error) {
+        this.database.run("ROLLBACK");
+        throw error;
+      }
+      await this.persist();
+      return {
+        eventId,
+        resetAt,
+        removedRecords,
+        removedByTable
+      };
+    });
   }
 
   private async persist() {

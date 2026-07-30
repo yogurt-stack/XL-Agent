@@ -41,6 +41,10 @@ function expect(condition, message) {
   if (!condition) fail(message);
 }
 
+function normalizeLineEndings(value) {
+  return value.replace(/\r\n?/gu, "\n");
+}
+
 function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -389,14 +393,18 @@ export const trustedResources: Record<string, GeneratedTrustedResourceMetadata> 
 
 function checkOrWrite(filePath, expected) {
   if (checkOnly) {
-    const actual = readFileSync(filePath, "utf8");
+    const actual = normalizeLineEndings(
+      readFileSync(filePath, "utf8")
+    );
     expect(actual === expected, `${path.relative(root, filePath)} is out of date; run npm run generate:catalog`);
     return;
   }
   writeFileSync(filePath, expected);
 }
 
-const rawCatalog = readFileSync(catalogPath, "utf8");
+const rawCatalog = normalizeLineEndings(
+  readFileSync(catalogPath, "utf8")
+);
 JSON.parse(readFileSync(schemaPath, "utf8"));
 const catalog = JSON.parse(rawCatalog);
 validateCatalog(catalog);

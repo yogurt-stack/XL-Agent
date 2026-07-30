@@ -23,7 +23,9 @@ function deterministicEnvironment(approvalTtlMs: number) {
     VITE_DEV_SERVER_URL: "",
     NODE_ENV: "test",
     XL_AGENT_E2E_DOWNLOAD_FIXTURE: "1",
+    XL_AGENT_LLM_PROVIDER: "openai-compatible",
     XL_AGENT_LLM_ENDPOINT: "",
+    XL_AGENT_LLM_BASE_URL: "",
     XL_AGENT_LLM_MODEL: "",
     XL_AGENT_LLM_API_KEY: "",
     XL_AGENT_APPROVAL_TTL_MS: String(approvalTtlMs),
@@ -381,4 +383,54 @@ test("shows persisted task history without changing the active task", async () =
   await page.getByRole("button", { name: "执行" }).click();
   await expect(page.getByRole("heading", { name: "AI Dev Starter 需要人工决策" })).toBeVisible();
   await expect(page.getByRole("alert")).toContainText("CHECKSUM_MISMATCH");
+});
+
+test("routes the second Domain Skill through its own plan", async () => {
+  await page
+    .getByRole("textbox", { name: "任务描述" })
+    .fill("准备一个科研数据分析工作区");
+  await page.getByRole("button", { name: "开始任务" }).click();
+  await expect(
+    page.getByRole("heading", {
+      name: "科研数据环境是否需要包含可验证的示例工作区"
+    })
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "只准备科研基础工具" })
+    .click();
+  await page.getByRole("button", { name: "查看资源计划" }).click();
+
+  await expect(page.getByText("计划 r1 已通过严格验证")).toBeVisible();
+  await expect(
+    page.locator(".agent-resource-row").filter({ hasText: "Python 3.12" })
+  ).toBeVisible();
+  await expect(
+    page.locator(".agent-resource-row").filter({ hasText: "Visual Studio Code" })
+  ).toBeVisible();
+  await expect(
+    page.locator(".agent-resource-row").filter({ hasText: "Git for Windows" })
+  ).toBeVisible();
+  await expect(
+    page.locator(".agent-resource-row").filter({ hasText: "AI Dev Starter" })
+  ).toHaveCount(0);
+  await expectNoSeriousAccessibilityViolations("research skill plan");
+});
+
+test("resets Demo records only after explicit confirmation", async () => {
+  await startTaskAndWaitForFailure();
+  await page.getByRole("button", { name: "设置" }).click();
+  await page.getByRole("button", { name: "重置 Demo 数据" }).click();
+  await expect(page.getByRole("alert")).toContainText(
+    "永久清除 SQLite 中的任务"
+  );
+  await page.getByRole("button", { name: "确认永久清除" }).click();
+  await expect(page.getByText(/Demo 数据已重置，共清除/)).toBeVisible();
+  await expect(
+    page.locator(".settings-row").filter({ hasText: "最近 Demo 重置" })
+  ).not.toContainText("尚未重置");
+
+  await page.getByRole("button", { name: "历史" }).click();
+  await expect(page.getByRole("heading", { name: "历史任务" })).toBeVisible();
+  await expect(page.getByText("还没有历史任务")).toBeVisible();
+  await expectNoSeriousAccessibilityViolations("reset history");
 });

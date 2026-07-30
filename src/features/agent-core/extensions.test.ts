@@ -44,6 +44,40 @@ describe("extensible routing and registries", () => {
     expect(event?.decision.clarifications[0]?.id).toBe("python-scope");
   });
 
+  it("routes the installed research skill and derives its own capability set", () => {
+    const router = new ExtensibleAgentRouter();
+    const routed = router.route(submitted("准备一个科研数据分析工作区"));
+    expect(routed?.decision).toMatchObject({
+      status: "supported",
+      skillId: "research-data-environment",
+      sourceProviderId: "trusted-catalog"
+    });
+    expect(routed?.decision.clarifications[0]?.id).toBe(
+      "research-template"
+    );
+
+    const planning = transition(
+      transition(
+        submitted("准备一个科研数据分析工作区"),
+        routed!
+      ),
+      {
+        type: "ANSWER_CLARIFICATION",
+        questionId: "research-template",
+        answer: "只准备科研基础工具"
+      }
+    );
+    expect(router.resolveRequirements(planning)).toEqual({
+      intent: "skill:research-data-environment",
+      label: "科研数据环境",
+      requiredCapabilities: [
+        "python-runtime",
+        "code-editor",
+        "source-control"
+      ]
+    });
+  });
+
   it("routes exact trusted catalog links through needs_links without recommending extras", () => {
     const resource = trustedCatalog.find((item) => item.id === "python-312");
     expect(resource).toBeDefined();
@@ -199,6 +233,10 @@ describe("extensible routing and registries", () => {
         nextActions: ["核对 Manifest"]
       })
     ).toContain("核对 Manifest");
+    expect(
+      createDefaultWorkspaceTemplateRegistry()
+        .resolve("research-data-environment")?.id
+    ).toBe("research-data-workspace");
   });
 
   it("keeps deprecated and revoked catalog entries out of searches", () => {

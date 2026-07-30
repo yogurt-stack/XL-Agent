@@ -88,9 +88,30 @@ export class UserProvidedLinksWorkspaceTemplate extends AiDevelopmentWorkspaceTe
   }
 }
 
+export class ResearchDataWorkspaceTemplate extends AiDevelopmentWorkspaceTemplate {
+  readonly id = "research-data-workspace";
+
+  supports(skillId: string): boolean {
+    return skillId === "research-data-environment";
+  }
+
+  renderAgents(context: WorkspaceTemplateContext) {
+    return [
+      "# 科研数据 Agent 交接说明",
+      "",
+      `领域 Skill：\`${context.skillId}\``,
+      "",
+      "先读取 resource-manifest.json 并引用当前 Manifest revision。",
+      "可以建议人工创建隔离环境，但禁止自动安装包、运行命令或宣称科研环境已部署。",
+      ""
+    ].join("\n");
+  }
+}
+
 export function createDefaultWorkspaceTemplateRegistry() {
   return new WorkspaceTemplateRegistry([
     new AiDevelopmentWorkspaceTemplate(),
+    new ResearchDataWorkspaceTemplate(),
     new UserProvidedLinksWorkspaceTemplate()
   ]);
 }

@@ -11,6 +11,8 @@ export type ModelConnectionStatus =
 export type ModelConnectionErrorCode =
   | "MODEL_BRIDGE_UNAVAILABLE"
   | "MODEL_UNCONFIGURED"
+  | "MODEL_CONFIGURATION_CONFLICT"
+  | "MODEL_PROVIDER_UNSUPPORTED"
   | "MODEL_ENDPOINT_INVALID"
   | "MODEL_AUTH_FAILED"
   | "MODEL_TIMEOUT"
@@ -32,6 +34,8 @@ export type ModelConnectionInfo = {
   configured: boolean;
   endpointHost: string | null;
   model: string | null;
+  providerId: string | null;
+  endpointMode: "endpoint" | "base-url" | null;
   error?: ModelConnectionError;
 };
 
@@ -90,6 +94,8 @@ export class ModelConnectionController {
           configured: false,
           endpointHost: null,
           model: null,
+          providerId: null,
+          endpointMode: null,
           lastCheckedAt: null
         }
       : {
@@ -98,6 +104,8 @@ export class ModelConnectionController {
           configured: false,
           endpointHost: null,
           model: null,
+          providerId: null,
+          endpointMode: null,
           error: bridgeUnavailableError,
           lastCheckedAt: null
         };

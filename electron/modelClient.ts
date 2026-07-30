@@ -9,7 +9,7 @@ import type {
   ModelContext
 } from "../src/features/agent-core/types";
 
-const modelSystemPrompt = `你是受控 Windows 开发资源 Agent 的规划模型。
+const modelSystemPrompt = `你是受控 Windows 资源准备 Agent 的规划模型。
 
 宿主使用 OpenAI-compatible 原生 function tools 与你交互。你必须调用且只调用一个函数来表达下一步动作；不要在 message.content 中返回 JSON、Markdown 或自然语言答案。
 
@@ -29,6 +29,8 @@ const modelConnectionTestPrompt = `这是远程模型连接测试。你必须调
 
 export type ModelConnectionErrorCode =
   | "MODEL_UNCONFIGURED"
+  | "MODEL_CONFIGURATION_CONFLICT"
+  | "MODEL_PROVIDER_UNSUPPORTED"
   | "MODEL_ENDPOINT_INVALID"
   | "MODEL_AUTH_FAILED"
   | "MODEL_TIMEOUT"
@@ -46,9 +48,22 @@ export type ModelConnectionError = {
 };
 
 export type ModelClientEnvironment = {
+  XL_AGENT_LLM_PROVIDER?: string;
   XL_AGENT_LLM_ENDPOINT?: string;
+  XL_AGENT_LLM_BASE_URL?: string;
   XL_AGENT_LLM_API_KEY?: string;
   XL_AGENT_LLM_MODEL?: string;
+};
+
+export type RemoteModelProviderId = "openai-compatible";
+export type ModelEndpointMode = "endpoint" | "base-url";
+
+export type ResolvedRemoteModelConfig = {
+  providerId: RemoteModelProviderId;
+  endpointMode: ModelEndpointMode;
+  endpoint: string;
+  apiKey: string;
+  model: string;
 };
 
 export type ModelFetch = (
@@ -112,6 +127,95 @@ function finishTool(): OpenAiFunctionTool {
   return tool;
 }
 
+function configuredValue(value: string | undefined) {
+  const normalized = value?.trim();
+  return normalized ? normalized : null;
+}
+
+function parseHttpsUrl(value: string, label: string) {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw remoteModelError(
+      "MODEL_ENDPOINT_INVALID",
+      `${label} 不是合法 URL。`,
+      false
+    );
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.hash
+  ) {
+    throw remoteModelError(
+      "MODEL_ENDPOINT_INVALID",
+      `${label} 必须使用 HTTPS，且不能包含凭据或片段。`,
+      false
+    );
+  }
+  return url;
+}
+
+function endpointFromBaseUrl(baseUrl: string) {
+  const url = parseHttpsUrl(baseUrl, "XL_AGENT_LLM_BASE_URL");
+  if (url.search) {
+    throw remoteModelError(
+      "MODEL_ENDPOINT_INVALID",
+      "XL_AGENT_LLM_BASE_URL 不能包含查询参数。",
+      false
+    );
+  }
+  const basePath = url.pathname.replace(/\/+$/u, "");
+  url.pathname = `${basePath}/chat/completions`.replace(/\/{2,}/gu, "/");
+  return url.toString();
+}
+
+export function resolveRemoteModelConfig(
+  environment: ModelClientEnvironment
+): ResolvedRemoteModelConfig {
+  const provider =
+    configuredValue(environment.XL_AGENT_LLM_PROVIDER) ??
+    "openai-compatible";
+  if (provider !== "openai-compatible") {
+    throw remoteModelError(
+      "MODEL_PROVIDER_UNSUPPORTED",
+      `不支持的远程模型 Provider：${provider}。`,
+      false
+    );
+  }
+
+  const endpoint = configuredValue(environment.XL_AGENT_LLM_ENDPOINT);
+  const baseUrl = configuredValue(environment.XL_AGENT_LLM_BASE_URL);
+  const apiKey = configuredValue(environment.XL_AGENT_LLM_API_KEY);
+  const model = configuredValue(environment.XL_AGENT_LLM_MODEL);
+  if (endpoint && baseUrl) {
+    throw remoteModelError(
+      "MODEL_CONFIGURATION_CONFLICT",
+      "XL_AGENT_LLM_ENDPOINT 与 XL_AGENT_LLM_BASE_URL 只能配置一个。",
+      false
+    );
+  }
+  if ((!endpoint && !baseUrl) || !apiKey || !model) {
+    throw remoteModelError(
+      "MODEL_UNCONFIGURED",
+      "远程 LLM 配置不完整，请检查 Provider、Endpoint/Base URL、模型 ID 和 API Key。",
+      false
+    );
+  }
+
+  return {
+    providerId: provider,
+    endpointMode: endpoint ? "endpoint" : "base-url",
+    endpoint: endpoint
+      ? parseHttpsUrl(endpoint, "XL_AGENT_LLM_ENDPOINT").toString()
+      : endpointFromBaseUrl(baseUrl!),
+    apiKey,
+    model
+  };
+}
+
 export class RemoteModelClient {
   constructor(
     private readonly environment: ModelClientEnvironment = process.env,
@@ -119,11 +223,24 @@ export class RemoteModelClient {
   ) {}
 
   getSafeConnectionInfo() {
-    const model = this.environment.XL_AGENT_LLM_MODEL || null;
+    const model = configuredValue(this.environment.XL_AGENT_LLM_MODEL);
+    const providerId =
+      configuredValue(this.environment.XL_AGENT_LLM_PROVIDER) ??
+      "openai-compatible";
+    const endpointMode = configuredValue(
+      this.environment.XL_AGENT_LLM_ENDPOINT
+    )
+      ? "endpoint" as const
+      : configuredValue(this.environment.XL_AGENT_LLM_BASE_URL)
+        ? "base-url" as const
+        : null;
     let endpointHost: string | null = null;
-    if (this.environment.XL_AGENT_LLM_ENDPOINT) {
+    const configuredEndpoint =
+      configuredValue(this.environment.XL_AGENT_LLM_ENDPOINT) ??
+      configuredValue(this.environment.XL_AGENT_LLM_BASE_URL);
+    if (configuredEndpoint) {
       try {
-        endpointHost = new URL(this.environment.XL_AGENT_LLM_ENDPOINT).host;
+        endpointHost = new URL(configuredEndpoint).host;
       } catch {
         endpointHost = null;
       }
@@ -133,13 +250,17 @@ export class RemoteModelClient {
       return {
         configured: true,
         endpointHost: new URL(config.endpoint).host,
-        model: config.model
+        model: config.model,
+        providerId: config.providerId,
+        endpointMode: config.endpointMode
       };
     } catch (error) {
       return {
         configured: false,
         endpointHost,
         model,
+        providerId,
+        endpointMode,
         error: toModelConnectionError(error)
       };
     }
@@ -163,35 +284,7 @@ export class RemoteModelClient {
   }
 
   private getConfig() {
-    const endpoint = this.environment.XL_AGENT_LLM_ENDPOINT;
-    const apiKey = this.environment.XL_AGENT_LLM_API_KEY;
-    const model = this.environment.XL_AGENT_LLM_MODEL;
-    if (!endpoint || !apiKey || !model) {
-      throw remoteModelError(
-        "MODEL_UNCONFIGURED",
-        "远程 LLM 配置不完整，请检查端点、模型 ID 和 API Key。",
-        false
-      );
-    }
-
-    let url: URL;
-    try {
-      url = new URL(endpoint);
-    } catch {
-      throw remoteModelError(
-        "MODEL_ENDPOINT_INVALID",
-        "XL_AGENT_LLM_ENDPOINT 不是合法 URL。",
-        false
-      );
-    }
-    if (url.protocol !== "https:") {
-      throw remoteModelError(
-        "MODEL_ENDPOINT_INVALID",
-        "XL_AGENT_LLM_ENDPOINT 必须使用 HTTPS。",
-        false
-      );
-    }
-    return { endpoint: url.toString(), apiKey, model };
+    return resolveRemoteModelConfig(this.environment);
   }
 
   private async requestRemoteToolDecision(

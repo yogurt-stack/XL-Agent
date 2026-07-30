@@ -537,8 +537,9 @@ try {
   const schema = await migrated.getSchemaInfo();
   const legacyApproval = await migrated.getApproval("legacy-task", 1);
   assert(
-    schema.version === 4 &&
+    schema.version === TASK_STORE_SCHEMA_VERSION &&
       schema.supportedVersion === TASK_STORE_SCHEMA_VERSION &&
+      schema.migrations.some((migration) => migration.version === 4) &&
       legacyApproval.status === "revoked" &&
       legacyApproval.catalogVersion === "legacy-unpinned",
     "v3 migration must add P1 columns and revoke unpinned legacy approvals"
@@ -547,7 +548,7 @@ try {
 
   assert(existsSync(databasePath), "P1 verification must persist a real SQLite database");
   console.log(
-    "P1 supply-chain resilience passed: catalog lifecycle, pinned approvals, HTTP Range resume, Authenticode publisher enforcement, operation audit and SQLite v4 migration verified"
+    "P1 supply-chain resilience passed: catalog lifecycle, pinned approvals, HTTP Range resume, Authenticode publisher enforcement, operation audit and v3-to-v4 migration verified on the current schema"
   );
 } finally {
   rmSync(verifyRoot, { recursive: true, force: true });

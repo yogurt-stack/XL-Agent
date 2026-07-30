@@ -9,7 +9,9 @@ describe("model connection controller", () => {
           return {
             configured: true,
             endpointHost: "api.example.test",
-            model: "test-model"
+            model: "test-model",
+            providerId: "openai-compatible",
+            endpointMode: "endpoint"
           };
         },
         async testConnection() {
