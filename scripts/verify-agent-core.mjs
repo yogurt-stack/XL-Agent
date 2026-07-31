@@ -44,12 +44,63 @@ const { createResourceManifest } = require(path.join(outputDir, "manifest.js"));
 const { trustedCatalog, windows11Profile } = require(path.join(outputDir, "catalog.js"));
 const { deriveTaskRequirements } = require(path.join(outputDir, "taskRequirements.js"));
 const { validatePlannedResources, validatePlanResourceIds } = require(path.join(outputDir, "planValidation.js"));
+const {
+  createTaskPlan,
+  defaultTaskPlanToolPolicies,
+  prepareTaskPlanForConfirmation,
+  validateTaskPlan
+} = require(path.join(outputDir, "taskPlan.js"));
+const { createLocalTaskPlanProposal } = require(path.join(outputDir, "taskPlanTemplates.js"));
 
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
 };
 
 const issueCodes = (result) => new Set(result.issues.map((item) => item.code));
+const confirmTaskPlanState = (state) => {
+  const availableTools = [
+    "read_system_profile",
+    "search_trusted_catalog",
+    "search_github_repositories",
+    "controlled_download",
+    "export_workspace"
+  ];
+  const validationContext = {
+    tools: defaultTaskPlanToolPolicies.filter((policy) =>
+      availableTools.includes(policy.name)
+    ),
+    requireInitialConfirmation: true
+  };
+  const createdAt = "2026-07-31T00:00:00.000Z";
+  const draft = createTaskPlan({
+    planId: `verify-plan-${state.taskId}`.slice(0, 80),
+    taskId: state.taskId,
+    proposal: createLocalTaskPlanProposal({
+      state,
+      step: state.agentRun.step,
+      maxSteps: state.agentRun.maxSteps,
+      availableTools,
+      toolResults: state.agentRun.toolResults
+    }),
+    createdBy: "local-rule",
+    createdAt
+  });
+  const validation = validateTaskPlan(draft, validationContext);
+  const proposed = transition(state, {
+    type: "TASK_PLAN_PROPOSED",
+    plan: prepareTaskPlanForConfirmation(
+      draft,
+      validationContext,
+      createdAt
+    ),
+    validation
+  });
+  return transition(proposed, {
+    type: "TASK_PLAN_CONFIRMED",
+    revision: 1,
+    confirmedAt: "2026-07-31T00:01:00.000Z"
+  });
+};
 const pythonRequirementState = {
   task: "准备 Python 机器学习环境",
   answers: { "python-scope": "仅 Python AI" }
@@ -216,6 +267,9 @@ const runUntil = async (phase) => {
 };
 
 send({ type: "SUBMIT_TASK", task: "准备 Windows AI 环境" });
+await runUntil("waiting_task_plan_confirmation");
+assert(state.agentRun.toolResults.length === 0, "Task Plan confirmation must precede all tool calls");
+send({ type: "CONFIRM_TASK_PLAN", revision: 1 });
 await runUntil("clarifying");
 send({ type: "ANSWER_CLARIFICATION", questionId: "primary-workload", answer: "全栈 AI 应用" });
 send({ type: "ANSWER_CLARIFICATION", questionId: "mirror-policy", answer: "允许备用镜像" });
@@ -296,6 +350,7 @@ const directSend = (event) => {
 };
 directSend({ type: "SUBMIT_TASK", task: "准备 Windows AI 环境" });
 directSend(new FixedWindowsRouter().route(primaryOnlyState));
+primaryOnlyState = confirmTaskPlanState(primaryOnlyState);
 directSend({ type: "ANSWER_CLARIFICATION", questionId: "primary-workload", answer: "Python AI 开发" });
 directSend({ type: "SKIP_CLARIFICATION", questionId: "mirror-policy" });
 directSend({ type: "PLAN_GENERATED" });
@@ -534,6 +589,8 @@ const runModelUntil = async (phase) => {
 };
 
 modelRuntime.dispatch({ type: "SUBMIT_TASK", task: "为 React 和 Node.js 准备全栈 AI 环境" });
+await runModelUntil("waiting_task_plan_confirmation");
+modelRuntime.dispatch({ type: "CONFIRM_TASK_PLAN", revision: 1 });
 await runModelUntil("clarifying");
 assert(modelState.clarifications[0]?.id === "fullstack-scope", "Runtime must show the full-stack clarification");
 modelRuntime.dispatch({
@@ -543,9 +600,9 @@ modelRuntime.dispatch({
 });
 await runModelUntil("waiting_approval");
 assert(modelState.resources.some((resource) => resource.id === "node-lts"), "Runtime plan must include Node.js");
-assert(modelState.agentRun.step === 3, "Deterministic routing plus planning must produce three model decisions");
+assert(modelState.agentRun.step === 4, "Task Plan plus deterministic resource planning must produce four model decisions");
 assert(modelState.agentRun.toolResults.length === 2, "Runtime must record both read-only tool results");
-assert(modelState.agentRun.policyAudit.length === 3, "Runtime must audit every model action");
+assert(modelState.agentRun.policyAudit.length === 4, "Runtime must audit every model action");
 
 modelRuntime.dispatch({ type: "APPROVE_PLAN", revision: modelState.revision });
 await runModelUntil("awaiting_failure_action");
@@ -674,6 +731,8 @@ const runAmbiguousUntil = async (phase) => {
 };
 
 ambiguousRuntime.dispatch({ type: "SUBMIT_TASK", task: "帮我准备开发环境" });
+await runAmbiguousUntil("waiting_task_plan_confirmation");
+ambiguousRuntime.dispatch({ type: "CONFIRM_TASK_PLAN", revision: 1 });
 await runAmbiguousUntil("clarifying");
 assert(ambiguousState.clarifications[0]?.id === "primary-workload", "Generic task must ask its workload first");
 ambiguousRuntime.dispatch({
@@ -689,7 +748,7 @@ ambiguousRuntime.dispatch({
   answer: "仅 Python AI"
 });
 await runAmbiguousUntil("waiting_approval");
-assert(ambiguousState.agentRun.step === 4, "Ambiguous task must finish planning within four model steps after deterministic routing");
+assert(ambiguousState.agentRun.step === 5, "Ambiguous task must finish within five model steps including Task Plan confirmation");
 
 const limitState = createInitialAgentState();
 const limitRuntime = new AgentRuntime({

@@ -1,4 +1,10 @@
 import type { ModelRuntime } from "./interfaces";
+import {
+  githubSearchPurpose,
+  githubSearchInputFromState,
+  isGitHubRepositorySearchOutput,
+  latestGitHubRepositorySearchResult
+} from "./githubSearch";
 import type {
   AgentAction,
   AgentState,
@@ -14,6 +20,7 @@ import {
   resourceIdsForTaskIntent
 } from "./taskRequirements";
 import type { LocalTaskIntent } from "./types";
+import { createLocalTaskPlanProposal } from "./taskPlanTemplates";
 
 export { inferLocalTaskIntent } from "./taskRequirements";
 
@@ -91,6 +98,20 @@ export class LocalRuleModelRuntime implements ModelRuntime {
       );
     }
 
+    if (state.phase === "task_planning") {
+      return createDecision(
+        context,
+        {
+          actionId: createActionId(context, "task-plan"),
+          type: "propose_task_plan",
+          proposal: createLocalTaskPlanProposal(context),
+          explanation:
+            "已将首轮目标拆解为带依赖、风险和审批边界的 Task Plan；确认前不执行任何工具。"
+        },
+        "路由完成后先提出可审阅的任务计划，由用户确认流程再继续。"
+      );
+    }
+
     if (state.phase === "handoff") {
       return createDecision(
         context,
@@ -119,6 +140,44 @@ export class LocalRuleModelRuntime implements ModelRuntime {
               : `资源 ${failedResource?.name ?? "未知资源"} 没有可信备用来源，重置后重试主来源。`
         },
         `已分析 ${state.replanReason ?? "未知"} 失败上下文，生成需要重新审批的替代计划。`
+      );
+    }
+
+    if (state.routeDecision?.skillId === "github-project-discovery") {
+      const result = latestGitHubRepositorySearchResult(state);
+      if (!result) {
+        const input = githubSearchInputFromState(state);
+        return createDecision(
+          context,
+          {
+            actionId: createActionId(context, "github-search"),
+            type: "call_tool",
+            purpose: githubSearchPurpose(input),
+            call: {
+              callId: `local-call-${context.step}-github-search`,
+              name: "search_github_repositories",
+              input
+            }
+          },
+          "GitHub 仓库任务先执行一次与用户意图一致的受控只读查询。"
+        );
+      }
+      const count =
+        result.status === "success" &&
+        isGitHubRepositorySearchOutput(result.output)
+          ? result.output.repositories.length
+          : 0;
+      return createDecision(
+        context,
+        {
+          actionId: createActionId(context, "github-finish"),
+          type: "finish",
+          summary:
+            result.status === "success"
+              ? `GitHub 公开仓库检索完成，共返回 ${count} 个带明确开源许可证的项目。`
+              : `GitHub 公开仓库检索未完成：${result.error?.message ?? "未知错误"}`
+        },
+        "GitHub API Tool 已返回候选仓库；用户可在结果页选择仓库并进入固定提交与审批下载流程。"
       );
     }
 

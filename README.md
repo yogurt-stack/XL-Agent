@@ -2,7 +2,7 @@
 
 一个基于 Electron + React + TypeScript + Vite 的桌面端资源编排 Agent MVP。
 
-它实现“用户用自然语言描述目标，Agent 路由并澄清需求，生成可信资源计划，经用户确认后受控下载、验证、重规划并生成可交接工作区”的流程。Electron 主进程负责只读采集脱敏主机画像、可信资源下载、工作区原子导出和 SQLite 任务持久化；renderer 不能直接访问 Node、文件系统或数据库。默认本地模型不发起网络请求；只有显式配置可选远程 LLM 时才会由 Electron 主进程访问指定 HTTPS 端点。
+它实现“用户用自然语言描述目标，Agent 路由并澄清需求，生成可信资源计划，经用户确认后受控下载、验证、重规划并生成可交接工作区”的流程，也支持把只读信息检索任务路由到受控 API Tool，以及把用户明确选择的本地 Git 仓库导入只读 Agent。Electron 主进程负责只读采集脱敏主机画像、本地 Git 检查、GitHub 公开仓库查询、可信资源下载、工作区原子导出和 SQLite 任务持久化；renderer 不能直接访问 Node、文件系统或数据库。GitHub 写入是单独配置、单独计划和单独审批的可选能力，不会继承只读搜索权限。
 
 ## 技术栈
 
@@ -20,7 +20,7 @@
 - Electron 主进程只读采集脱敏主机画像，不暴露用户名、主机名、Home 路径、环境变量或完整 shell 路径
 - ToolResult 按工具聚合、错误自动展开和键盘可达的执行日志
 - 基于任务能力、依赖、目标系统、来源、授权和 revision 的严格计划验证
-- 基于 SQLite 的任务快照、审批记录和工作区导出记录
+- 基于 SQLite 的任务快照、目录/计划指纹审批记录和工作区导出记录
 - 只读历史任务列表与详情查阅，不影响当前 Agent 状态机
 - `LocalXunleiAdapter` 下载边界、流式写盘、实时速度/ETA、暂停、恢复和取消
 - 本地文件/目录递归接入、SHA256 匹配和用户自选工作区目录
@@ -31,6 +31,9 @@
 - Windows Authenticode、预期发布者与 SHA256 三层制品校验，以及可失败关闭的平台边界
 - HTTP Range / If-Range 断点恢复；服务端忽略 Range 时安全重下，区间不一致时拒绝写入
 - 已安装的科研数据第二 Domain Skill、专属工作区模板与 Main 动态能力清单
+- GitHub 项目获取 Domain Skill：搜索最多 10 个明确开源仓库，固定默认分支 commit，经独立审批后下载源码归档；Agent B 检查后可再审批 package-lock 离线依赖
+- 本地 Git 仓库只读导入：固定 HEAD、分支、dirty 状态、文件清单和生态分析；绝对源路径只在 Main 当前会话内保存
+- 审批后 GitHub 发布：独立写 Token、计划 SHA256、十分钟审批窗口、clean HEAD 复核和 create-only/no-force 策略
 - OpenAI-compatible Endpoint/Base URL 双配置模式和未知 Provider 失败关闭
 - SQLite v5 两步 Demo 重置、维护审计与 Windows x64 NSIS/ZIP 打包链路
 
@@ -40,7 +43,7 @@
 
 1. 下载任务进入 SQLite `download_tasks`，响应体按流写入临时文件；执行页显示字节数、速度和 ETA，并提供暂停、恢复、取消。
 2. 计划页可直接选择本地文件或目录，也可在审批前选择工作区根目录。本地文件在 Main 进程递归扫描、限制数量/总大小、拒绝符号链接并计算 SHA256。
-3. `ElectronArtifactVerifier` 会重新读取普通文件，核对字节数、SHA256、可信计划与来源 Host，再把 `downloaded` 提升为 `verified`。
+3. `ElectronArtifactVerifier` 会重新读取普通文件，核对字节数、SHA256、可信计划与来源 Host；锁文件 npm tarball 还会复核 SHA512，再把 `downloaded` 提升为 `verified`。
 4. 每次持久化状态转换都会生成独立 Manifest revision，并原子更新 `<workspace>/<task>/current` 下的 JSON、Markdown、README 和 AGENTS 说明。
 5. Agent B 以 `workspace-inspector` 注册，只允许调用 `inspect_workspace`；用户可在失败交接或就绪工作区主动运行。权限绑定 task ID、plan revision、grant ID 和五分钟 TTL，结果写入 `agent_b_runs`。
 
@@ -53,7 +56,7 @@
 P1 在保持“只准备资源、不自动安装或执行”的前提下完成四个增量闭环：
 
 1. 可信目录支持 `active`、`deprecated`、`revoked`；非 active 条目和替代项不能进入新计划。
-2. 每次 plan revision 审批会固定 `catalogVersion + sourceSha256`；目录变化、旧库未固定审批或哈希不一致时，Main 进程拒绝执行。
+2. 每次 plan revision 审批会固定 `catalogVersion + sourceSha256` 和不可变计划指纹；目录、目标路径或资源元数据变化时，Main 进程拒绝执行并要求重新审批。
 3. Windows 目标的 Authenticode 资源必须同时通过文件重哈希、Windows 系统签名状态和预期发布者匹配，结果写入 SQLite、Manifest 与历史审计。
 4. 下载断点保存路径、字节数、ETag/Last-Modified 和 Range 能力；跨重启恢复仍沿用 revision 审批、Host allowlist、大小上限和最终 SHA256。
 
@@ -179,12 +182,79 @@ XL_AGENT_LLM_API_KEY=your-secret
 
 Endpoint 与 Base URL 只能配置一个；Base URL 会由 Main 规范化并追加 `/chat/completions`。应用顶部和“设置”页面会显示当前 provider、端点模式、脱敏主机、模型 ID 和回退原因。“测试连接”会通过 Electron 主进程验证 HTTPS、鉴权、Chat Completions 响应和原生 `tool_call` 结构，API Key 不会返回 renderer。远程失败后当前任务会使用本地规则模型，避免每个模型步骤重复等待失败端点；重新测试成功后恢复远程优先。
 
+为兼容 DeepSeek 等标准 Chat Completions 实现，请求不会发送 Provider 专属的
+`strict` 或 `parallel_tool_calls` 参数。单次 Tool Call、非空字段、数量上限和额外字段拒绝仍由
+Main 内部的 Zod 协议解析、状态机和 Policy 强制执行；HTTP 错误只显示经过长度限制与密钥脱敏的
+Provider 错误摘要。连接 `api.deepseek.com` 时，Main 会显式关闭 DeepSeek 思考模式，因为当前
+受控 Agent 每一步都要求返回原生 Tool Call；该字段不会发送给其他 OpenAI-compatible Host。
+DeepSeek 返回的 Tool Call 外层可能包含 `index` 等 Provider 元数据；Main 仅忽略这些外层元数据，
+仍严格校验 `id`、`type`、函数名、JSON 参数、单调用数量和当前 Tool 白名单。
+
 模型连接和 Electron renderer 验证：
 
 ```bash
 npm run verify:model-client
 npm run verify:electron-renderer
 ```
+
+## GitHub API Tool
+
+输入“帮我查找 GitHub 最新最热门的 10 个开源项目”会优先路由到
+`github-project-discovery`，而不是被开发环境 Skill 的 `git` 关键词误判。Agent 会先确认项目
+新建时间窗口和排序指标，再由 Electron Main 调用固定的
+`https://api.github.com/search/repositories`：
+
+- 只执行 `GET` 公开仓库搜索，不注册写入、Release 下载或任意 URL Tool。
+- 固定过滤私有仓库、Fork、归档项目和没有明确 SPDX 许可证的结果，最多展示 10 项。
+- 模型侧 GitHub 路由只获得 `search_github_repositories` 与 `finish`；用户必须在结果页明确点击某个仓库，Main 才读取详情并生成动态资源计划。
+- 不配置 Token 也能查询公开数据；如需更高限流额度，可在 `.env` 中设置
+  `XL_AGENT_GITHUB_TOKEN`。该值只由 Main 读取，不进入 renderer、Runtime 快照或模型上下文。
+- 结果页展示仓库、Star、Fork、语言、许可证、更新时间和 API 剩余额度；外链只允许打开
+  `https://github.com/{owner}/{repo}`。
+- “准备到本地”会由 Main 把默认分支解析为不可变 commit SHA，源码只允许从
+  `https://codeload.github.com/{owner}/{repo}/zip/{SHA}` 下载。GitHub 不提供该动态 ZIP 的预置
+  SHA256，因此下载完成后由 Main 计算并复核，再写入 `sources/` 和 Manifest。
+- Main 会读取固定 commit 的 Git tree，报告 package、lockfile 和运行时提示。只有仓库根目录
+  `package-lock.json` v2/v3 中所有外部包都具备固定 `registry.npmjs.org` 地址、SHA512 和明确
+  许可证，且不超过 250 个独立 tarball，才会开放 npm 离线依赖准备。
+- npm 依赖是第二个 plan revision：必须先完成源码下载、工作区导出和 Agent B 只读检查，再由
+  用户单独审批。下载物写入 `dependencies/npm/`；产品不会运行 `npm install`、生命周期脚本、
+  仓库代码或任意终端命令。
+
+## 本地仓库导入与审批后发布
+
+首页“选择本地 Git 仓库”会创建 `local-repository-import` 任务。Main 只调用固定参数、`shell: false`
+的 Git 读取命令，检查仓库顶层目录、HEAD、分支、porcelain 状态、HEAD tree 和可见文件清单；
+不向模型注册 Shell Tool，也不执行 Git hooks、仓库脚本或依赖安装。当前版本要求 `.git` 是仓库
+目录中的真实目录，暂不接收 worktree、子模块工作区或符号链接入口。
+
+Renderer、SQLite 状态和 Manifest 只得到仓库名称、随机会话句柄、提交 SHA、无路径指纹、dirty
+计数、文件数量和项目结构。绝对源路径保留在 Electron Main 的内存会话映射中；应用重启后必须
+重新选择仓库。导入完成后会生成真实 Manifest，Agent B 可通过原有 `inspect_workspace` 只读
+grant 检查本地项目准备度。
+
+发布是另一条权限链。要启用它，需要在 `.env` 单独配置：
+
+```dotenv
+XL_AGENT_GITHUB_PUBLISH_TOKEN=your-write-token
+```
+
+`XL_AGENT_GITHUB_TOKEN` 仍只用于搜索限流，不会回退成发布凭证。发布 Token 必须对应当前用户且
+具备创建目标仓库和写入内容的权限；它只在 Main 进程请求 GitHub API 时使用，不进入 renderer、
+Runtime 快照、Manifest、日志或模型上下文。
+
+发布分两次显式点击：
+
+1. “生成发布计划”读取当前 GitHub 用户、确认目标仓库不存在，并固定目标、可见性、分支、提交
+   说明、文件数、总字节数、源 HEAD/指纹、到期时间和计划 SHA256；此时不发生 GitHub 写入。
+2. “批准并创建 GitHub 仓库”先持久化独立审批审计，再重新检查相同 clean HEAD 和文件范围，最后
+   通过 GitHub Git Data API 创建仓库、blob、tree、root commit 和分支引用。
+
+首版只创建当前 Token 用户名下的新仓库，不覆盖已有仓库、不追加、不强推、不自动重试写入。
+它把固定 HEAD 的文件内容发布为一个新的 root commit，不复制本地仓库原有提交历史。
+仓库必须是 clean 状态，且不能包含子模块、符号链接、疑似密钥文件；范围限制为最多 2,000 个
+文件、单文件 5 MiB、总量 50 MiB。若仓库已创建但后续上传失败，应用会保留目标链接并停止，
+不会自动删除远程仓库。
 
 ## 系统画像边界
 
@@ -199,9 +269,10 @@ npm run verify:electron-renderer
 Windows、Node.js LTS、PowerShell、Miniforge 及项目固定提交快照；每项都声明 HTTPS 下载地址、
 允许的重定向主机、SHA256、大小上限、来源、授权、能力和回退关系。
 
-Agent 只能查询并选择目录中的资源 ID。Renderer 不提交任意 URL；Electron 主进程会再次通过
-同一目录生成物解析 ID，并在下载前后校验 HTTPS Host、大小和 SHA256。目录过期或生成物与
-JSON 不一致时会失败关闭。
+普通环境准备任务只能查询并选择目录中的资源 ID。Renderer 不提交任意 URL；Electron 主进程会
+再次通过同一目录生成物解析 ID，并在下载前后校验 HTTPS Host、大小和 SHA256。GitHub 项目获取
+是受限的动态例外：Main 根据搜索结果固定 commit 和 codeload URL；npm 包只能来自同一 commit
+锁文件固定的 registry URL，并校验 SHA512。目录过期或生成物与 JSON 不一致时会失败关闭。
 
 ```bash
 # 修改 JSON 后重新生成 renderer 和 Electron 目录
@@ -265,7 +336,7 @@ React 不再创建或持有 Runtime；Renderer 只通过 preload 白名单桥接
 - `WorkspaceTemplateRegistry`：按路由选择 Manifest 派生的工作区模板。
 - `AgentPlanner`：只在未配置模型的兼容路径中生成固定计划和替代计划。
 - `ModelRuntime`：在 `planning` 和 `replanning` 阶段生成结构化决策；远程模型必须返回且只返回一个原生 `tool_call`，参数由严格 Zod Schema 校验。
-- `AgentVerifier`：在 `verifying` 阶段由 Electron Main 重新读取制品并核对普通文件属性、字节数、SHA256、可信计划和来源 Host。
+- `AgentVerifier`：在 `verifying` 阶段由 Electron Main 重新读取制品并核对普通文件属性、字节数、SHA256、可信计划和来源 Host；锁文件依赖额外核对 SHA512。
 - `AgentToolExecutor`：通过工具注册表执行脱敏系统画像、可信目录查询、受控下载和工作区导出。
 - `AgentPolicy`：在执行动作前返回允许、需要审批或拒绝的策略结果。
 - `TaskRequirements`：把自然语言意图和澄清答案转换为确定性的必需能力集合。

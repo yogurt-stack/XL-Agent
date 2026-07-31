@@ -71,7 +71,7 @@ export class ExtensibleAgentRouter implements AgentRouter {
         status: "supported",
         reason: `任务匹配已安装的 ${skill.displayName} Domain Skill。`,
         skillId: skill.id,
-        sourceProviderId: "trusted-catalog",
+        sourceProviderId: skill.sourceProviderId ?? "trusted-catalog",
         userLinks: goal.links,
         resourceIds: [],
         clarifications: skill.clarify(skillGoal, state.systemProfile),

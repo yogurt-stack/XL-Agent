@@ -119,6 +119,42 @@ contextBridge.exposeInMainWorld("xunleiAgent", {
           error: { code: string; message: string; retriable: boolean };
         }
     >,
+  selectLocalRepository: () =>
+    ipcRenderer.invoke("agent:selectLocalRepository") as Promise<
+      | {
+          ok: true;
+          snapshot: AgentRuntimeSnapshot;
+          imported: boolean;
+        }
+      | {
+          ok: false;
+          error: { code: string; message: string; retriable: boolean };
+        }
+    >,
+  prepareGitHubPublish: (input: {
+    repositoryName: string;
+    visibility: "private" | "public";
+    branch?: string;
+    commitMessage?: string;
+  }) =>
+    ipcRenderer.invoke("agent:prepareGitHubPublish", input) as Promise<
+      | { ok: true; snapshot: AgentRuntimeSnapshot }
+      | {
+          ok: false;
+          error: { code: string; message: string; retriable: boolean };
+        }
+    >,
+  approveGitHubPublish: (input: {
+    publishId: string;
+    planSha256: string;
+  }) =>
+    ipcRenderer.invoke("agent:approveGitHubPublish", input) as Promise<
+      | { ok: true; snapshot: AgentRuntimeSnapshot }
+      | {
+          ok: false;
+          error: { code: string; message: string; retriable: boolean };
+        }
+    >,
   selectWorkspaceRoot: () =>
     ipcRenderer.invoke("agent:selectWorkspaceRoot") as Promise<
       | {

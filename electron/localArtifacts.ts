@@ -127,10 +127,11 @@ export async function scanLocalArtifacts(
   }
 
   const catalogBySha = new Map(
-    trustedCatalog.map((resource) => [
-      resource.download.expectedSha256.toLowerCase(),
-      resource.id
-    ])
+    trustedCatalog.flatMap((resource) =>
+      resource.download.expectedSha256
+        ? [[resource.download.expectedSha256.toLowerCase(), resource.id] as const]
+        : []
+    )
   );
   const importedAt = now().toISOString();
   let totalBytes = 0;

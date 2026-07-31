@@ -67,7 +67,11 @@ XL_AGENT_LLM_API_KEY=secret
 - Base URL 只能是无凭据、无 fragment/query 的 HTTPS URL。
 - Main 将 Base URL 规范化并追加 `/chat/completions`。
 - Renderer 只接收 Provider ID、端点模式、主机和模型 ID，不接收完整 URL 或 API Key。
-- 远程协议继续强制单一、非并行、严格 JSON Schema 的原生 tool call。
+- 远程请求使用兼容 DeepSeek 等标准 Chat Completions 实现的 closed JSON Schema，不发送
+  Provider 专属的 `strict` 或 `parallel_tool_calls` 参数；Main 仍通过 Zod、状态机与 Policy
+  强制单一 Tool Call、字段约束和执行权限。
+- `api.deepseek.com` 使用 V4 默认思考模式时不接受当前强制 Tool Call 选择，因此 Main 只对该
+  官方 Host 发送 `thinking: { type: "disabled" }`，不污染其他兼容 Provider 的请求体。
 
 ## 5. 验收证据
 

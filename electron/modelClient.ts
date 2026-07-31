@@ -2,6 +2,7 @@ import {
   createOpenAiAgentTools,
   ModelToolProtocolError,
   parseOpenAiToolDecision,
+  type AgentActionToolName,
   type OpenAiFunctionTool
 } from "../src/features/agent-core/modelToolProtocol";
 import type {
@@ -15,15 +16,18 @@ const modelSystemPrompt = `你是受控 Windows 资源准备 Agent 的规划模�
 
 规则：
 1. 只能调用本次请求 tools 中实际提供的函数。
-2. 只能使用 context、可信目录查询结果或既有 toolResults 中出现的 resourceId，禁止编造资源 ID。
-3. planning 阶段尚无成功的 read_system_profile 结果时，调用 read_system_profile。
-4. planning 阶段尚无成功的 search_trusted_catalog 结果时，调用一次 search_trusted_catalog。
-5. read_system_profile 或 search_trusted_catalog 成功后不得重复调用。
-6. search_trusted_catalog 成功且结果非空时，使用 create_plan；结果为空时使用 ask_clarification。
-7. replanning 阶段必须调用 create_replan。若 state.requestedReplanStrategy 存在，strategy 必须完全一致；否则仅在失败资源存在 fallbackId 时使用 trusted-mirror，没有 fallbackId 时使用 primary-retry。
-8. 每个 create_plan/create_replan 都会产生需要用户重新审批的 plan revision。
-9. controlled_download 与 export_workspace 仍会被宿主 Policy、审批记录和状态机二次校验，不得尝试绕过。
-10. 所有工具参数必须严格符合函数 JSON Schema，不得添加额外字段。`;
+2. task_planning 阶段必须调用 propose_task_plan：先根据用户首轮目标和路由结果给出完整目标、交付物、假设、约束、DAG 步骤、风险与审批边界。该动作不执行工具；用户确认前不得调用任何读取、下载或导出工具。
+3. Task Plan 的首轮 confirmation.required 必须为 true。只读步骤不得伪装成写入；本地写入、外部写入和代码执行必须声明独立审批及原因。Task Plan 确认不等于后续资源下载审批。
+4. 只能使用 context、可信目录查询结果或既有 toolResults 中出现的 resourceId，禁止编造资源 ID。
+5. planning 阶段尚无成功的 read_system_profile 结果时，调用 read_system_profile。
+6. planning 阶段尚无成功的 search_trusted_catalog 结果时，调用一次 search_trusted_catalog。
+7. read_system_profile 或 search_trusted_catalog 成功后不得重复调用。
+8. search_trusted_catalog 成功且结果非空时，使用 create_plan；结果为空时使用 ask_clarification。
+9. replanning 阶段必须调用 create_replan。若 state.requestedReplanStrategy 存在，strategy 必须完全一致；否则仅在失败资源存在 fallbackId 时使用 trusted-mirror，没有 fallbackId 时使用 primary-retry。
+10. 每个 create_plan/create_replan 都会产生需要用户重新审批的 plan revision。
+11. controlled_download 与 export_workspace 仍会被宿主 Policy、审批记录和状态机二次校验，不得尝试绕过。
+12. 当 routeDecision.skillId 为 github-project-discovery 时，只调用 search_github_repositories；成功或失败返回后调用 finish。搜索参数必须忠实表达任务：近期热门榜使用 discovery；按名称查找（如“名叫 tau”）使用 name；明确的 GitHub URL 或 owner/repo 使用 exact。name/exact 不得改写为时间窗口或热门排行。候选仓库的固定 commit、审批和下载由结果页中的宿主受控流程继续完成。
+13. 所有工具参数必须严格符合函数 JSON Schema，不得添加额外字段。`;
 
 const modelConnectionTestPrompt = `这是远程模型连接测试。你必须调用且只调用 finish 函数，summary 使用 "Connection test succeeded."，不要返回正文。`;
 
@@ -132,6 +136,40 @@ function configuredValue(value: string | undefined) {
   return normalized ? normalized : null;
 }
 
+function sanitizeProviderErrorMessage(
+  value: unknown,
+  secrets: string[]
+) {
+  if (typeof value !== "string") return null;
+  let message = value
+    .replace(/[\u0000-\u001f\u007f]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  for (const secret of secrets) {
+    if (secret) message = message.split(secret).join("[redacted]");
+  }
+  return message ? message.slice(0, 500) : null;
+}
+
+async function readProviderErrorMessage(
+  response: Response,
+  secrets: string[]
+) {
+  try {
+    const body = await response.text();
+    if (!body) return null;
+    const payload = JSON.parse(body) as {
+      error?: { message?: unknown };
+    };
+    return sanitizeProviderErrorMessage(
+      payload.error?.message,
+      secrets
+    );
+  } catch {
+    return null;
+  }
+}
+
 function parseHttpsUrl(value: string, label: string) {
   let url: URL;
   try {
@@ -170,6 +208,18 @@ function endpointFromBaseUrl(baseUrl: string) {
   const basePath = url.pathname.replace(/\/+$/u, "");
   url.pathname = `${basePath}/chat/completions`.replace(/\/{2,}/gu, "/");
   return url.toString();
+}
+
+function providerRequestExtensions(
+  config: ResolvedRemoteModelConfig
+) {
+  const hostname = new URL(config.endpoint).hostname.toLowerCase();
+  if (hostname === "api.deepseek.com") {
+    return {
+      thinking: { type: "disabled" as const }
+    };
+  }
+  return {};
 }
 
 export function resolveRemoteModelConfig(
@@ -267,10 +317,19 @@ export class RemoteModelClient {
   }
 
   async requestDecision(context: ModelContext) {
+    const availableActions: AgentActionToolName[] =
+      context.state.phase === "task_planning"
+        ? ["propose_task_plan"]
+        : context.state.routeDecision?.skillId === "github-project-discovery"
+          ? ["finish"]
+          : ["ask_clarification", "create_plan", "create_replan", "finish"];
     return this.requestRemoteToolDecision(
       modelSystemPrompt,
       context,
-      context.availableTools
+      context.availableTools,
+      availableActions,
+      false,
+      context.state.phase === "task_planning"
     );
   }
 
@@ -279,6 +338,7 @@ export class RemoteModelClient {
       modelConnectionTestPrompt,
       { purpose: "model-connection-test" },
       [],
+      ["finish"],
       true
     );
   }
@@ -291,12 +351,24 @@ export class RemoteModelClient {
     systemPrompt: string,
     context: unknown,
     availableTools: AgentToolName[],
-    forceFinish = false
+    availableActions: AgentActionToolName[],
+    forceFinish = false,
+    taskPlanningMode = false
   ) {
     const config = this.getConfig();
+    const githubSearchMode = !taskPlanningMode && availableTools.includes(
+      "search_github_repositories"
+    );
     const tools = forceFinish
       ? [finishTool()]
-      : createOpenAiAgentTools(availableTools);
+      : createOpenAiAgentTools(
+          taskPlanningMode ? [] : availableTools,
+          availableActions
+        ).filter((tool) =>
+          !githubSearchMode ||
+          tool.function.name === "finish" ||
+          tool.function.name === "search_github_repositories"
+        );
     let response: Response;
     try {
       response = await this.fetchRequest(config.endpoint, {
@@ -308,11 +380,9 @@ export class RemoteModelClient {
         body: JSON.stringify({
           model: config.model,
           temperature: 0.1,
+          ...providerRequestExtensions(config),
           tools,
-          tool_choice: forceFinish
-            ? { type: "function", function: { name: "finish" } }
-            : "required",
-          parallel_tool_calls: false,
+          tool_choice: "required",
           messages: [
             { role: "system", content: systemPrompt },
             { role: "user", content: JSON.stringify(context) }
@@ -325,6 +395,10 @@ export class RemoteModelClient {
     }
 
     if (!response.ok) {
+      const providerMessage = await readProviderErrorMessage(
+        response,
+        [config.apiKey]
+      );
       if (response.status === 401 || response.status === 403) {
         throw remoteModelError(
           "MODEL_AUTH_FAILED",
@@ -334,7 +408,9 @@ export class RemoteModelClient {
       }
       throw remoteModelError(
         "MODEL_HTTP_ERROR",
-        `远程 LLM 请求失败：HTTP ${response.status}。`,
+        providerMessage
+          ? `远程 LLM 请求失败：HTTP ${response.status}。服务返回：${providerMessage}`
+          : `远程 LLM 请求失败：HTTP ${response.status}。`,
         response.status === 408 || response.status === 429 || response.status >= 500
       );
     }
@@ -362,7 +438,12 @@ export class RemoteModelClient {
     }
 
     try {
-      return parseOpenAiToolDecision(message, config.model, availableTools);
+      return parseOpenAiToolDecision(
+        message,
+        config.model,
+        availableTools,
+        availableActions
+      );
     } catch (error) {
       if (error instanceof ModelToolProtocolError) throw protocolError(error);
       throw remoteModelError(

@@ -11,6 +11,7 @@ module.exports = {
     "dist-electron/**/*",
     "package.json",
     "!**/*.map",
+    "!dist-electron/**/*.test.js",
     "!**/.env",
     "!**/.env.*"
   ],

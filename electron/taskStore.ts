@@ -1,5 +1,5 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import initSqlJs = require("sql.js/dist/sql-asm.js");
 import type { Database, ParamsObject, SqlValue } from "sql.js";
@@ -133,16 +133,28 @@ export type OperationEventRecord = {
   eventType:
     | "catalog-approval-pinned"
     | "catalog-pin-rejected"
+    | "plan-approval-pinned"
+    | "plan-pin-rejected"
     | "download-checkpointed"
     | "download-resumed"
     | "signature-verified"
-    | "signature-rejected";
+    | "signature-rejected"
+    | "github-publish-plan-created"
+    | "github-publish-approval-pinned"
+    | "github-publish-completed"
+    | "github-publish-failed";
   outcome: "success" | "denied" | "error";
   detail: unknown;
   createdAt: string;
 };
 
-const terminalPhases = new Set(["intake", "unsupported", "handoff", "cancelled"]);
+const terminalPhases = new Set([
+  "intake",
+  "unsupported",
+  "result",
+  "handoff",
+  "cancelled"
+]);
 const demoDataTables = [
   "agent_b_runs",
   "operation_events",
@@ -157,6 +169,63 @@ const demoDataTables = [
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function planApprovalSha256(
+  state: Pick<
+    AgentState,
+    | "taskId"
+    | "task"
+    | "revision"
+    | "route"
+    | "taskRequirements"
+    | "systemProfile"
+    | "resources"
+    | "localArtifacts"
+    | "workspace"
+  >
+) {
+  const resources = state.resources.map((resource) => ({
+    id: resource.id,
+    name: resource.name,
+    version: resource.version,
+    publisher: resource.publisher,
+    source: resource.source,
+    homepage: resource.homepage,
+    releasePage: resource.releasePage,
+    sizeMb: resource.sizeMb,
+    license: resource.license,
+    purpose: resource.purpose,
+    recommendation: resource.recommendation,
+    required: resource.required,
+    selected: resource.selected,
+    dependsOn: resource.dependsOn,
+    provides: resource.provides,
+    requiresCapabilities: resource.requiresCapabilities,
+    supportedOperatingSystems: resource.supportedOperatingSystems,
+    supportedArchitectures: resource.supportedArchitectures,
+    sourceTrust: resource.sourceTrust,
+    catalogStatus: resource.catalogStatus,
+    verification: resource.verification,
+    download: resource.download,
+    github: resource.github ?? null,
+    npm: resource.npm ?? null,
+    fallbackId: resource.fallbackId ?? null,
+    replacedFrom: resource.replacedFrom ?? null
+  }));
+  return createHash("sha256")
+    .update(JSON.stringify({
+      taskId: state.taskId,
+      task: state.task,
+      revision: state.revision,
+      route: state.route,
+      taskRequirements: state.taskRequirements,
+      systemProfile: state.systemProfile,
+      targetRootPath: state.workspace.targetRootPath ?? null,
+      resources,
+      localArtifacts: state.localArtifacts
+    }))
+    .digest("hex");
 }
 
 export function isPersistedAgentState(value: unknown): value is PersistedAgentState {
@@ -1120,6 +1189,17 @@ export class TaskStore {
             },
             createdAt: savedAt
           });
+          this.insertOperationEvent({
+            taskId: state.taskId,
+            revision: state.revision,
+            resourceId: null,
+            eventType: "plan-approval-pinned",
+            outcome: "success",
+            detail: {
+              planSha256: planApprovalSha256(state as AgentState)
+            },
+            createdAt: savedAt
+          });
           for (const resource of state.resources) {
             if (
               !resource.selected ||
@@ -1231,6 +1311,31 @@ export class TaskStore {
     return this.approvalRecordFromRow(row, taskId, revision);
   }
 
+  private isApprovalPlanPinned(
+    taskId: string,
+    revision: number,
+    state: AgentState | PersistedAgentState
+  ) {
+    if (state.taskId !== taskId || state.revision !== revision) return false;
+    const row = firstRow(
+      this.database,
+      `SELECT detail_json
+       FROM operation_events
+       WHERE task_id = ? AND revision = ?
+         AND event_type = 'plan-approval-pinned'
+         AND outcome = 'success'
+       ORDER BY created_at DESC, event_id DESC
+       LIMIT 1`,
+      [taskId, revision]
+    );
+    const detail = parseJson(row ? asString(row.detail_json) : null);
+    return (
+      isRecord(detail) &&
+      typeof detail.planSha256 === "string" &&
+      detail.planSha256 === planApprovalSha256(state as AgentState)
+    );
+  }
+
   async getApproval(taskId: string, revision: number) {
     return this.enqueue(async () => {
       const record = this.approvalRecord(taskId, revision);
@@ -1248,15 +1353,29 @@ export class TaskStore {
 
   async hasValidApproval(taskId: string, revision: number) {
     const record = await this.getApproval(taskId, revision);
+    const planPinned = await this.enqueue(() => {
+      const row = firstRow(
+        this.database,
+        `SELECT state_json FROM task_snapshots
+         WHERE task_id = ? AND revision = ?`,
+        [taskId, revision]
+      );
+      const state = parseJson(row ? asString(row.state_json) : null);
+      return isPersistedAgentState(state)
+        ? this.isApprovalPlanPinned(taskId, revision, state)
+        : false;
+    });
     const catalogPinned =
       record?.catalogVersion === trustedCatalogMetadata.catalogVersion &&
       record.catalogSourceSha256 === trustedCatalogMetadata.sourceSha256;
     return {
-      valid: record?.status === "active" && catalogPinned,
+      valid: record?.status === "active" && catalogPinned && planPinned,
       expiresAt: record?.expiresAt ?? null,
       status:
         record?.status === "active" && !catalogPinned
           ? "catalog-mismatch"
+          : record?.status === "active" && !planPinned
+            ? "plan-mismatch"
           : record?.status ?? "missing",
       catalogVersion: record?.catalogVersion ?? null,
       catalogSourceSha256: record?.catalogSourceSha256 ?? null
@@ -1284,7 +1403,13 @@ export class TaskStore {
       return {
         state,
         approval: {
-          valid: approval?.status === "active",
+          valid:
+            approval?.status === "active" &&
+            this.isApprovalPlanPinned(
+              state.taskId,
+              state.revision,
+              state
+            ),
           expiresAt: approval?.expiresAt ?? null
         },
         savedAt: asString(row.updated_at) ?? ""

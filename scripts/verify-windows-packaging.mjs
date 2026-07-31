@@ -52,6 +52,10 @@ assert(
   "Packaging must explicitly exclude model configuration and secrets."
 );
 assert(
+  config.files.includes("!dist-electron/**/*.test.js"),
+  "Packaging must explicitly exclude compiled Electron tests."
+);
+assert(
   packageJson.version === "0.3.0",
   "P3 distributable version must be 0.3.0."
 );
@@ -98,6 +102,10 @@ if (artifactArgument) {
         !entry.includes("/.env")
     ),
     "Packaged app.asar must not contain .env files."
+  );
+  assert(
+    normalizedEntries.every((entry) => !entry.endsWith(".test.js")),
+    "Packaged app.asar must not contain compiled tests."
   );
   assert(
     readdirSync(artifactRoot).some((entry) => entry.endsWith(".exe")),

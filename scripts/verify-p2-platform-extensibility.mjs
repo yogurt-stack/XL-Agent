@@ -90,6 +90,31 @@ const {
     "taskRequirements.js"
   )
 );
+const {
+  createTaskPlan,
+  defaultTaskPlanToolPolicies,
+  prepareTaskPlanForConfirmation,
+  validateTaskPlan
+} = require(
+  path.join(
+    root,
+    "dist-electron",
+    "src",
+    "features",
+    "agent-core",
+    "taskPlan.js"
+  )
+);
+const { createLocalTaskPlanProposal } = require(
+  path.join(
+    root,
+    "dist-electron",
+    "src",
+    "features",
+    "agent-core",
+    "taskPlanTemplates.js"
+  )
+);
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -156,7 +181,48 @@ assert(
     route.decision.status === "supported",
   "Research goals must route through the installed second Domain Skill."
 );
-const clarifying = transition(submitted, route);
+const taskPlanning = transition(submitted, route);
+const availableTools = [
+  "read_system_profile",
+  "search_trusted_catalog",
+  "controlled_download",
+  "export_workspace"
+];
+const taskPlanContext = {
+  tools: defaultTaskPlanToolPolicies.filter((policy) =>
+    availableTools.includes(policy.name)
+  ),
+  requireInitialConfirmation: true
+};
+const createdAt = "2026-07-31T00:00:00.000Z";
+const taskPlanDraft = createTaskPlan({
+  planId: "p2-research-plan",
+  taskId: taskPlanning.taskId,
+  proposal: createLocalTaskPlanProposal({
+    state: taskPlanning,
+    step: 0,
+    maxSteps: 6,
+    availableTools,
+    toolResults: []
+  }),
+  createdBy: "local-rule",
+  createdAt
+});
+const taskPlanValidation = validateTaskPlan(taskPlanDraft, taskPlanContext);
+const waitingTaskPlan = transition(taskPlanning, {
+  type: "TASK_PLAN_PROPOSED",
+  plan: prepareTaskPlanForConfirmation(
+    taskPlanDraft,
+    taskPlanContext,
+    createdAt
+  ),
+  validation: taskPlanValidation
+});
+const clarifying = transition(waitingTaskPlan, {
+  type: "TASK_PLAN_CONFIRMED",
+  revision: 1,
+  confirmedAt: "2026-07-31T00:01:00.000Z"
+});
 const planning = transition(clarifying, {
   type: "ANSWER_CLARIFICATION",
   questionId: "research-template",

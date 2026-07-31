@@ -136,6 +136,60 @@ function answerFromManifest(
         resource.status !== "verified"
     )
     .map((resource) => resource.name);
+  const githubResource = manifest.resources.find(
+    (resource) => resource.selected && resource.github
+  );
+  const github = githubResource?.github ?? null;
+  const local = manifest.localRepository;
+  const projectReadiness = github
+    ? {
+        source: "github" as const,
+        fullName: github.fullName,
+        commitSha: github.commitSha,
+        branch: github.defaultBranch,
+        clean: true,
+        ecosystems: github.analysis.ecosystems,
+        manifests: github.analysis.manifests,
+        lockfiles: github.analysis.lockfiles,
+        runtimeHints: github.analysis.runtimeHints,
+        dependencyPreparation: github.analysis.nodeOfflinePreparation,
+        offlinePackageCount: github.analysis.nodeOfflinePackageCount,
+        offlineBlockers: github.analysis.nodeOfflineBlockers,
+        selectedOfflinePackages: manifest.resources.filter(
+          (resource) => resource.selected && resource.npm
+        ).length,
+        treeTruncated: github.analysis.treeTruncated
+      }
+    : local
+      ? {
+          source: "local" as const,
+          fullName: local.displayName,
+          commitSha: local.commitSha,
+          branch: local.branch,
+          clean: local.clean,
+          ecosystems: local.analysis.ecosystems,
+          manifests: local.analysis.manifests,
+          lockfiles: local.analysis.lockfiles,
+          runtimeHints: local.analysis.runtimeHints,
+          dependencyPreparation: local.analysis.nodeOfflinePreparation,
+          offlinePackageCount: local.analysis.nodeOfflinePackageCount,
+          offlineBlockers: local.analysis.nodeOfflineBlockers,
+          selectedOfflinePackages: 0,
+          treeTruncated: local.analysis.treeTruncated
+        }
+    : null;
+  const projectSummary = projectReadiness
+    ? ` 项目 ${projectReadiness.fullName}@${projectReadiness.commitSha.slice(0, 12)} 已识别为 ${projectReadiness.ecosystems.join("、")}；${
+        projectReadiness.source === "local"
+          ? `${projectReadiness.clean ? "本地工作区干净，可继续创建独立发布计划。" : "本地工作区存在未提交变更，当前不能发布。"}`
+          :
+        projectReadiness.dependencyPreparation === "package-lock-supported"
+          ? "检测到受支持的 npm 锁文件，可以生成独立的离线依赖计划。"
+          : projectReadiness.dependencyPreparation === "lockfile-unsupported"
+            ? "Node 项目未检测到当前支持的 npm 锁文件，不能安全生成离线依赖计划。"
+            : "当前不是 Node 项目，不进入 npm 离线依赖流程。"
+      }`
+    : "";
   return {
     manifestRevision: manifest.manifestRevision,
     planRevision: manifest.planRevision,
@@ -145,10 +199,11 @@ function answerFromManifest(
     allowedActions: manifest.allowedActions,
     forbiddenActions: manifest.forbiddenActions,
     integrity,
+    projectReadiness,
     summary:
       integrity === "invalid"
         ? `Manifest r${manifest.manifestRevision} 完整性校验失败，不能宣称工作区已就绪。`
-        : `Agent B 已读取 Manifest r${manifest.manifestRevision}：${preparedRequiredResources.length} 个必需资源已准备，${missingOrFailedResources.length} 个仍缺失或失败。`
+        : `Agent B 已读取 Manifest r${manifest.manifestRevision}：${preparedRequiredResources.length} 个必需资源已准备，${missingOrFailedResources.length} 个仍缺失或失败。${projectSummary}`
   };
 }
 

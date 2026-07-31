@@ -1,6 +1,14 @@
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import axe, { type AxeResults } from "axe-core";
@@ -36,7 +44,11 @@ function deterministicEnvironment(approvalTtlMs: number) {
 
 async function launchApplication() {
   electronApp = await electron.launch({
-    args: ["--disable-gpu", projectRoot],
+    args: [
+      "--disable-gpu",
+      `--user-data-dir=${path.join(testDataRoot, "electron-user-data")}`,
+      projectRoot
+    ],
     cwd: projectRoot,
     env: testEnvironment,
     locale: "zh-CN",
@@ -84,6 +96,13 @@ test.afterEach(async ({}, testInfo: TestInfo) => {
 async function approveInitialTask() {
   await page.getByRole("textbox", { name: "任务描述" }).fill("准备 Python 机器学习环境");
   await page.getByRole("button", { name: "开始任务" }).click();
+
+  await expect(
+    page.getByRole("heading", { name: "先确认 Agent 对任务的理解" })
+  ).toBeVisible();
+  await expect(page.getByText("确认的是处理流程，不是执行权限。"))
+    .toBeVisible();
+  await page.getByRole("button", { name: "确认流程并继续" }).click();
 
   await expect(
     page.getByRole("heading", { name: "Python AI 环境是否需要同时准备前端工具链" })
@@ -217,6 +236,100 @@ async function openCompletedWorkspace() {
   expect(JSON.parse(await page.locator("pre.workspace-code-preview").innerText())).toEqual(manifest);
   return manifest;
 }
+
+function createLocalGitRepository() {
+  const rootPath = path.join(testDataRoot, "local-repository");
+  mkdirSync(rootPath, { recursive: true });
+  execFileSync("git", ["init"], { cwd: rootPath });
+  execFileSync("git", ["config", "user.name", "Agent E2E"], {
+    cwd: rootPath
+  });
+  execFileSync("git", ["config", "user.email", "agent@example.test"], {
+    cwd: rootPath
+  });
+  writeFileSync(
+    path.join(rootPath, "package.json"),
+    `${JSON.stringify({ name: "local-repository", version: "1.0.0" })}\n`,
+    "utf8"
+  );
+  writeFileSync(
+    path.join(rootPath, "package-lock.json"),
+    `${JSON.stringify({
+      name: "local-repository",
+      lockfileVersion: 3,
+      packages: {
+        "": { name: "local-repository", version: "1.0.0" }
+      }
+    })}\n`,
+    "utf8"
+  );
+  execFileSync("git", ["add", "package.json", "package-lock.json"], {
+    cwd: rootPath
+  });
+  execFileSync("git", ["commit", "-m", "initial"], { cwd: rootPath });
+  return rootPath;
+}
+
+test("imports a local Git repository into Manifest and Agent B without write permission", async () => {
+  const repositoryRoot = createLocalGitRepository();
+  await electronApp.evaluate(
+    ({ dialog }, selectedPath) => {
+      (
+        dialog as unknown as {
+          showOpenDialog: () => Promise<{
+            canceled: boolean;
+            filePaths: string[];
+          }>;
+        }
+      ).showOpenDialog = async () => ({
+        canceled: false,
+        filePaths: [selectedPath]
+      });
+    },
+    repositoryRoot
+  );
+
+  await page.getByTestId("import-local-repository").click();
+
+  const repositorySummary = page.getByTestId("local-repository-summary");
+  await expect(
+    repositorySummary.getByRole("heading", { name: "本地仓库只读摘要" })
+  ).toBeVisible();
+  await expect(repositorySummary).toContainText("local-repository");
+  await expect(repositorySummary).toContainText("clean");
+  await expect(
+    page.getByRole("heading", { name: "审批后发布到 GitHub" })
+  ).toBeVisible();
+  const runAgentB = page.getByTestId("run-agent-b");
+  await expect(runAgentB).toBeEnabled();
+  await runAgentB.click();
+  await expect(page.getByTestId("agent-b-answer")).toContainText(
+    "本地 Git 仓库（只读）"
+  );
+
+  const workspaceRoot = await page
+    .locator(".workspace-view .agent-page-heading > div:last-child > p")
+    .innerText();
+  const manifest = JSON.parse(
+    readFileSync(path.join(workspaceRoot, "resource-manifest.json"), "utf8")
+  ) as {
+    localRepository: {
+      displayName: string;
+      commitSha: string;
+      analysis: { ecosystems: string[] };
+    };
+    forbiddenActions: string[];
+  };
+  expect(workspaceRoot.startsWith(testDataRoot)).toBe(true);
+  expect(manifest.localRepository).toMatchObject({
+    displayName: "local-repository",
+    commitSha: expect.stringMatching(/^[a-f0-9]{40,64}$/u),
+    analysis: { ecosystems: ["node"] }
+  });
+  expect(manifest.forbiddenActions).toContain("未经独立审批发布到 GitHub");
+  expect(JSON.stringify(manifest)).not.toContain(repositoryRoot);
+  await expectNoSeriousAccessibilityViolations("local repository workspace");
+});
 
 test("retries the original source and reaches a ready workspace", async () => {
   await expectNoSeriousAccessibilityViolations("home");
@@ -390,6 +503,10 @@ test("routes the second Domain Skill through its own plan", async () => {
     .getByRole("textbox", { name: "任务描述" })
     .fill("准备一个科研数据分析工作区");
   await page.getByRole("button", { name: "开始任务" }).click();
+  await expect(
+    page.getByRole("heading", { name: "先确认 Agent 对任务的理解" })
+  ).toBeVisible();
+  await page.getByRole("button", { name: "确认流程并继续" }).click();
   await expect(
     page.getByRole("heading", {
       name: "科研数据环境是否需要包含可验证的示例工作区"

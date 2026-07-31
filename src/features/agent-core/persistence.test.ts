@@ -5,6 +5,7 @@ import {
   normalizeRestorableAgentState
 } from "./persistence";
 import { ExtensibleAgentRouter } from "./router";
+import { confirmTaskPlanForTest } from "./taskPlanTestSupport";
 
 function createPersistableState() {
   let state = createInitialAgentState();
@@ -14,6 +15,7 @@ function createPersistableState() {
     taskId: "task-persistence-test"
   });
   state = transition(state, new ExtensibleAgentRouter().route(state)!);
+  state = confirmTaskPlanForTest(state);
   state = transition(state, {
     type: "ANSWER_CLARIFICATION",
     questionId: "primary-workload",
@@ -57,6 +59,8 @@ describe("persisted AgentState validation", () => {
       route: "windows-ai-development"
     } as Record<string, unknown>;
     delete legacy.routeDecision;
+    delete legacy.taskPlan;
+    delete legacy.taskPlanValidation;
 
     const restored = normalizeRestorableAgentState(legacy);
 
@@ -67,6 +71,8 @@ describe("persisted AgentState validation", () => {
       skillId: "ai-development-environment",
       sourceProviderId: "trusted-catalog"
     });
+    expect(restored?.taskPlan).toBeNull();
+    expect(restored?.taskPlanValidation).toBeNull();
     expect(restored?.revision).toBe(current.revision);
     expect(restored?.approvedRevision).toBe(current.approvedRevision);
     expect(restored?.resources).toEqual(current.resources);

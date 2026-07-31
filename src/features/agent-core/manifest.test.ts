@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import { createResourceManifest } from "./manifest";
 import { createInitialAgentState, transition } from "./machine";
 import { ExtensibleAgentRouter } from "./router";
+import { confirmTaskPlanForTest } from "./taskPlanTestSupport";
 import type { AgentState } from "./types";
 
 function createApprovedPlan(): AgentState {
   let state = createInitialAgentState();
   state = transition(state, { type: "SUBMIT_TASK", task: "准备 Windows AI 环境" });
   state = transition(state, new ExtensibleAgentRouter().route(state)!);
+  state = confirmTaskPlanForTest(state);
   state = transition(state, {
     type: "ANSWER_CLARIFICATION",
     questionId: "primary-workload",

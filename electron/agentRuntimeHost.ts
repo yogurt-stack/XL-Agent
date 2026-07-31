@@ -1,8 +1,13 @@
 import {
   DefaultAgentPolicy,
-  InMemoryAgentToolExecutor
+  InMemoryAgentToolExecutor,
+  type GitHubRepositorySearchRunner
 } from "../src/features/agent-core/agentServices";
 import { parseAgentUserEvent } from "../src/features/agent-core/agentSchemas";
+import {
+  isGitHubRepositorySearchOutput,
+  latestGitHubRepositorySearchResult
+} from "../src/features/agent-core/githubSearch";
 import { LocalRuleModelRuntime } from "../src/features/agent-core/localRuleModel";
 import {
   ModelConnectionController,
@@ -41,6 +46,7 @@ import type {
 import type { ControlledDownloadOptions } from "./downloadClient";
 import type { DownloadTaskProgress } from "./downloadTasks";
 import type { RemoteModelClient } from "./modelClient";
+import type { GitHubRepositoryInspectionResult } from "./githubClient";
 import {
   toModelConnectionError as toMainModelConnectionError
 } from "./modelClient";
@@ -58,6 +64,12 @@ import {
 import { readHostSystemProfile } from "./systemProfile";
 import { LocalXunleiAdapter } from "./xunleiAdapter";
 import type { LocalArtifactRecord } from "./localArtifacts";
+import type { LocalRepositoryInspection } from "./localRepository";
+import {
+  GitHubPublisher,
+  githubPublishPlanSha256
+} from "./githubPublisher";
+import { SingleFlightGate } from "./singleFlightGate";
 import { ElectronArtifactVerifier } from "./artifactVerifier";
 import { writeCurrentManifestSnapshot } from "./manifestSnapshots";
 import { WorkspaceInspectorAgent } from "./agentB";
@@ -65,6 +77,11 @@ import { WorkspaceInspectorAgent } from "./agentB";
 export type AgentRuntimeHostOptions = {
   store: TaskStore;
   modelClient: RemoteModelClient;
+  githubRepositorySearch: GitHubRepositorySearchRunner;
+  inspectGitHubRepository: (
+    fullName: string
+  ) => Promise<GitHubRepositoryInspectionResult>;
+  githubPublisher?: GitHubPublisher;
   workspaceRoot: string;
   performDownload: (
     resourceId: string,
@@ -118,10 +135,17 @@ export class AgentRuntimeHost {
     createDefaultSourceProviderRegistry();
   private readonly downloadAdapter: LocalXunleiAdapter;
   private readonly agentB: WorkspaceInspectorAgent;
+  private readonly localRepositorySessions = new Map<
+    string,
+    LocalRepositoryInspection
+  >();
+  private readonly githubPublisher: GitHubPublisher;
+  private readonly githubPublishApprovalGate = new SingleFlightGate();
   private suppressNextManifestGeneration = false;
   private disposed = false;
 
   private constructor(private readonly options: AgentRuntimeHostOptions) {
+    this.githubPublisher = options.githubPublisher ?? new GitHubPublisher();
     this.downloadAdapter = new LocalXunleiAdapter({
       store: options.store,
       performDownload: async (resourceId, metadata, downloadOptions) =>
@@ -190,7 +214,8 @@ export class AgentRuntimeHost {
       () => createSystemProfileToolOutput(readHostSystemProfile()),
       (request) => this.runControlledDownload(request),
       (request) => this.runWorkspaceExport(request),
-      this.sourceProviders.get("trusted-catalog") ?? undefined
+      this.sourceProviders.get("trusted-catalog") ?? undefined,
+      this.options.githubRepositorySearch
     );
 
     this.runtime = new AgentRuntime({
@@ -254,18 +279,36 @@ export class AgentRuntimeHost {
         id: skill.id,
         displayName: skill.displayName
       })),
-      sourceProviders: this.sourceProviders.list().map((provider) => ({
-        id: provider.id
-      })),
+      sourceProviders: [
+        ...this.sourceProviders.list().map((provider) => ({
+          id: provider.id
+        })),
+        { id: "github-api" }
+      ],
       workspaceTemplates: this.workspaceTemplates.list().map((template) => ({
         id: template.id
-      }))
+      })),
+      githubPublish: {
+        configured: Boolean(
+          process.env.XL_AGENT_GITHUB_PUBLISH_TOKEN?.trim()
+        ),
+        credentialBoundary: "separate-write-token",
+        existingRepositoryPolicy: "create-only"
+      }
     };
   }
 
   async dispatch(value: unknown): Promise<AgentRuntimeSnapshot> {
     const event = parseAgentUserEvent(value);
     const state = this.runtime.getState();
+    if (
+      state.githubPublish.status === "publishing" ||
+      this.githubPublishApprovalGate.isLocked()
+    ) {
+      throw new Error(
+        "GitHub 发布正在执行；完成或失败前不能派发其他任务事件。"
+      );
+    }
     if (event.type === "PAUSE_DOWNLOAD") {
       if (
         await this.downloadAdapter.pause(
@@ -299,6 +342,47 @@ export class AgentRuntimeHost {
     if (event.type === "CANCEL_TASK") {
       await this.downloadAdapter.cancelTask(state.taskId);
     }
+    if (event.type === "PREPARE_GITHUB_REPOSITORY") {
+      const searchResult = latestGitHubRepositorySearchResult(state);
+      const output =
+        searchResult?.status === "success" &&
+        isGitHubRepositorySearchOutput(searchResult.output)
+          ? searchResult.output
+          : null;
+      const selected = output?.repositories.find(
+        (repository) =>
+          repository.fullName.toLowerCase() === event.fullName.toLowerCase()
+      );
+      if (
+        state.phase !== "result" ||
+        state.routeDecision?.skillId !== "github-project-discovery" ||
+        !selected
+      ) {
+        throw new Error("只能准备当前 GitHub 查询结果中明确选择的仓库。");
+      }
+      const inspection = await this.options.inspectGitHubRepository(
+        selected.fullName
+      );
+      if (inspection.ok === false) {
+        throw new Error(
+          `${inspection.error.code}: ${inspection.error.message}`
+        );
+      }
+      this.runtime.reportExternalEvent({
+        type: "GITHUB_ACQUISITION_PREPARED",
+        resources: [
+          inspection.resource,
+          ...inspection.dependencyResources
+        ],
+        explanation:
+          `已将 ${inspection.resource.github?.fullName ?? selected.fullName}` +
+          ` 固定到 commit ${inspection.resource.github?.commitSha.slice(0, 12)}。` +
+          (inspection.dependencyResources.length
+            ? ` 同时识别出 ${inspection.dependencyResources.length} 个可选 npm 离线包，默认不下载。`
+            : "")
+      });
+      return this.getSnapshot();
+    }
     this.runtime.dispatch(event);
     if (
       event.type === "RUN_AGENT_B" &&
@@ -318,6 +402,12 @@ export class AgentRuntimeHost {
   }
 
   retryTaskLocally(): AgentRuntimeSnapshot {
+    if (
+      this.runtime.getState().githubPublish.status === "publishing" ||
+      this.githubPublishApprovalGate.isLocked()
+    ) {
+      throw new Error("GitHub 发布正在执行，不能重置模型任务。");
+    }
     const task = this.runtime.getState().task.trim();
     this.modelConnection.useLocalModel(
       "远程规划未在安全步数内生成计划，本次重试已切换本地规则模型。"
@@ -338,10 +428,12 @@ export class AgentRuntimeHost {
       state.phase === "downloading" ||
       state.phase === "verifying" ||
       state.phase === "exporting" ||
-      state.agentB.status === "running"
+      state.agentB.status === "running" ||
+      state.githubPublish.status === "publishing" ||
+      this.githubPublishApprovalGate.isLocked()
     ) {
       throw new Error(
-        "当前存在运行中的下载、验证、导出或 Agent B 检查，不能重置 Demo 数据。"
+        "当前存在运行中的下载、验证、导出、Agent B 检查或 GitHub 发布，不能重置 Demo 数据。"
       );
     }
     this.runtime.stop();
@@ -389,6 +481,8 @@ export class AgentRuntimeHost {
     const state = this.runtime.getState();
     if (
       state.taskId === "unassigned" ||
+      state.githubPublish.status === "publishing" ||
+      this.githubPublishApprovalGate.isLocked() ||
       records.some(
         (record) =>
           record.taskId !== state.taskId ||
@@ -440,7 +534,228 @@ export class AgentRuntimeHost {
     return this.getSnapshot();
   }
 
+  importLocalRepository(inspection: LocalRepositoryInspection) {
+    const state = this.runtime.getState();
+    if (
+      state.phase === "downloading" ||
+      state.phase === "verifying" ||
+      state.phase === "exporting" ||
+      state.agentB.status === "running" ||
+      state.githubPublish.status === "publishing" ||
+      this.githubPublishApprovalGate.isLocked()
+    ) {
+      throw new Error("当前存在运行中的写入或检查任务，不能导入本地仓库。");
+    }
+    this.localRepositorySessions.clear();
+    this.localRepositorySessions.set(
+      inspection.summary.repositoryHandleId,
+      inspection
+    );
+    this.runtime.reportExternalEvent({
+      type: "LOCAL_REPOSITORY_IMPORTED",
+      taskId:
+        this.options.createTaskId?.() ??
+        `local-repo-task-${Date.now()}-${inspection.summary.fingerprint.slice(0, 8)}`,
+      repository: inspection.summary
+    });
+    return this.getSnapshot();
+  }
+
+  async prepareGitHubPublish(input: unknown) {
+    const state = this.runtime.getState();
+    const repository = state.localRepository;
+    const inspection = repository
+      ? this.localRepositorySessions.get(repository.repositoryHandleId)
+      : null;
+    if (
+      state.phase !== "handoff" ||
+      state.route !== "local-repository-import" ||
+      !repository ||
+      !inspection ||
+      this.githubPublishApprovalGate.isLocked() ||
+      state.githubPublish.status === "publishing" ||
+      state.githubPublish.status === "published"
+    ) {
+      return {
+        ok: false as const,
+        error: {
+          code: "GITHUB_PUBLISH_LOCAL_SESSION_REQUIRED",
+          message:
+            "请在当前应用会话中重新导入本地仓库，再创建 GitHub 发布计划。",
+          retriable: false
+        }
+      };
+    }
+    const prepared = await this.githubPublisher.prepare(inspection, input);
+    if (!prepared.ok) return prepared;
+    const currentState = this.runtime.getState();
+    if (
+      currentState.taskId !== state.taskId ||
+      currentState.phase !== "handoff" ||
+      currentState.localRepository?.repositoryHandleId !==
+        repository.repositoryHandleId ||
+      this.githubPublishApprovalGate.isLocked()
+    ) {
+      return {
+        ok: false as const,
+        error: {
+          code: "GITHUB_PUBLISH_CONTEXT_CHANGED",
+          message:
+            "检查 GitHub 目标期间当前任务或本地仓库发生变化，请重新生成发布计划。",
+          retriable: false
+        }
+      };
+    }
+    this.runtime.reportExternalEvent({
+      type: "GITHUB_PUBLISH_PLAN_PREPARED",
+      plan: prepared.plan
+    });
+    await this.options.store.recordOperationEvent({
+      taskId: state.taskId,
+      revision: state.revision,
+      resourceId: null,
+      eventType: "github-publish-plan-created",
+      outcome: "success",
+      detail: {
+        publishId: prepared.plan.publishId,
+        planSha256: prepared.plan.planSha256,
+        target: `${prepared.plan.targetOwner}/${prepared.plan.targetRepository}`,
+        visibility: prepared.plan.targetVisibility,
+        fileCount: prepared.plan.fileCount,
+        totalBytes: prepared.plan.totalBytes,
+        force: false
+      },
+      createdAt: prepared.plan.createdAt
+    });
+    return {
+      ok: true as const,
+      snapshot: this.getSnapshot()
+    };
+  }
+
+  async approveGitHubPublish(input: unknown) {
+    const request =
+      typeof input === "object" && input !== null && !Array.isArray(input)
+        ? (input as Record<string, unknown>)
+        : null;
+    const publishId =
+      request && typeof request.publishId === "string"
+        ? request.publishId
+        : "";
+    const planSha256 =
+      request && typeof request.planSha256 === "string"
+        ? request.planSha256
+        : "";
+    const state = this.runtime.getState();
+    const plan = state.githubPublish.plan;
+    const inspection = state.localRepository
+      ? this.localRepositorySessions.get(
+          state.localRepository.repositoryHandleId
+        )
+      : null;
+    if (
+      state.githubPublish.status !== "waiting_approval" ||
+      !plan ||
+      !inspection ||
+      publishId !== plan.publishId ||
+      planSha256 !== plan.planSha256 ||
+      githubPublishPlanSha256(plan) !== plan.planSha256
+    ) {
+      return {
+        ok: false as const,
+        error: {
+          code: "GITHUB_PUBLISH_APPROVAL_INVALID",
+          message:
+            "发布审批与当前固定计划不一致，或本地仓库会话已经失效。",
+          retriable: false
+        }
+      };
+    }
+    const releaseApproval = this.githubPublishApprovalGate.tryAcquire();
+    if (!releaseApproval) {
+      return {
+        ok: false as const,
+        error: {
+          code: "GITHUB_PUBLISH_APPROVAL_INVALID",
+          message: "同一 GitHub 发布计划已经在审批或执行中。",
+          retriable: false
+        }
+      };
+    }
+    try {
+      const approvedAt = new Date().toISOString();
+      await this.options.store.recordOperationEvent({
+        taskId: state.taskId,
+        revision: state.revision,
+        resourceId: null,
+        eventType: "github-publish-approval-pinned",
+        outcome: "success",
+        detail: {
+          publishId: plan.publishId,
+          planSha256: plan.planSha256,
+          target: `${plan.targetOwner}/${plan.targetRepository}`,
+          sourceFingerprint: plan.sourceFingerprint
+        },
+        createdAt: approvedAt
+      });
+      this.runtime.reportExternalEvent({
+        type: "GITHUB_PUBLISH_STARTED",
+        publishId: plan.publishId,
+        approvedAt
+      });
+      const executed = await this.githubPublisher.execute(plan, inspection);
+      if (executed.ok) {
+        this.runtime.reportExternalEvent({
+          type: "GITHUB_PUBLISH_COMPLETED",
+          result: executed.output
+        });
+        await this.options.store.recordOperationEvent({
+          taskId: state.taskId,
+          revision: state.revision,
+          resourceId: null,
+          eventType: "github-publish-completed",
+          outcome: "success",
+          detail: executed.output,
+          createdAt: executed.output.publishedAt
+        });
+      } else {
+        this.runtime.reportExternalEvent({
+          type: "GITHUB_PUBLISH_FAILED",
+          publishId: plan.publishId,
+          partialRepositoryUrl:
+            executed.error.partialRepositoryUrl,
+          reason: `${executed.error.code}: ${executed.error.message}`
+        });
+        await this.options.store.recordOperationEvent({
+          taskId: state.taskId,
+          revision: state.revision,
+          resourceId: null,
+          eventType: "github-publish-failed",
+          outcome: "error",
+          detail: {
+            publishId: plan.publishId,
+            planSha256: plan.planSha256,
+            code: executed.error.code,
+            message: executed.error.message,
+            partialRepositoryUrl:
+              executed.error.partialRepositoryUrl ?? null
+          },
+          createdAt: new Date().toISOString()
+        });
+      }
+      return {
+        ok: true as const,
+        snapshot: this.getSnapshot()
+      };
+    } finally {
+      releaseApproval();
+    }
+  }
+
   selectWorkspaceRoot(rootPath: string) {
+    if (this.runtime.getState().phase !== "waiting_approval") {
+      throw new Error("只能在当前计划等待审批时修改工作区目录。");
+    }
     this.runtime.reportExternalEvent({
       type: "WORKSPACE_ROOT_SELECTED",
       rootPath
@@ -461,7 +776,10 @@ export class AgentRuntimeHost {
   private handleRuntimeState(state: AgentState) {
     this.emitSnapshot();
     if (state.phase === "intake" || state.taskId === "unassigned" || !state.task) return;
-    const shouldGenerateManifest = !this.suppressNextManifestGeneration;
+    const shouldGenerateManifest =
+      !this.suppressNextManifestGeneration &&
+      (state.routeDecision?.skillId !== "github-project-discovery" ||
+        state.phase === "handoff");
     this.suppressNextManifestGeneration = false;
 
     const operation = this.persistenceQueue
@@ -592,8 +910,21 @@ export class AgentRuntimeHost {
     revision: number;
   }): Promise<ControlledDownloadResult> {
     await this.waitForPersistence();
+    const state = this.runtime.getState();
+    const plannedResource = state.resources.find(
+      (resource) => resource.id === request.resourceId
+    );
+    const dynamicResource =
+      (plannedResource?.sourceTrust === "github-api" &&
+        plannedResource.github &&
+        plannedResource.download.digestPolicy === "record-after-download") ||
+      (plannedResource?.sourceTrust === "npm-lockfile" &&
+        plannedResource.npm &&
+        plannedResource.download.digestPolicy === "lockfile-integrity")
+        ? plannedResource
+        : null;
     const catalogStatus = getTrustedCatalogStatus();
-    if (catalogStatus !== "active") {
+    if (!dynamicResource && catalogStatus !== "active") {
       return controlledDownloadError(
         catalogStatus === "expired"
           ? "TRUSTED_CATALOG_EXPIRED"
@@ -605,15 +936,17 @@ export class AgentRuntimeHost {
       );
     }
 
-    const trustedResource = getTrustedResourceMetadata(request.resourceId);
-    if (!trustedResource) {
+    const trustedResource = dynamicResource
+      ? null
+      : getTrustedResourceMetadata(request.resourceId);
+    if (!dynamicResource && !trustedResource) {
       return controlledDownloadError(
         "RESOURCE_NOT_TRUSTED",
-        "请求的资源不在 Electron 主进程可信下载目录中。",
+        "请求的资源不在 Electron 主进程可信下载目录或已检查的 GitHub 计划中。",
         false
       );
     }
-    const metadata = trustedResource.download;
+    const metadata = dynamicResource?.download ?? trustedResource!.download;
 
     const approval = await this.options.store.hasValidApproval(
       request.taskId,
@@ -636,6 +969,24 @@ export class AgentRuntimeHost {
         return controlledDownloadError(
           "CATALOG_APPROVAL_MISMATCH",
           "当前审批绑定的可信目录版本与执行目录不一致，请重新生成并确认资源计划。",
+          false
+        );
+      }
+      if (approval.status === "plan-mismatch") {
+        await this.options.store.recordOperationEvent({
+          taskId: request.taskId,
+          revision: request.revision,
+          resourceId: request.resourceId,
+          eventType: "plan-pin-rejected",
+          outcome: "denied",
+          detail: {
+            reason: "approved-plan-fingerprint-mismatch"
+          },
+          createdAt: new Date().toISOString()
+        });
+        return controlledDownloadError(
+          "PLAN_APPROVAL_MISMATCH",
+          "当前资源计划与用户审批时的计划指纹不一致，请重新生成并确认 revision。",
           false
         );
       }
@@ -666,15 +1017,15 @@ export class AgentRuntimeHost {
         tempFilePath: result.output.tempFilePath,
         bytesWritten: result.output.bytesWritten,
         sha256: result.output.sha256,
-        expectedSha256: metadata.expectedSha256,
+        expectedSha256: metadata.expectedSha256 ?? result.output.sha256,
         verificationStatus: testFixture ? "test-fixture" : "downloaded",
         verifiedAt: new Date().toISOString(),
         signatureStatus:
-          trustedResource.verification.signatureEnforcement === "required"
+          trustedResource?.verification.signatureEnforcement === "required"
             ? "pending"
             : "not-applicable",
         expectedPublisher:
-          trustedResource.verification.expectedPublisher ?? null,
+          trustedResource?.verification.expectedPublisher ?? null,
         actualPublisher: null,
         certificateThumbprint: null,
         signatureMessage: null,
@@ -719,10 +1070,18 @@ export class AgentRuntimeHost {
         return workspaceExportError(
           approval.status === "expired"
             ? "APPROVAL_EXPIRED"
-            : "APPROVAL_NOT_FOUND",
+            : approval.status === "catalog-mismatch"
+              ? "CATALOG_APPROVAL_MISMATCH"
+              : approval.status === "plan-mismatch"
+                ? "PLAN_APPROVAL_MISMATCH"
+                : "APPROVAL_NOT_FOUND",
           approval.status === "expired"
             ? "当前工作区导出审批已过期，请重新确认资源计划。"
-            : "Electron 主进程未找到当前 revision 的有效工作区导出审批。",
+            : approval.status === "catalog-mismatch"
+              ? "当前目录版本与审批时不一致，请重新确认资源计划。"
+              : approval.status === "plan-mismatch"
+                ? "当前计划指纹与审批时不一致，请重新确认资源计划。"
+                : "Electron 主进程未找到当前 revision 的有效工作区导出审批。",
           false
         );
       }

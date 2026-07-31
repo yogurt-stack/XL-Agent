@@ -5,7 +5,15 @@ import {
 
 export type TrustedDownloadMetadata = {
   url: string;
-  expectedSha256: string;
+  expectedSha256: string | null;
+  digestPolicy?:
+    | "preverified"
+    | "record-after-download"
+    | "lockfile-integrity";
+  expectedIntegrity?: {
+    algorithm: "sha512";
+    digestBase64: string;
+  };
   maxSizeMb: number;
   allowedHosts: string[];
 };

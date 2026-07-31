@@ -310,6 +310,26 @@ try {
     (await store.hasValidApproval(exportSnapshot.taskId, 2)).valid,
     "Current revision approval must be active"
   );
+  await store.saveSnapshot(createSnapshot({
+    task: "审批后被替换的任务内容"
+  }));
+  const tamperedApproval = await store.hasValidApproval(
+    exportSnapshot.taskId,
+    2
+  );
+  assert(
+    !tamperedApproval.valid && tamperedApproval.status === "plan-mismatch",
+    "Approval must be rejected when the persisted plan fingerprint changes"
+  );
+  await store.saveSnapshot(createSnapshot({
+    approvedRevision: null,
+    phase: "waiting_approval"
+  }));
+  await store.saveSnapshot(exportSnapshot);
+  assert(
+    (await store.hasValidApproval(exportSnapshot.taskId, 2)).valid,
+    "Explicit reapproval must pin the restored plan fingerprint"
+  );
   await store.recordWorkspaceExport(firstExport);
 
   nowMs += 500;
@@ -417,5 +437,5 @@ try {
 }
 
 console.log(
-  "Persistence passed: SQLite v5 tasks/artifacts, atomic workspace export, recovery, catalog-pinned approvals, demo reset and expiry verified"
+  "Persistence passed: SQLite v5 tasks/artifacts, atomic workspace export, recovery, catalog/plan-pinned approvals, demo reset and expiry verified"
 );

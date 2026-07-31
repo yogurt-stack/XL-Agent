@@ -45,6 +45,8 @@ export type ResourceManifestSnapshot = {
     progress: number;
     source: string;
     sourceUrl: string;
+    github: AgentState["resources"][number]["github"] | null;
+    npm: AgentState["resources"][number]["npm"] | null;
     failureReason: string | null;
     artifact: null | {
       relativePath: string;
@@ -69,6 +71,8 @@ export type ResourceManifestSnapshot = {
     matchedResourceId: string | null;
     verificationStatus: LocalArtifactRecord["verificationStatus"];
   }>;
+  localRepository: AgentState["localRepository"];
+  githubPublish?: AgentState["githubPublish"];
   missing: string[];
   nextActions: string[];
   allowedActions: string[];
@@ -100,9 +104,16 @@ function sanitizeFileName(value: string) {
   );
 }
 
-function downloadRelativePath(artifact: DownloadArtifactRecord) {
+function downloadRelativePath(
+  artifact: DownloadArtifactRecord,
+  kind: "download" | "source" | "npm" = "download"
+) {
   return path.posix.join(
-    "downloads",
+    kind === "source"
+      ? "sources"
+      : kind === "npm"
+        ? "dependencies/npm"
+        : "downloads",
     `${sanitizeSegment(artifact.resourceId)}-${sanitizeFileName(artifact.fileName)}`
   );
 }
@@ -170,13 +181,18 @@ export function createManifestSnapshot(input: {
       progress: resource.progress,
       source: resource.source,
       sourceUrl: resource.download.url,
+      github: resource.github ?? null,
+      npm: resource.npm ?? null,
       failureReason: resource.failureReason ?? null,
       artifact: artifact
         ? {
-            relativePath: downloadRelativePath(artifact),
+            relativePath: downloadRelativePath(
+              artifact,
+              resource.github ? "source" : resource.npm ? "npm" : "download"
+            ),
             bytesWritten: artifact.bytesWritten,
             sha256: artifact.sha256,
-            expectedSha256: resource.download.expectedSha256,
+            expectedSha256: artifact.expectedSha256,
             verificationStatus: artifact.verificationStatus,
             signatureStatus: artifact.signatureStatus,
             expectedPublisher: artifact.expectedPublisher,
@@ -225,16 +241,27 @@ export function createManifestSnapshot(input: {
     },
     resources,
     localArtifacts,
+    localRepository: input.state.localRepository,
+    githubPublish: input.state.githubPublish,
     missing,
     nextActions: [input.state.workspace.nextAction],
     allowedActions:
-      status === "ready"
-        ? ["核对校验信息", "人工处理已下载资源"]
+      input.state.localRepository
+        ? ["读取仓库元数据", "核对 Git 状态", "生成独立的 GitHub 发布计划"]
+        : status === "ready"
+          ? ["核对校验信息", "人工处理已下载资源"]
         : ["读取当前 Manifest", "处理失败资源", "重新审批替代计划"],
     forbiddenActions: [
       "自动运行安装包",
       "自动执行 Shell 或 PowerShell",
-      "把资源已下载描述为软件已安装"
+      "把资源已下载描述为软件已安装",
+      ...(input.state.localRepository
+        ? [
+            "修改本地仓库",
+            "执行仓库脚本或 Git hooks",
+            "未经独立审批发布到 GitHub"
+          ]
+        : [])
     ]
   };
 }
@@ -289,7 +316,16 @@ function renderMarkdown(manifest: ResourceManifestSnapshot) {
         `| ${resource.name} | ${resource.status} | ${resource.artifact?.relativePath ?? "缺失"} |`
     )
     .join("\n");
-  return `# Resource Manifest r${manifest.manifestRevision}\n\n状态：${manifest.status}\n\n| 资源 | 状态 | 文件 |\n| --- | --- | --- |\n${rows}\n`;
+  const repository = manifest.localRepository;
+  const repositorySummary = repository
+    ? `\n\n## 本地仓库（只读）\n\n- 名称：${repository.displayName}\n- HEAD：${repository.commitSha}\n- 分支：${repository.branch ?? "detached HEAD"}\n- 工作区：${repository.clean ? "clean" : "存在未提交变更"}\n- 文件：${repository.trackedFileCount} 个已跟踪 / ${repository.fileCount} 个可见\n`
+    : "";
+  const publish = manifest.githubPublish;
+  const publishSummary =
+    publish && publish.status !== "idle"
+      ? `\n\n## GitHub 发布\n\n- 状态：${publish.status}\n- 目标：${publish.plan ? `${publish.plan.targetOwner}/${publish.plan.targetRepository}` : "无"}\n- 结果：${publish.result?.repositoryUrl ?? publish.error ?? "等待后续动作"}\n`
+      : "";
+  return `# Resource Manifest r${manifest.manifestRevision}\n\n状态：${manifest.status}\n\n| 资源 | 状态 | 文件 |\n| --- | --- | --- |\n${rows}\n${repositorySummary}${publishSummary}`;
 }
 
 export async function writeCurrentManifestSnapshot(input: {
@@ -312,7 +348,17 @@ export async function writeCurrentManifestSnapshot(input: {
   );
   try {
     for (const artifact of input.downloadArtifacts) {
-      const relativePath = downloadRelativePath(artifact);
+      const manifestResource = input.record.manifest.resources.find(
+        (resource) => resource.id === artifact.resourceId
+      );
+      const relativePath = downloadRelativePath(
+        artifact,
+        manifestResource?.github
+          ? "source"
+          : manifestResource?.npm
+            ? "npm"
+            : "download"
+      );
       await copyChecked(
         artifact.tempFilePath,
         path.join(stagingRoot, relativePath),

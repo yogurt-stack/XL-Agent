@@ -44,7 +44,7 @@ const assertRejectCode = async (task, expectedCode) => {
       !JSON.stringify(detail).includes(environment.XL_AGENT_LLM_API_KEY),
       "Structured errors must not expose the API key"
     );
-    return;
+    return detail;
   }
   throw new Error(`Expected ${expectedCode}, but the request succeeded`);
 };
@@ -56,6 +56,7 @@ const toolResponse = (id, name, args) =>
         message: {
           content: null,
           tool_calls: [{
+            index: 0,
             id,
             type: "function",
             function: {
@@ -97,6 +98,28 @@ assert(
     "https://models.example.test/v1/chat/completions" &&
     baseUrlClient.getSafeConnectionInfo().endpointMode === "base-url",
   "Base URL mode must append the Chat Completions path in Main."
+);
+
+let capturedDeepSeekBody = null;
+const deepSeekClient = new RemoteModelClient(
+  {
+    ...environment,
+    XL_AGENT_LLM_ENDPOINT:
+      "https://api.deepseek.com/chat/completions",
+    XL_AGENT_LLM_MODEL: "deepseek-v4-flash"
+  },
+  async (_input, init) => {
+    capturedDeepSeekBody = JSON.parse(String(init?.body ?? "{}"));
+    return toolResponse("deepseek-test", "finish", {
+      summary: "Connection test succeeded.",
+      explanation: "Connection test succeeded."
+    });
+  }
+);
+await deepSeekClient.testConnection();
+assert(
+  capturedDeepSeekBody?.thinking?.type === "disabled",
+  "DeepSeek requests must disable thinking mode for required tool calls."
 );
 
 const conflictingConfig = new RemoteModelClient({
@@ -142,6 +165,32 @@ const authFailure = new RemoteModelClient(
   async () => new Response("", { status: 401 })
 );
 await assertRejectCode(() => authFailure.testConnection(), "MODEL_AUTH_FAILED");
+
+const invalidFormatFailure = new RemoteModelClient(
+  environment,
+  async () =>
+    new Response(
+      JSON.stringify({
+        error: {
+          message:
+            `Unsupported request field. ${environment.XL_AGENT_LLM_API_KEY}`
+        }
+      }),
+      {
+        status: 400,
+        headers: { "content-type": "application/json" }
+      }
+    )
+);
+const invalidFormatDetail = await assertRejectCode(
+  () => invalidFormatFailure.testConnection(),
+  "MODEL_HTTP_ERROR"
+);
+assert(
+  invalidFormatDetail.message.includes("Unsupported request field.") &&
+    invalidFormatDetail.message.includes("[redacted]"),
+  "Safe provider error details must be exposed without leaking secrets"
+);
 
 const timeoutFailure = new RemoteModelClient(environment, async () => {
   const error = new Error("internal timeout detail");
@@ -229,10 +278,15 @@ assert(
   "Native tool calling must not depend on JSON response_format"
 );
 assert(
-  capturedTestBody?.tool_choice?.function?.name === "finish" &&
-    capturedTestBody?.parallel_tool_calls === false &&
-    capturedTestBody?.tools?.length === 1,
-  "Connection tests must force exactly one native finish tool"
+  !("thinking" in capturedTestBody),
+  "Provider-specific thinking controls must not be sent to generic endpoints"
+);
+assert(
+  capturedTestBody?.tool_choice === "required" &&
+    !("parallel_tool_calls" in capturedTestBody) &&
+    capturedTestBody?.tools?.length === 1 &&
+    capturedTestBody.tools[0]?.function?.name === "finish",
+  "Connection tests must require the only offered finish tool without unsupported parallel controls"
 );
 
 let capturedDecisionBody = null;
@@ -265,8 +319,8 @@ const offeredToolNames = capturedDecisionBody.tools.map(
 );
 assert(
   capturedDecisionBody.tool_choice === "required" &&
-    capturedDecisionBody.parallel_tool_calls === false,
-  "Decision requests must require exactly one non-parallel native tool_call"
+    !("parallel_tool_calls" in capturedDecisionBody),
+  "Decision requests must require a tool_call without unsupported parallel controls"
 );
 assert(
   offeredToolNames.includes("create_plan") &&
@@ -278,10 +332,17 @@ assert(
   capturedDecisionBody.tools.every(
     (tool) =>
       tool.type === "function" &&
-      tool.function.strict === true &&
+      !("strict" in tool.function) &&
       tool.function.parameters.additionalProperties === false
   ),
-  "Every native function tool must use a strict closed JSON Schema"
+  "Every native function tool must use a provider-compatible closed JSON Schema"
+);
+const serializedTools = JSON.stringify(capturedDecisionBody.tools);
+assert(
+  !["minLength", "maxLength", "minItems", "maxItems"].some((keyword) =>
+    serializedTools.includes(`"${keyword}"`)
+  ),
+  "Provider tool schemas must omit strict-mode-only size constraints"
 );
 assert(
   capturedDecisionBody.messages[0].content.includes("原生 function tools") &&
@@ -290,5 +351,5 @@ assert(
 );
 
 console.log(
-  "Remote model client passed: native tools/tool_calls, strict schemas, provider/Base URL configuration and safe errors verified"
+  "Remote model client passed: compatible native tools/tool_calls, provider/Base URL configuration and safe errors verified"
 );

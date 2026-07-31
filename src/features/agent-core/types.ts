@@ -2,6 +2,8 @@ export type AgentPhase =
   | "intake"
   | "routing"
   | "unsupported"
+  | "task_planning"
+  | "waiting_task_plan_confirmation"
   | "clarifying"
   | "planning"
   | "waiting_approval"
@@ -11,6 +13,7 @@ export type AgentPhase =
   | "exporting"
   | "awaiting_export_retry"
   | "replanning"
+  | "result"
   | "handoff"
   | "cancelled";
 
@@ -45,9 +48,17 @@ export type ResourceCapability =
   | "source-control"
   | "node-runtime"
   | "powershell-runtime"
+  | "project-source"
+  | "offline-node-package"
   | "workspace-template";
 
-export type ResourceSourceTrust = "official" | "trusted-catalog" | "trusted-mirror" | "unverified";
+export type ResourceSourceTrust =
+  | "official"
+  | "trusted-catalog"
+  | "trusted-mirror"
+  | "github-api"
+  | "npm-lockfile"
+  | "unverified";
 
 export type TrustedCatalogStatus = "active" | "not-yet-valid" | "expired" | "invalid";
 
@@ -60,10 +71,12 @@ export type TrustedCatalogMetadata = {
 };
 
 export type TrustedResourceVerification = {
-  checksumAlgorithm: "sha256";
+  checksumAlgorithm: "sha256" | "sha512";
   checksumSource:
     | "vendor-manifest"
     | "github-release-asset-digest"
+    | "computed-on-download"
+    | "npm-lockfile-integrity"
     | "pinned-repository-snapshot";
   checksumSourceUrl: string;
   signatureType: "authenticode" | "upstream-release" | "none";
@@ -120,6 +133,168 @@ export type PlanValidationResult = {
   issues: PlanValidationIssue[];
 };
 
+export type TaskPlanStatus =
+  | "draft"
+  | "waiting_confirmation"
+  | "executing"
+  | "waiting_user_input"
+  | "waiting_approval"
+  | "replanning"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type TaskPlanStepKind =
+  | "read_tool"
+  | "user_decision"
+  | "resource_plan"
+  | "write_tool"
+  | "verification"
+  | "handoff";
+
+export type TaskPlanStepStatus =
+  | "pending"
+  | "running"
+  | "waiting_user_input"
+  | "waiting_approval"
+  | "completed"
+  | "failed"
+  | "skipped"
+  | "blocked";
+
+export type TaskPlanRisk =
+  | "read_only"
+  | "local_write"
+  | "external_write"
+  | "code_execution";
+
+export type TaskPlanInputBinding = {
+  sourceStepId: string;
+  outputPath: string;
+  required: boolean;
+};
+
+export type TaskPlanStepApproval = {
+  required: boolean;
+  reason: string | null;
+  status: "not_required" | "pending" | "approved";
+  approvedAt: string | null;
+  approvedRevision: number | null;
+};
+
+export type TaskPlanStepResult = {
+  reference: string;
+  summary: string;
+};
+
+export type TaskPlanStepProposal = {
+  id: string;
+  title: string;
+  description: string;
+  kind: TaskPlanStepKind;
+  tool: string | null;
+  dependsOn: string[];
+  staticInput: Record<string, unknown>;
+  inputBindings: Record<string, TaskPlanInputBinding>;
+  expectedOutput: string;
+  risk: TaskPlanRisk;
+  approval: {
+    required: boolean;
+    reason: string | null;
+  };
+};
+
+export type TaskPlanProposal = {
+  objective: string;
+  deliverables: string[];
+  assumptions: string[];
+  constraints: string[];
+  steps: TaskPlanStepProposal[];
+  confirmation: {
+    required: boolean;
+    reason: string | null;
+  };
+};
+
+export type TaskPlanStep = TaskPlanStepProposal & {
+  status: TaskPlanStepStatus;
+  approval: TaskPlanStepApproval;
+  result: TaskPlanStepResult | null;
+  error: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+};
+
+export type TaskPlanConfirmation = {
+  required: boolean;
+  reason: string | null;
+  status: "not_required" | "pending" | "confirmed";
+  confirmedAt: string | null;
+  confirmedRevision: number | null;
+};
+
+export type TaskPlan = {
+  schemaVersion: 1;
+  planId: string;
+  taskId: string;
+  revision: number;
+  previousRevision: number | null;
+  revisionReason: string;
+  objective: string;
+  deliverables: string[];
+  assumptions: string[];
+  constraints: string[];
+  steps: TaskPlanStep[];
+  status: TaskPlanStatus;
+  confirmation: TaskPlanConfirmation;
+  createdBy: "local-rule" | "remote-llm" | "user";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TaskPlanToolPolicy = {
+  name: string;
+  allowedStepKinds: TaskPlanStepKind[];
+  risk: TaskPlanRisk;
+  approvalRequired: boolean;
+};
+
+export type TaskPlanValidationIssueCode =
+  | "INVALID_REVISION"
+  | "INITIAL_CONFIRMATION_REQUIRED"
+  | "EMPTY_PLAN"
+  | "TOO_MANY_STEPS"
+  | "DUPLICATE_STEP"
+  | "UNKNOWN_DEPENDENCY"
+  | "SELF_DEPENDENCY"
+  | "CYCLIC_DEPENDENCY"
+  | "UNKNOWN_BINDING_SOURCE"
+  | "BINDING_DEPENDENCY_MISSING"
+  | "TOOL_REQUIRED"
+  | "TOOL_NOT_ALLOWED"
+  | "TOOL_KIND_MISMATCH"
+  | "TOOL_RISK_MISMATCH"
+  | "APPROVAL_REQUIRED"
+  | "APPROVAL_REASON_REQUIRED"
+  | "APPROVAL_REVISION_MISMATCH"
+  | "INVALID_PLAN_STATUS"
+  | "INVALID_STEP_STATUS";
+
+export type TaskPlanValidationIssue = {
+  code: TaskPlanValidationIssueCode;
+  message: string;
+  stepId?: string;
+  dependencyId?: string;
+  tool?: string;
+};
+
+export type TaskPlanValidationResult = {
+  valid: boolean;
+  checkedRevision: number;
+  issues: TaskPlanValidationIssue[];
+  topologicalOrder: string[];
+};
+
 export type ClarificationQuestion = {
   id: string;
   prompt: string;
@@ -152,14 +327,137 @@ export type TrustedResource = {
   replacedBy?: string;
   verification: TrustedResourceVerification;
   download: TrustedDownloadMetadata;
+  github?: GitHubRepositoryProvenance;
+  npm?: NpmPackageProvenance;
   fallbackId?: string;
 };
 
 export type TrustedDownloadMetadata = {
   url: string;
-  expectedSha256: string;
+  expectedSha256: string | null;
+  digestPolicy?:
+    | "preverified"
+    | "record-after-download"
+    | "lockfile-integrity";
+  expectedIntegrity?: {
+    algorithm: "sha512";
+    digestBase64: string;
+  };
   maxSizeMb: number;
   allowedHosts: string[];
+};
+
+export type GitHubProjectEcosystem =
+  | "node"
+  | "python"
+  | "rust"
+  | "go"
+  | "unknown";
+
+export type GitHubProjectAnalysis = {
+  ecosystems: GitHubProjectEcosystem[];
+  manifests: string[];
+  lockfiles: string[];
+  runtimeHints: string[];
+  nodeOfflinePreparation:
+    | "package-lock-supported"
+    | "lockfile-unsupported"
+    | "not-node";
+  nodeOfflinePackageCount: number;
+  nodeOfflineBlockers: string[];
+  treeTruncated: boolean;
+};
+
+export type GitHubRepositoryProvenance = {
+  fullName: string;
+  owner: string;
+  repository: string;
+  defaultBranch: string;
+  commitSha: string;
+  treeSha: string;
+  archiveFormat: "zip";
+  inspectedAt: string;
+  analysis: GitHubProjectAnalysis;
+};
+
+export type LocalRepositorySummary = {
+  repositoryHandleId: string;
+  displayName: string;
+  fingerprint: string;
+  commitSha: string;
+  branch: string | null;
+  detached: boolean;
+  clean: boolean;
+  status: {
+    modified: number;
+    deleted: number;
+    untracked: number;
+    conflicted: number;
+    ahead: number;
+    behind: number;
+  };
+  fileCount: number;
+  trackedFileCount: number;
+  hasSubmodules: boolean;
+  hasSymlinks: boolean;
+  inspectedAt: string;
+  analysis: GitHubProjectAnalysis;
+};
+
+export type GitHubPublishPlan = {
+  publishId: string;
+  repositoryHandleId: string;
+  sourceFingerprint: string;
+  sourceCommitSha: string;
+  sourceBranch: string | null;
+  targetOwner: string;
+  targetRepository: string;
+  targetVisibility: "private" | "public";
+  targetBranch: string;
+  commitMessage: string;
+  fileCount: number;
+  totalBytes: number;
+  createRepository: true;
+  force: false;
+  createdAt: string;
+  expiresAt: string;
+  planSha256: string;
+};
+
+export type GitHubPublishResult = {
+  publishId: string;
+  repositoryUrl: string;
+  fullName: string;
+  branch: string;
+  commitSha: string;
+  fileCount: number;
+  publishedAt: string;
+};
+
+export type GitHubPublishState = {
+  status:
+    | "idle"
+    | "waiting_approval"
+    | "publishing"
+    | "published"
+    | "failed";
+  plan: GitHubPublishPlan | null;
+  approvedAt: string | null;
+  result: GitHubPublishResult | null;
+  error: string | null;
+  partialRepositoryUrl: string | null;
+};
+
+export type NpmPackageProvenance = {
+  packageName: string;
+  version: string;
+  resolvedUrl: string;
+  integrity: string;
+  license: string;
+  dependencyKind: "production" | "development" | "optional";
+  lockfilePath: string;
+  repositoryFullName: string;
+  repositoryCommitSha: string;
 };
 
 export type PlannedResource = TrustedResource & {
@@ -201,6 +499,25 @@ export type AgentBInspectionAnswer = {
   allowedActions: string[];
   forbiddenActions: string[];
   integrity: "valid" | "invalid";
+  projectReadiness?: {
+    source?: "github" | "local";
+    fullName: string;
+    commitSha: string;
+    branch?: string | null;
+    clean?: boolean;
+    ecosystems: GitHubProjectEcosystem[];
+    manifests: string[];
+    lockfiles: string[];
+    runtimeHints: string[];
+    dependencyPreparation:
+      | "package-lock-supported"
+      | "lockfile-unsupported"
+      | "not-node";
+    offlinePackageCount: number;
+    offlineBlockers: string[];
+    selectedOfflinePackages: number;
+    treeTruncated: boolean;
+  } | null;
   summary: string;
 };
 
@@ -282,6 +599,8 @@ export type AgentState = {
   task: string;
   route: string | null;
   routeDecision: RouteDecision | null;
+  taskPlan: TaskPlan | null;
+  taskPlanValidation: TaskPlanValidationResult | null;
   systemProfile: SystemProfile;
   hostProfile: HostSystemProfile | null;
   clarifications: ClarificationQuestion[];
@@ -289,6 +608,8 @@ export type AgentState = {
   answers: Record<string, string | "skipped">;
   resources: PlannedResource[];
   localArtifacts: LocalArtifactSummary[];
+  localRepository: LocalRepositorySummary | null;
+  githubPublish: GitHubPublishState;
   replanReason: ReplanReason | null;
   requestedReplanStrategy: ReplanStrategy | null;
   activeResourceId: string | null;
@@ -305,9 +626,101 @@ export type AgentState = {
 export type AgentToolName =
   | "read_system_profile"
   | "search_trusted_catalog"
+  | "search_github_repositories"
   | "simulate_download"
   | "controlled_download"
   | "export_workspace";
+
+export type GitHubRepositorySort = "stars" | "updated" | "forks";
+
+export type GitHubRepositoryDiscoverySearchInput = {
+  mode: "discovery";
+  keywords: string;
+  createdWithinDays: 7 | 30 | 90;
+  sort: GitHubRepositorySort;
+  limit: number;
+};
+
+export type GitHubRepositoryNameSearchInput = {
+  mode: "name";
+  query: string;
+  limit: number;
+};
+
+export type GitHubRepositoryExactSearchInput = {
+  mode: "exact";
+  fullName: string;
+  limit: 1;
+};
+
+export type GitHubRepositorySearchInput =
+  | GitHubRepositoryDiscoverySearchInput
+  | GitHubRepositoryNameSearchInput
+  | GitHubRepositoryExactSearchInput;
+
+export type GitHubRepositorySummary = {
+  id: number;
+  fullName: string;
+  url: string;
+  description: string | null;
+  stars: number;
+  forks: number;
+  openIssues: number;
+  language: string | null;
+  topics: string[];
+  license: {
+    spdxId: string;
+    name: string;
+  };
+  createdAt: string;
+  updatedAt: string;
+  pushedAt: string;
+};
+
+export type GitHubRepositorySearchOutput = {
+  criteria:
+    | {
+        mode: "discovery";
+        keywords: string;
+        createdWithinDays: 7 | 30 | 90;
+        createdAfter: string;
+        sort: GitHubRepositorySort;
+        order: "desc";
+        licenseRequired: true;
+      }
+    | {
+        mode: "name";
+        query: string;
+        match: "repository-name";
+        order: "best-match";
+        licenseRequired: true;
+      }
+    | {
+        mode: "exact";
+        fullName: string;
+        match: "exact";
+        licenseRequired: true;
+      };
+  repositories: GitHubRepositorySummary[];
+  totalCount: number;
+  incompleteResults: boolean;
+  fetchedAt: string;
+  authenticated: boolean;
+  rateLimit: {
+    remaining: number | null;
+    resetAt: string | null;
+  };
+};
+
+export type GitHubRepositorySearchError = {
+  code: string;
+  message: string;
+  retriable: boolean;
+};
+
+export type GitHubRepositorySearchResult =
+  | { ok: true; output: GitHubRepositorySearchOutput }
+  | { ok: false; error: GitHubRepositorySearchError };
 
 export type AgentToolCall =
   | {
@@ -322,6 +735,11 @@ export type AgentToolCall =
         query: string;
         resourceIds?: string[];
       };
+    }
+  | {
+      callId: string;
+      name: "search_github_repositories";
+      input: GitHubRepositorySearchInput;
     }
   | {
       callId: string;
@@ -347,6 +765,12 @@ export type AgentToolCall =
     };
 
 export type AgentAction =
+  | {
+      actionId: string;
+      type: "propose_task_plan";
+      proposal: TaskPlanProposal;
+      explanation: string;
+    }
   | {
       actionId: string;
       type: "ask_clarification";
@@ -494,10 +918,29 @@ export type AgentRunState = {
 export type AgentEvent =
   | { type: "SUBMIT_TASK"; task: string; taskId?: string }
   | { type: "ROUTE_RESOLVED"; decision: RouteDecision }
+  | {
+      type: "TASK_PLAN_PROPOSED";
+      plan: TaskPlan;
+      validation: TaskPlanValidationResult;
+    }
+  | { type: "CONFIRM_TASK_PLAN"; revision: number }
+  | {
+      type: "TASK_PLAN_CONFIRMED";
+      revision: number;
+      confirmedAt: string;
+    }
   | { type: "TASK_REQUIREMENTS_RESOLVED"; requirements: TaskRequirements }
   | { type: "ANSWER_CLARIFICATION"; questionId: string; answer: string }
   | { type: "SKIP_CLARIFICATION"; questionId: string }
+  | { type: "PREPARE_GITHUB_REPOSITORY"; fullName: string }
+  | { type: "PREPARE_NODE_DEPENDENCIES" }
+  | { type: "TOGGLE_NODE_DEPENDENCIES"; selected: boolean }
   | { type: "PLAN_GENERATED" }
+  | {
+      type: "GITHUB_ACQUISITION_PREPARED";
+      resources: PlannedResource[];
+      explanation: string;
+    }
   | { type: "TOGGLE_RESOURCE"; resourceId: string; selected: boolean }
   | { type: "APPROVE_PLAN"; revision: number }
   | { type: "PAUSE_DOWNLOAD"; resourceId: string }
@@ -528,6 +971,24 @@ export type AgentEvent =
       };
     }
   | { type: "LOCAL_ARTIFACTS_ADDED"; artifacts: LocalArtifactSummary[] }
+  | {
+      type: "LOCAL_REPOSITORY_IMPORTED";
+      taskId: string;
+      repository: LocalRepositorySummary;
+    }
+  | { type: "GITHUB_PUBLISH_PLAN_PREPARED"; plan: GitHubPublishPlan }
+  | {
+      type: "GITHUB_PUBLISH_STARTED";
+      publishId: string;
+      approvedAt: string;
+    }
+  | { type: "GITHUB_PUBLISH_COMPLETED"; result: GitHubPublishResult }
+  | {
+      type: "GITHUB_PUBLISH_FAILED";
+      publishId: string;
+      reason: string;
+      partialRepositoryUrl?: string;
+    }
   | { type: "WORKSPACE_ROOT_SELECTED"; rootPath: string }
   | {
       type: "MANIFEST_SNAPSHOT_WRITTEN";
@@ -557,7 +1018,7 @@ export type AgentEvent =
   | { type: "MODEL_FINISHED"; summary: string }
   | { type: "MODEL_STEP_LIMIT_REACHED" }
   | { type: "MODEL_RUNTIME_FAILED"; reason: string }
-  | { type: "CANCEL_TASK" }
+  | { type: "CANCEL_TASK"; cancelledAt?: string }
   | { type: "RESET" };
 
 export type AgentUserEvent = Extract<
@@ -565,8 +1026,12 @@ export type AgentUserEvent = Extract<
   {
     type:
       | "SUBMIT_TASK"
+      | "CONFIRM_TASK_PLAN"
       | "ANSWER_CLARIFICATION"
       | "SKIP_CLARIFICATION"
+      | "PREPARE_GITHUB_REPOSITORY"
+      | "PREPARE_NODE_DEPENDENCIES"
+      | "TOGGLE_NODE_DEPENDENCIES"
       | "TOGGLE_RESOURCE"
       | "APPROVE_PLAN"
       | "PAUSE_DOWNLOAD"

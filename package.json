@@ -12,7 +12,7 @@
     "generate:catalog": "node scripts/generate-trusted-catalog.mjs",
     "verify:catalog": "node scripts/generate-trusted-catalog.mjs --check",
     "build": "npm run clean:build && npm run verify:catalog && tsc -p tsconfig.app.json && tsc -p tsconfig.node.json && tsc -p electron/tsconfig.json && vite build",
-    "typecheck": "npm run verify:catalog && tsc -p tsconfig.app.json && tsc -p tsconfig.node.json && tsc -p electron/tsconfig.json && tsc -p tsconfig.e2e.json",
+    "typecheck": "npm run verify:catalog && tsc -p tsconfig.app.json && tsc -p tsconfig.node.json && tsc -p electron/tsconfig.json && tsc -p electron/tsconfig.tests.json && tsc -p tsconfig.e2e.json",
     "test": "vitest",
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",

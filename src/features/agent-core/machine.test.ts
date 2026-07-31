@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createInitialAgentState, transition } from "./machine";
 import { ExtensibleAgentRouter } from "./router";
 import { createSystemProfileToolOutput } from "./systemProfile";
+import { confirmTaskPlanForTest } from "./taskPlanTestSupport";
 import type { AgentState, HostSystemProfile } from "./types";
 
 const linuxHostProfile: HostSystemProfile = {
@@ -27,6 +28,7 @@ function createWaitingApprovalState(): AgentState {
   let state = createInitialAgentState();
   state = transition(state, { type: "SUBMIT_TASK", task: "准备 Windows AI 环境" });
   state = transition(state, new ExtensibleAgentRouter().route(state)!);
+  state = confirmTaskPlanForTest(state);
   state = transition(state, {
     type: "ANSWER_CLARIFICATION",
     questionId: "primary-workload",
@@ -261,7 +263,7 @@ describe("agent state machine", () => {
           fileName: "python.exe",
           displayPath: "selected/python.exe",
           bytesWritten: 42,
-          sha256: python.download.expectedSha256,
+          sha256: python.download.expectedSha256!,
           matchedResourceId: python.id,
           verificationStatus: "local-verified",
           importedAt: "2026-07-26T00:00:00.000Z"

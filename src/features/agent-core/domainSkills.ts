@@ -3,6 +3,10 @@ import {
   deriveTaskRequirements,
   inferLocalTaskIntent
 } from "./taskRequirements";
+import {
+  githubFullNameFromUrl,
+  inferGitHubSearchIntent
+} from "./githubSearch";
 import type {
   AgentState,
   ClarificationQuestion,
@@ -41,6 +45,7 @@ export type WorkspaceGuide = {
 export interface DomainSkill {
   id: string;
   displayName: string;
+  sourceProviderId?: string;
   matches(goal: UserGoal): boolean;
   clarify(goal: UserGoal, profile: SystemProfile): ClarificationQuestion[];
   buildRequirements(context: PlanningContext): ResourceRequirement[];
@@ -80,6 +85,74 @@ export class DomainSkillRegistry {
 
 function normalizedTask(text: string) {
   return text.normalize("NFKC").trim().toLowerCase();
+}
+
+export class GitHubProjectDiscoverySkill implements DomainSkill {
+  readonly id = "github-project-discovery";
+  readonly displayName = "GitHub 开源项目检索";
+  readonly sourceProviderId = "github-api";
+
+  matches(goal: UserGoal) {
+    const task = normalizedTask(goal.text);
+    const hasGitHubRepositoryLink = goal.links.some(
+      (link) => githubFullNameFromUrl(link) !== null
+    );
+    const hasSpecificRepositoryIntent =
+      inferGitHubSearchIntent(goal).mode !== "discovery";
+    return hasGitHubRepositoryLink || (
+      task.includes("github") && (
+        hasSpecificRepositoryIntent ||
+        [
+          "项目",
+          "仓库",
+          "开源",
+          "热门",
+          "最新",
+          "repository",
+          "repositories",
+          "repo",
+          "trending"
+        ].some((keyword) => task.includes(keyword))
+      )
+    );
+  }
+
+  clarify(goal: UserGoal, _profile: SystemProfile) {
+    if (inferGitHubSearchIntent(goal).mode !== "discovery") return [];
+    return [
+      {
+        id: "github-created-window",
+        prompt: "要查看多长时间内新建的 GitHub 项目？",
+        reason: "“最新”需要明确时间窗口，才能与 Star 热度一起稳定排序。",
+        required: true,
+        options: ["最近 7 天新建", "最近 30 天新建", "最近 90 天新建"]
+      },
+      {
+        id: "github-sort",
+        prompt: "这批项目优先按什么指标排序？",
+        reason: "Star、最近更新和 Fork 分别代表不同的热门程度。",
+        required: true,
+        options: ["按 Star 数", "按最近更新", "按 Fork 数"]
+      }
+    ];
+  }
+
+  buildRequirements(_context: PlanningContext): ResourceRequirement[] {
+    return [];
+  }
+
+  generateGuide(_context: WorkspaceContext): WorkspaceGuide {
+    return {
+      title: "GitHub 开源项目检索结果",
+      summary:
+        "结果来自 GitHub 只读 Repository Search API；选择仓库后可固定 commit 并创建受控下载计划。",
+      nextActions: [
+        "查看仓库的许可证、更新时间和社区热度。",
+        "选择目标仓库并固定默认分支 commit。",
+        "审批后下载仓库及可验证的锁文件依赖，并写入 Manifest。"
+      ]
+    };
+  }
 }
 
 const aiDevelopmentKeywords = [
@@ -157,6 +230,7 @@ function explicitDevelopmentIntent(text: string) {
 export class AiDevelopmentEnvironmentSkill implements DomainSkill {
   readonly id = "ai-development-environment";
   readonly displayName = "AI 开发环境";
+  readonly sourceProviderId = "trusted-catalog";
 
   matches(goal: UserGoal) {
     const task = ` ${normalizedTask(goal.text)} `;
@@ -215,6 +289,7 @@ const researchKeywords = [
 export class ResearchDataEnvironmentSkill implements DomainSkill {
   readonly id = "research-data-environment";
   readonly displayName = "科研数据环境";
+  readonly sourceProviderId = "trusted-catalog";
 
   matches(goal: UserGoal) {
     const task = normalizedTask(goal.text);
@@ -265,6 +340,7 @@ export class ResearchDataEnvironmentSkill implements DomainSkill {
 
 export function createDefaultDomainSkillRegistry() {
   return new DomainSkillRegistry([
+    new GitHubProjectDiscoverySkill(),
     new ResearchDataEnvironmentSkill(),
     new AiDevelopmentEnvironmentSkill()
   ]);

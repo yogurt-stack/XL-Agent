@@ -13,19 +13,29 @@ import {
 } from "./authenticodeVerifier";
 
 async function hashFile(filePath: string) {
-  return new Promise<{ sha256: string; bytesWritten: number }>(
+  return new Promise<{
+    sha256: string;
+    sha512Base64: string;
+    bytesWritten: number;
+  }>(
     (resolve, reject) => {
-      const hash = createHash("sha256");
+      const sha256 = createHash("sha256");
+      const sha512 = createHash("sha512");
       let bytesWritten = 0;
       const stream = createReadStream(filePath);
       stream.on("data", (chunk: string | Buffer) => {
         const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
         bytesWritten += buffer.byteLength;
-        hash.update(buffer);
+        sha256.update(buffer);
+        sha512.update(buffer);
       });
       stream.on("error", reject);
       stream.on("end", () =>
-        resolve({ sha256: hash.digest("hex"), bytesWritten })
+        resolve({
+          sha256: sha256.digest("hex"),
+          sha512Base64: sha512.digest("base64"),
+          bytesWritten
+        })
       );
     }
   );
@@ -210,16 +220,19 @@ export class ElectronArtifactVerifier implements AgentVerifier {
         );
       }
       const actual = await hashFile(artifact.tempFilePath);
-      const expected = resource.download.expectedSha256.toLowerCase();
+      const expected = resource.download.expectedSha256?.toLowerCase() ?? null;
       if (
         actual.bytesWritten !== artifact.bytesWritten ||
         actual.sha256.toLowerCase() !== artifact.sha256.toLowerCase() ||
-        actual.sha256.toLowerCase() !== expected
+        (expected !== null && actual.sha256.toLowerCase() !== expected) ||
+        (resource.download.digestPolicy === "lockfile-integrity" &&
+          actual.sha512Base64 !==
+            resource.download.expectedIntegrity?.digestBase64)
       ) {
         return failure(
           resource.id,
           "ARTIFACT_INTEGRITY_MISMATCH",
-          "文件大小或 SHA256 与可信资源计划不一致。",
+          "文件大小、SHA256 或锁文件 SHA512 与可信资源计划不一致。",
           true
         );
       }

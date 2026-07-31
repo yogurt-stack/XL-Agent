@@ -3,12 +3,14 @@ import { DefaultAgentPolicy, InMemoryAgentToolExecutor } from "./agentServices";
 import { createInitialAgentState, transition } from "./machine";
 import { ExtensibleAgentRouter } from "./router";
 import { createSystemProfileToolOutput } from "./systemProfile";
+import { confirmTaskPlanForTest } from "./taskPlanTestSupport";
 import type { AgentAction, AgentState, HostSystemProfile } from "./types";
 
 function createWaitingApprovalState(): AgentState {
   let state = createInitialAgentState();
   state = transition(state, { type: "SUBMIT_TASK", task: "准备 Windows AI 环境" });
   state = transition(state, new ExtensibleAgentRouter().route(state)!);
+  state = confirmTaskPlanForTest(state);
   state = transition(state, {
     type: "ANSWER_CLARIFICATION",
     questionId: "primary-workload",
@@ -109,6 +111,111 @@ describe("default agent policy", () => {
     };
     expect(policy.evaluate(activeDownload, approved).outcome).toBe("allow");
     expect(policy.evaluate(activeDownload, { ...approved, approvedRevision: null }).outcome).toBe("deny");
+  });
+
+  it("contains GitHub discovery to one read-only search before finish", () => {
+    let state = transition(createInitialAgentState(), {
+      type: "SUBMIT_TASK",
+      task: "查找 GitHub 热门开源项目"
+    });
+    state = transition(state, new ExtensibleAgentRouter().route(state)!);
+    state = confirmTaskPlanForTest(state);
+    state = transition(state, {
+      type: "ANSWER_CLARIFICATION",
+      questionId: "github-created-window",
+      answer: "最近 30 天新建"
+    });
+    state = transition(state, {
+      type: "ANSWER_CLARIFICATION",
+      questionId: "github-sort",
+      answer: "按 Star 数"
+    });
+    const search: AgentAction = {
+      actionId: "github-search",
+      type: "call_tool",
+      purpose: "查询公开仓库。",
+      call: {
+        callId: "github-search",
+        name: "search_github_repositories",
+        input: {
+          mode: "discovery",
+          keywords: "",
+          createdWithinDays: 30,
+          sort: "stars",
+          limit: 10
+        }
+      }
+    };
+    const finish: AgentAction = {
+      actionId: "github-finish",
+      type: "finish",
+      summary: "查询完成。"
+    };
+    const createPlan: AgentAction = {
+      actionId: "github-plan",
+      type: "create_plan",
+      resourceIds: ["git"],
+      explanation: "不应创建计划。"
+    };
+
+    expect(policy.evaluate(search, state).outcome).toBe("allow");
+    expect(policy.evaluate(finish, state).outcome).toBe("deny");
+    expect(policy.evaluate(createPlan, state).outcome).toBe("deny");
+
+    const searched: AgentState = {
+      ...state,
+      agentRun: {
+        ...state.agentRun,
+        toolResults: [{
+          callId: "github-search",
+          tool: "search_github_repositories",
+          status: "success",
+          output: {},
+          startedAt: "start",
+          finishedAt: "finish"
+        }]
+      }
+    };
+    expect(policy.evaluate(search, searched).outcome).toBe("deny");
+    expect(policy.evaluate(finish, searched).outcome).toBe("allow");
+  });
+
+  it("allows the inferred repository-name query and rejects a trending substitution", () => {
+    let state = transition(createInitialAgentState(), {
+      type: "SUBMIT_TASK",
+      task: "帮我找一个 GitHub 上名叫 tau 的项目"
+    });
+    state = transition(state, new ExtensibleAgentRouter().route(state)!);
+    state = confirmTaskPlanForTest(state);
+    const namedSearch: AgentAction = {
+      actionId: "github-name-search",
+      type: "call_tool",
+      purpose: "按仓库名称查询。",
+      call: {
+        callId: "github-name-search",
+        name: "search_github_repositories",
+        input: { mode: "name", query: "tau", limit: 10 }
+      }
+    };
+    const substitutedDiscovery: AgentAction = {
+      ...namedSearch,
+      actionId: "github-wrong-search",
+      call: {
+        callId: "github-wrong-search",
+        name: "search_github_repositories",
+        input: {
+          mode: "discovery",
+          keywords: "",
+          createdWithinDays: 30,
+          sort: "stars",
+          limit: 10
+        }
+      }
+    };
+
+    expect(state.phase).toBe("planning");
+    expect(policy.evaluate(namedSearch, state).outcome).toBe("allow");
+    expect(policy.evaluate(substitutedDiscovery, state).outcome).toBe("deny");
   });
 
   it("allows controlled downloads only after approval and trusted HTTPS catalog host validation", () => {
@@ -337,7 +444,7 @@ describe("in-memory agent tool executor", () => {
         fileName: `${resourceId}.download`,
         urlHost: new URL(activeResource.download.url).host,
         bytesWritten: 7,
-        sha256: activeResource.download.expectedSha256,
+        sha256: activeResource.download.expectedSha256!,
         tempFilePath: `/tmp/${resourceId}.download`,
         elapsedMs: 1
       }

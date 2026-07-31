@@ -63,6 +63,39 @@ declare global {
             error: { code: string; message: string; retriable: boolean };
           }
       >;
+      selectLocalRepository: () => Promise<
+        | {
+            ok: true;
+            snapshot: AgentRuntimeSnapshot;
+            imported: boolean;
+          }
+        | {
+            ok: false;
+            error: { code: string; message: string; retriable: boolean };
+          }
+      >;
+      prepareGitHubPublish: (input: {
+        repositoryName: string;
+        visibility: "private" | "public";
+        branch?: string;
+        commitMessage?: string;
+      }) => Promise<
+        | { ok: true; snapshot: AgentRuntimeSnapshot }
+        | {
+            ok: false;
+            error: { code: string; message: string; retriable: boolean };
+          }
+      >;
+      approveGitHubPublish: (input: {
+        publishId: string;
+        planSha256: string;
+      }) => Promise<
+        | { ok: true; snapshot: AgentRuntimeSnapshot }
+        | {
+            ok: false;
+            error: { code: string; message: string; retriable: boolean };
+          }
+      >;
       selectWorkspaceRoot: () => Promise<
         | {
             ok: true;

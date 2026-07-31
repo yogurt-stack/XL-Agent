@@ -17,6 +17,10 @@ import {
   type WorkspaceTemplateRegistry
 } from "../src/features/agent-core/workspaceTemplates";
 import type { WorkspaceGuide } from "../src/features/agent-core/domainSkills";
+import type {
+  GitHubRepositoryProvenance,
+  NpmPackageProvenance
+} from "../src/features/agent-core/types";
 import type { DownloadArtifactRecord } from "./downloadArtifacts";
 import type { LocalArtifactRecord } from "./localArtifacts";
 import { trustedCatalogMetadata } from "./trustedDownloadCatalog";
@@ -75,8 +79,10 @@ export type WorkspaceSnapshot = {
     attempts: number;
     replacedFrom?: string;
     failureReason?: string;
+    github?: GitHubRepositoryProvenance;
+    npm?: NpmPackageProvenance;
     download?: {
-      expectedSha256?: string;
+      expectedSha256?: string | null;
     };
     verification?: {
       signatureEnforcement?: string;
@@ -160,6 +166,8 @@ type ResourceWorkspaceManifest = {
     selected: boolean;
     attempts: number;
     failureReason: string | null;
+    github: GitHubRepositoryProvenance | null;
+    npm: NpmPackageProvenance | null;
     artifact: ManifestArtifact | null;
   }>;
   localArtifacts: Array<{
@@ -385,7 +393,11 @@ async function copyVerifiedArtifacts(
       );
     }
     const relativePath = path.posix.join(
-      "downloads",
+      resource.github
+        ? "sources"
+        : resource.npm
+          ? "dependencies/npm"
+          : "downloads",
       `${sanitizeSegment(resource.id)}-${sanitizeFileName(artifact.fileName)}`
     );
     const stagingPath = path.join(stagingRoot, relativePath);
@@ -533,6 +545,8 @@ function createManifest(
     selected: resource.selected,
     attempts: resource.attempts,
     failureReason: resource.failureReason ?? null,
+    github: resource.github ?? null,
+    npm: resource.npm ?? null,
     artifact: manifestArtifacts.get(resource.id) ?? null
   }));
   const downloadFiles = [...manifestArtifacts.values()].map(
@@ -570,7 +584,10 @@ function createManifest(
           artifact.relativePath ? [artifact.relativePath] : []
         )
       ],
-      nextAction: "先核对 Manifest revision 与 downloads/ 校验信息，再按 README.md 人工处理资源。",
+      nextAction:
+        snapshot.route === "github-project-discovery"
+          ? "先核对 Manifest 中的固定 commit、sources/ 归档与项目就绪度，再决定是否准备依赖。"
+          : "先核对 Manifest revision 与 downloads/ 校验信息，再按 README.md 人工处理资源。",
       missingItems: []
     }
   };
@@ -615,13 +632,22 @@ function createArtifacts(
       `${manifest.taskRequirements && typeof manifest.taskRequirements === "object" && "label" in manifest.taskRequirements ? String((manifest.taskRequirements as { label: unknown }).label) : "资源准备"}工作区`,
     summary:
       workspaceGuide?.summary ??
-      `任务“${manifest.task}”的资源已按 Manifest r${manifest.revision} 写入 downloads/。当前状态只代表资源已准备，不代表软件已安装。`,
+      (manifest.route === "github-project-discovery"
+        ? `任务“${manifest.task}”的固定 commit 源码归档已按 Manifest r${manifest.revision} 写入 sources/。当前状态只代表源码已准备，不代表项目可运行。`
+        : `任务“${manifest.task}”的资源已按 Manifest r${manifest.revision} 写入 downloads/。当前状态只代表资源已准备，不代表软件已安装。`),
     nextActions:
-      workspaceGuide?.nextActions ?? [
-        "核对 resource-manifest.json 中每个 artifact 的相对路径与 SHA256。",
-        "按实际需要人工运行安装程序或导入资源。",
-        "如需更换来源，返回 Agent 创建并审批新的 plan revision。"
-      ]
+      workspaceGuide?.nextActions ??
+      (manifest.route === "github-project-discovery"
+        ? [
+            "核对 resource-manifest.json 中的仓库、commit SHA、许可证与归档 SHA256。",
+            "阅读项目结构分析和 Agent B 就绪度结论，再决定是否准备锁文件依赖。",
+            "源码及依赖准备过程不会自动执行仓库脚本或安装命令。"
+          ]
+        : [
+            "核对 resource-manifest.json 中每个 artifact 的相对路径与 SHA256。",
+            "按实际需要人工运行安装程序或导入资源。",
+            "如需更换来源，返回 Agent 创建并审批新的 plan revision。"
+          ])
   };
   return new Map<string, string>([
     ["resource-manifest.json", template.renderManifest(context)],

@@ -189,6 +189,65 @@ export function useAgentCore() {
     return result;
   }, [applySnapshot, bridge]);
 
+  const selectLocalRepository = useCallback(async () => {
+    if (!bridge) {
+      return {
+        ok: false as const,
+        error: {
+          code: "ELECTRON_BRIDGE_UNAVAILABLE",
+          message: "浏览器模式不能导入本地 Git 仓库。",
+          retriable: false
+        }
+      };
+    }
+    const result = await bridge.selectLocalRepository();
+    if (result.ok) applySnapshot(result.snapshot);
+    return result;
+  }, [applySnapshot, bridge]);
+
+  const prepareGitHubPublish = useCallback(
+    async (input: {
+      repositoryName: string;
+      visibility: "private" | "public";
+      branch?: string;
+      commitMessage?: string;
+    }) => {
+      if (!bridge) {
+        return {
+          ok: false as const,
+          error: {
+            code: "ELECTRON_BRIDGE_UNAVAILABLE",
+            message: "浏览器模式不能创建 GitHub 发布计划。",
+            retriable: false
+          }
+        };
+      }
+      const result = await bridge.prepareGitHubPublish(input);
+      if (result.ok) applySnapshot(result.snapshot);
+      return result;
+    },
+    [applySnapshot, bridge]
+  );
+
+  const approveGitHubPublish = useCallback(
+    async (input: { publishId: string; planSha256: string }) => {
+      if (!bridge) {
+        return {
+          ok: false as const,
+          error: {
+            code: "ELECTRON_BRIDGE_UNAVAILABLE",
+            message: "浏览器模式不能批准 GitHub 发布。",
+            retriable: false
+          }
+        };
+      }
+      const result = await bridge.approveGitHubPublish(input);
+      if (result.ok) applySnapshot(result.snapshot);
+      return result;
+    },
+    [applySnapshot, bridge]
+  );
+
   const selectWorkspaceRoot = useCallback(async () => {
     if (!bridge) {
       return {
@@ -244,6 +303,9 @@ export function useAgentCore() {
     readWorkspaceFile,
     openWorkspace,
     selectLocalResources,
+    selectLocalRepository,
+    prepareGitHubPublish,
+    approveGitHubPublish,
     selectWorkspaceRoot
   };
 }

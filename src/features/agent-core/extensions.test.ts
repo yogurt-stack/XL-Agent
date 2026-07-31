@@ -11,9 +11,11 @@ import {
 import { trustedCatalog } from "./catalog";
 import { createInitialAgentState, transition } from "./machine";
 import { LocalRuleModelRuntime } from "./localRuleModel";
+import { githubSearchInputFromState } from "./githubSearch";
 import { FixedWindowsPlanner, MockVerifier } from "./mockServices";
 import { ExtensibleAgentRouter } from "./router";
 import { AgentRuntime } from "./runtime";
+import { confirmTaskPlanForTest } from "./taskPlanTestSupport";
 import {
   TrustedCatalogSourceProvider,
   createDefaultSourceProviderRegistry
@@ -57,10 +59,10 @@ describe("extensible routing and registries", () => {
     );
 
     const planning = transition(
-      transition(
+      confirmTaskPlanForTest(transition(
         submitted("准备一个科研数据分析工作区"),
         routed!
-      ),
+      )),
       {
         type: "ANSWER_CLARIFICATION",
         questionId: "research-template",
@@ -75,6 +77,86 @@ describe("extensible routing and registries", () => {
         "code-editor",
         "source-control"
       ]
+    });
+  });
+
+  it("routes GitHub project discovery before the generic git development skill", () => {
+    const router = new ExtensibleAgentRouter();
+    const routed = router.route(
+      submitted("帮我查找 GitHub 最新最热门的 10 个开源项目")
+    );
+
+    expect(routed?.decision).toMatchObject({
+      status: "supported",
+      skillId: "github-project-discovery",
+      sourceProviderId: "github-api"
+    });
+    expect(routed?.decision.clarifications.map((question) => question.id))
+      .toEqual(["github-created-window", "github-sort"]);
+  });
+
+  it("routes a named GitHub repository search without trending clarifications", async () => {
+    const router = new ExtensibleAgentRouter();
+    const initial = submitted("帮我找一个 GitHub 上名叫 tau 的项目");
+    const routed = router.route(initial);
+
+    expect(routed?.decision).toMatchObject({
+      status: "supported",
+      skillId: "github-project-discovery",
+      clarifications: []
+    });
+    const taskPlanning = transition(initial, routed!);
+    expect(taskPlanning.phase).toBe("task_planning");
+    const proposalDecision = await new LocalRuleModelRuntime().decide({
+      state: taskPlanning,
+      step: 0,
+      maxSteps: 6,
+      availableTools: ["search_github_repositories"],
+      toolResults: []
+    });
+    expect(proposalDecision.action).toMatchObject({
+      type: "propose_task_plan",
+      proposal: { objective: expect.stringContaining("tau") }
+    });
+    const planning = confirmTaskPlanForTest(taskPlanning);
+    expect(githubSearchInputFromState(planning)).toEqual({
+      mode: "name",
+      query: "tau",
+      limit: 10
+    });
+
+    const decision = await new LocalRuleModelRuntime().decide({
+      state: planning,
+      step: 1,
+      maxSteps: 6,
+      availableTools: ["search_github_repositories"],
+      toolResults: []
+    });
+    expect(decision.action).toMatchObject({
+      type: "call_tool",
+      purpose: expect.stringContaining("tau"),
+      call: {
+        name: "search_github_repositories",
+        input: { mode: "name", query: "tau", limit: 10 }
+      }
+    });
+  });
+
+  it("routes a GitHub repository URL as an exact lookup without clarifications", () => {
+    const router = new ExtensibleAgentRouter();
+    const initial = submitted("请处理 https://github.com/openai/tau");
+    const routed = router.route(initial);
+
+    expect(routed?.decision).toMatchObject({
+      status: "supported",
+      skillId: "github-project-discovery",
+      userLinks: ["https://github.com/openai/tau"],
+      clarifications: []
+    });
+    expect(githubSearchInputFromState(transition(initial, routed!))).toEqual({
+      mode: "exact",
+      fullName: "openai/tau",
+      limit: 1
     });
   });
 
@@ -97,7 +179,7 @@ describe("extensible routing and registries", () => {
     const next = event
       ? transition(submitted("placeholder"), event)
       : createInitialAgentState();
-    expect(next.phase).toBe("planning");
+    expect(next.phase).toBe("task_planning");
   });
 
   it("fails closed for unsupported goals and unrecognized links", () => {
@@ -140,10 +222,10 @@ describe("extensible routing and registries", () => {
         status: "supported",
         skillId: "exam-study-materials"
       });
-    const planning = transition(
+    const planning = confirmTaskPlanForTest(transition(
       submitted("准备国考申论学习资料"),
       routedEvent!
-    );
+    ));
     expect(router.resolveRequirements(planning)).toEqual({
       intent: "skill:exam-study-materials",
       label: "考试学习资料",
@@ -196,6 +278,10 @@ describe("extensible routing and registries", () => {
       step < 20 && runtime.getState().phase !== "waiting_approval";
       step += 1
     ) {
+      if (runtime.getState().phase === "waiting_task_plan_confirmation") {
+        runtime.dispatch({ type: "CONFIRM_TASK_PLAN", revision: 1 });
+        continue;
+      }
       const job = jobs.shift();
       if (!job) throw new Error(`Runtime stalled at ${runtime.getState().phase}.`);
       await job();
@@ -211,6 +297,113 @@ describe("extensible routing and registries", () => {
     });
     expect(runtime.getState().resources.map((resource) => resource.id))
       .toContain("git");
+  });
+
+  it("drives GitHub discovery to a terminal result without creating a download plan", async () => {
+    const jobs: Array<() => void | Promise<void>> = [];
+    const scheduler: AgentScheduler = {
+      schedule(task) {
+        jobs.push(task);
+        return () => undefined;
+      }
+    };
+    const tools = new InMemoryAgentToolExecutor(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async (input) => {
+        if (input.mode !== "discovery") {
+          throw new Error("Expected discovery search input.");
+        }
+        return {
+          ok: true,
+          output: {
+            criteria: {
+              mode: "discovery",
+              keywords: input.keywords,
+              createdWithinDays: input.createdWithinDays,
+              createdAfter: "2026-06-30",
+              sort: input.sort,
+              order: "desc",
+              licenseRequired: true
+            },
+            repositories: [{
+              id: 1,
+              fullName: "openai/example",
+              url: "https://github.com/openai/example",
+              description: "Example",
+              stars: 100,
+              forks: 10,
+              openIssues: 1,
+              language: "TypeScript",
+              topics: ["agent"],
+              license: { spdxId: "MIT", name: "MIT License" },
+              createdAt: "2026-07-01T00:00:00.000Z",
+              updatedAt: "2026-07-29T00:00:00.000Z",
+              pushedAt: "2026-07-29T00:00:00.000Z"
+            }],
+            totalCount: 1,
+            incompleteResults: false,
+            fetchedAt: "2026-07-30T00:00:00.000Z",
+            authenticated: false,
+            rateLimit: { remaining: 9, resetAt: null }
+          }
+        };
+      }
+    );
+    const runtime = new AgentRuntime({
+      router: new ExtensibleAgentRouter(),
+      planner: new FixedWindowsPlanner(),
+      verifier: new MockVerifier(),
+      scheduler,
+      model: new LocalRuleModelRuntime(),
+      tools,
+      policy: new DefaultAgentPolicy(),
+      stepDelayMs: 0,
+      createTaskId: () => "github-runtime-test"
+    });
+    runtime.start();
+    runtime.dispatch({
+      type: "SUBMIT_TASK",
+      task: "帮我查找 GitHub 最新最热门的 10 个开源项目"
+    });
+    await jobs.shift()?.();
+    await jobs.shift()?.();
+    expect(runtime.getState().phase).toBe("waiting_task_plan_confirmation");
+    runtime.dispatch({ type: "CONFIRM_TASK_PLAN", revision: 1 });
+    runtime.dispatch({
+      type: "ANSWER_CLARIFICATION",
+      questionId: "github-created-window",
+      answer: "最近 30 天新建"
+    });
+    runtime.dispatch({
+      type: "ANSWER_CLARIFICATION",
+      questionId: "github-sort",
+      answer: "按 Star 数"
+    });
+
+    for (
+      let step = 0;
+      step < 10 && runtime.getState().phase !== "result";
+      step += 1
+    ) {
+      const job = jobs.shift();
+      if (!job) throw new Error(`Runtime stalled at ${runtime.getState().phase}.`);
+      await job();
+    }
+
+    expect(runtime.getState()).toMatchObject({
+      phase: "result",
+      resources: [],
+      agentRun: { status: "complete" }
+    });
+    expect(runtime.getState().agentRun.toolResults).toEqual([
+      expect.objectContaining({
+        tool: "search_github_repositories",
+        status: "success"
+      })
+    ]);
   });
 
   it("resolves trusted source metadata and a matching workspace template", () => {

@@ -14,6 +14,12 @@ import { parseModelDecision } from "./agentSchemas";
 import { LocalRuleModelRuntime } from "./localRuleModel";
 import { createInitialAgentState, transition } from "./machine";
 import { MockVerifier, FixedWindowsPlanner, FixedWindowsRouter } from "./mockServices";
+import {
+  createTaskPlan,
+  defaultTaskPlanToolPolicies,
+  prepareTaskPlanForConfirmation,
+  validateTaskPlan
+} from "./taskPlan";
 import type {
   AgentAction,
   AgentEvent,
@@ -56,6 +62,7 @@ export class AgentRuntime implements AgentRuntimePort {
   private readonly stepDelayMs: number;
   private readonly downloadTool: RuntimeDownloadTool;
   private readonly createTaskId: () => string;
+  private readonly taskPlanFallbackModel = new LocalRuleModelRuntime();
 
   constructor(private readonly dependencies: AgentRuntimeDependencies) {
     this.state = dependencies.initialState ?? createInitialAgentState();
@@ -71,12 +78,26 @@ export class AgentRuntime implements AgentRuntimePort {
   }
 
   dispatch(event: AgentEvent) {
-    this.invalidatePendingWork();
-    this.applyEvent(
+    const normalizedEvent: AgentEvent =
       event.type === "SUBMIT_TASK" && !event.taskId
         ? { ...event, taskId: this.createTaskId() }
-        : event
-    );
+        : event.type === "CONFIRM_TASK_PLAN"
+          ? {
+              type: "TASK_PLAN_CONFIRMED",
+              revision: event.revision,
+              confirmedAt: new Date().toISOString()
+            }
+          : event.type === "CANCEL_TASK" && !event.cancelledAt
+            ? { ...event, cancelledAt: new Date().toISOString() }
+          : event;
+    const nextState = transition(this.state, normalizedEvent);
+    if (nextState === this.state) {
+      this.drive();
+      return this.state;
+    }
+    this.invalidatePendingWork();
+    this.state = nextState;
+    this.listeners.forEach((listener) => listener(this.state));
     this.drive();
     return this.state;
   }
@@ -151,8 +172,9 @@ export class AgentRuntime implements AgentRuntimePort {
     }
 
     if (
-      this.dependencies.model &&
-      (this.state.phase === "planning" || this.state.phase === "replanning")
+      this.state.phase === "task_planning" ||
+      (this.dependencies.model &&
+        (this.state.phase === "planning" || this.state.phase === "replanning"))
     ) {
       if (this.state.agentRun.step >= this.state.agentRun.maxSteps) {
         this.applyEvent({ type: "MODEL_STEP_LIMIT_REACHED" });
@@ -163,7 +185,12 @@ export class AgentRuntime implements AgentRuntimePort {
       this.cancelScheduledStep = this.dependencies.scheduler.schedule(async () => {
         this.cancelScheduledStep = null;
         if (!this.started || version !== this.workVersion) return;
-        await this.runModelStep(version);
+        await this.runModelStep(
+          version,
+          this.state.phase === "task_planning"
+            ? this.dependencies.model ?? this.taskPlanFallbackModel
+            : this.dependencies.model
+        );
       }, this.stepDelayMs);
       return;
     }
@@ -210,24 +237,23 @@ export class AgentRuntime implements AgentRuntimePort {
     }, this.stepDelayMs);
   }
 
-  private async runModelStep(version: number) {
-    const model = this.dependencies.model;
+  private async runModelStep(
+    version: number,
+    selectedModel: ModelRuntime | undefined
+  ) {
+    const model = selectedModel;
     const tools = this.dependencies.tools;
     const policy = this.dependencies.policy;
     if (!model) return;
 
     this.modelStepRunning = true;
     try {
+      const availableTools = this.availableToolsForCurrentState();
       const decision = parseModelDecision(await model.decide({
         state: this.state,
         step: this.state.agentRun.step,
         maxSteps: this.state.agentRun.maxSteps,
-        availableTools: [
-          "read_system_profile",
-          "search_trusted_catalog",
-          this.downloadTool,
-          "export_workspace"
-        ],
+        availableTools,
         toolResults: this.state.agentRun.toolResults
       }));
       if (!this.isCurrentWork(version)) return;
@@ -246,7 +272,9 @@ export class AgentRuntime implements AgentRuntimePort {
       }
 
       const action = decision.action;
-      if (action.type === "call_tool") {
+      if (action.type === "propose_task_plan") {
+        this.receiveTaskPlanProposal(action, decision.provider, availableTools);
+      } else if (action.type === "call_tool") {
         const result = await tools.execute(action.call, this.state);
         if (!this.isCurrentWork(version)) return;
         this.applyEvent({ type: "MODEL_TOOL_COMPLETED", result });
@@ -287,6 +315,54 @@ export class AgentRuntime implements AgentRuntimePort {
       this.modelStepRunning = false;
       if (this.isCurrentWork(version)) this.drive();
     }
+  }
+
+  private availableToolsForCurrentState(): AgentToolName[] {
+    if (this.state.routeDecision?.skillId === "github-project-discovery") {
+      return this.state.phase === "task_planning"
+        ? ["search_github_repositories", this.downloadTool, "export_workspace"]
+        : ["search_github_repositories"];
+    }
+    return [
+      "read_system_profile",
+      "search_trusted_catalog",
+      this.downloadTool,
+      "export_workspace"
+    ];
+  }
+
+  private receiveTaskPlanProposal(
+    action: Extract<AgentAction, { type: "propose_task_plan" }>,
+    provider: "local-rule" | "remote-llm",
+    availableTools: AgentToolName[]
+  ) {
+    if (this.state.phase !== "task_planning") {
+      throw new Error("当前阶段不接受新的 Task Plan。");
+    }
+    const createdAt = new Date().toISOString();
+    const planId = `task-plan-${this.state.taskId}`
+      .replace(/[^a-z0-9._-]/giu, "-")
+      .slice(0, 80);
+    const validationContext = {
+      tools: defaultTaskPlanToolPolicies.filter((policy) =>
+        availableTools.includes(policy.name as AgentToolName)
+      ),
+      requireInitialConfirmation: true
+    };
+    const draft = createTaskPlan({
+      planId,
+      taskId: this.state.taskId,
+      proposal: action.proposal,
+      createdBy: provider,
+      createdAt
+    });
+    const validation = validateTaskPlan(draft, validationContext);
+    const plan = prepareTaskPlanForConfirmation(
+      draft,
+      validationContext,
+      createdAt
+    );
+    this.applyEvent({ type: "TASK_PLAN_PROPOSED", plan, validation });
   }
 
   private async runDownloadToolStep(version: number) {
@@ -336,7 +412,9 @@ export class AgentRuntime implements AgentRuntimePort {
       if (result.status === "error") {
         if (
           result.error?.code === "APPROVAL_EXPIRED" ||
-          result.error?.code === "APPROVAL_NOT_FOUND"
+          result.error?.code === "APPROVAL_NOT_FOUND" ||
+          result.error?.code === "CATALOG_APPROVAL_MISMATCH" ||
+          result.error?.code === "PLAN_APPROVAL_MISMATCH"
         ) {
           this.applyEvent({
             type: "DOWNLOAD_APPROVAL_EXPIRED",
@@ -422,7 +500,9 @@ export class AgentRuntime implements AgentRuntimePort {
       if (result.status === "error") {
         if (
           result.error?.code === "APPROVAL_EXPIRED" ||
-          result.error?.code === "APPROVAL_NOT_FOUND"
+          result.error?.code === "APPROVAL_NOT_FOUND" ||
+          result.error?.code === "CATALOG_APPROVAL_MISMATCH" ||
+          result.error?.code === "PLAN_APPROVAL_MISMATCH"
         ) {
           this.applyEvent({
             type: "DOWNLOAD_APPROVAL_EXPIRED",

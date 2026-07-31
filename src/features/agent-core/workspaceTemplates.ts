@@ -88,6 +88,27 @@ export class UserProvidedLinksWorkspaceTemplate extends AiDevelopmentWorkspaceTe
   }
 }
 
+export class GitHubProjectWorkspaceTemplate extends AiDevelopmentWorkspaceTemplate {
+  readonly id = "github-project-workspace";
+
+  supports(skillId: string): boolean {
+    return skillId === "github-project-discovery";
+  }
+
+  renderAgents(context: WorkspaceTemplateContext) {
+    return [
+      "# GitHub 项目 Agent 交接说明",
+      "",
+      `领域 Skill：\`${context.skillId}\``,
+      "",
+      "先读取 resource-manifest.json，核对仓库 fullName、固定 commit SHA、许可证与源码归档 SHA256。",
+      "可以报告项目清单、锁文件和运行时提示；禁止自动执行仓库代码、生命周期脚本或安装命令。",
+      "只有受支持的锁文件依赖准备计划经过单独审批后，才能继续下载依赖包。",
+      ""
+    ].join("\n");
+  }
+}
+
 export class ResearchDataWorkspaceTemplate extends AiDevelopmentWorkspaceTemplate {
   readonly id = "research-data-workspace";
 
@@ -111,6 +132,7 @@ export class ResearchDataWorkspaceTemplate extends AiDevelopmentWorkspaceTemplat
 export function createDefaultWorkspaceTemplateRegistry() {
   return new WorkspaceTemplateRegistry([
     new AiDevelopmentWorkspaceTemplate(),
+    new GitHubProjectWorkspaceTemplate(),
     new ResearchDataWorkspaceTemplate(),
     new UserProvidedLinksWorkspaceTemplate()
   ]);

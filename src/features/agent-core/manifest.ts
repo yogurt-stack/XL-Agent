@@ -32,9 +32,13 @@ export function createResourceManifest(state: AgentState) {
       status: resource.status,
       selected: resource.selected,
       attempts: resource.attempts,
+      github: resource.github ?? null,
+      npm: resource.npm ?? null,
       failureReason: resource.failureReason ?? null
     })),
     localArtifacts: state.localArtifacts,
+    localRepository: state.localRepository,
+    githubPublish: state.githubPublish,
     agentB: state.agentB,
     handoff: {
       ready: state.workspace.ready,

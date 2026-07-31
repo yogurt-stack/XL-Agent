@@ -13,18 +13,26 @@ import {
   type ControlledDownloadOutput
 } from "./downloadClient";
 import { RemoteModelClient } from "./modelClient";
+import { GitHubRepositorySearchClient } from "./githubClient";
 import { TaskStore } from "./taskStore";
 import type { TrustedDownloadMetadata } from "./trustedDownloadCatalog";
 import {
   LocalArtifactScanError,
   scanLocalArtifacts
 } from "./localArtifacts";
+import {
+  inspectLocalRepository,
+  LocalRepositoryInspectionError
+} from "./localRepository";
+import { GitHubPublisher } from "./githubPublisher";
 
 loadEnv({ path: path.resolve(process.cwd(), ".env"), quiet: true });
 
 app.setName("迅雷 AI Task Agent");
 
 const remoteModelClient = new RemoteModelClient();
+const githubRepositorySearchClient = new GitHubRepositorySearchClient();
+const githubPublisher = new GitHubPublisher();
 const downloadFixtureAttempts = new Map<string, number>();
 let taskStorePromise: Promise<TaskStore> | null = null;
 let runtimeHostPromise: Promise<AgentRuntimeHost> | null = null;
@@ -162,7 +170,7 @@ async function fixtureDownload(
       fileName,
       urlHost: new URL(metadata.url).host,
       bytesWritten: Buffer.byteLength(`fixture:${resourceId}`),
-      sha256: metadata.expectedSha256,
+      sha256: metadata.expectedSha256 ?? "0".repeat(64),
       tempFilePath,
       elapsedMs: 1,
       resumedFromBytes: 0
@@ -228,6 +236,11 @@ function getAgentRuntimeHost() {
       AgentRuntimeHost.create({
         store,
         modelClient: remoteModelClient,
+        githubRepositorySearch: (input) =>
+          githubRepositorySearchClient.search(input),
+        inspectGitHubRepository: (fullName) =>
+          githubRepositorySearchClient.inspectRepository(fullName),
+        githubPublisher,
         workspaceRoot: getWorkspaceRoot(),
         performDownload: performTrustedDownload,
         cleanupManagedDemoFiles,
@@ -270,6 +283,25 @@ function createMainWindow() {
       nodeIntegration: false,
       sandbox: true
     }
+  });
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const candidate = new URL(url);
+      const pathSegments = candidate.pathname.split("/").filter(Boolean);
+      if (
+        candidate.protocol === "https:" &&
+        candidate.hostname === "github.com" &&
+        !candidate.username &&
+        !candidate.password &&
+        pathSegments.length === 2
+      ) {
+        void shell.openExternal(candidate.toString());
+      }
+    } catch {
+      // Invalid or non-GitHub URLs remain blocked.
+    }
+    return { action: "deny" };
   });
 
   if (devServerUrl) {
@@ -470,7 +502,8 @@ ipcMain.handle("agent:selectLocalResources", async () => {
     state.taskId === "unassigned" ||
     state.phase === "downloading" ||
     state.phase === "verifying" ||
-    state.phase === "exporting"
+    state.phase === "exporting" ||
+    state.githubPublish.status === "publishing"
   ) {
     return {
       ok: false as const,
@@ -524,6 +557,92 @@ ipcMain.handle("agent:selectLocalResources", async () => {
   }
 });
 
+ipcMain.handle("agent:selectLocalRepository", async () => {
+  const host = await getAgentRuntimeHost();
+  const state = host.getSnapshot().state;
+  if (
+    state.phase === "downloading" ||
+    state.phase === "verifying" ||
+    state.phase === "exporting" ||
+    state.agentB.status === "running" ||
+    state.githubPublish.status === "publishing"
+  ) {
+    return {
+      ok: false as const,
+      error: {
+        code: "LOCAL_REPOSITORY_NOT_ALLOWED",
+        message:
+          "当前存在运行中的下载、验证、导出、Agent B 检查或 GitHub 发布。",
+        retriable: false
+      }
+    };
+  }
+  const result = await dialog.showOpenDialog({
+    title: "选择要只读导入 Agent 的本地 Git 仓库",
+    properties: ["openDirectory"]
+  });
+  if (result.canceled || result.filePaths.length !== 1) {
+    return {
+      ok: true as const,
+      snapshot: host.getSnapshot(),
+      imported: false
+    };
+  }
+  try {
+    const inspection = await inspectLocalRepository(result.filePaths[0]);
+    return {
+      ok: true as const,
+      snapshot: host.importLocalRepository(inspection),
+      imported: true
+    };
+  } catch (error) {
+    return {
+      ok: false as const,
+      error: {
+        code:
+          error instanceof LocalRepositoryInspectionError
+            ? error.code
+            : "LOCAL_REPOSITORY_READ_FAILED",
+        message:
+          error instanceof Error ? error.message : "本地仓库只读检查失败。",
+        retriable: false
+      }
+    };
+  }
+});
+
+ipcMain.handle("agent:prepareGitHubPublish", async (_event, input: unknown) => {
+  try {
+    return await (await getAgentRuntimeHost()).prepareGitHubPublish(input);
+  } catch (error) {
+    return {
+      ok: false as const,
+      error: {
+        code: "GITHUB_PUBLISH_INTERNAL_ERROR",
+        message:
+          error instanceof Error ? error.message : "GitHub 发布计划创建失败。",
+        retriable: true
+      }
+    };
+  }
+});
+
+ipcMain.handle("agent:approveGitHubPublish", async (_event, input: unknown) => {
+  try {
+    return await (await getAgentRuntimeHost()).approveGitHubPublish(input);
+  } catch (error) {
+    return {
+      ok: false as const,
+      error: {
+        code: "GITHUB_PUBLISH_INTERNAL_ERROR",
+        message:
+          error instanceof Error ? error.message : "GitHub 发布执行失败。",
+        retriable: true
+      }
+    };
+  }
+});
+
 ipcMain.handle("agent:selectWorkspaceRoot", async () => {
   const host = await getAgentRuntimeHost();
   const result = await dialog.showOpenDialog({
@@ -559,13 +678,28 @@ ipcMain.handle("agent:readWorkspaceFile", async (_event, input: unknown) => {
       }
     };
   }
-  const output = await (
-    await getTaskStore()
-  ).getWorkspaceExport(taskRevision.taskId, taskRevision.revision);
+  const store = await getTaskStore();
+  const output = await store.getWorkspaceExport(
+    taskRevision.taskId,
+    taskRevision.revision
+  );
   const file = output?.files.find(
     (candidate) => candidate.relativePath === relativePath
   );
-  if (!file) {
+  const manifestSnapshot = output
+    ? null
+    : await store.getLatestManifestSnapshot(
+        taskRevision.taskId,
+        taskRevision.revision
+      );
+  const manifestFile =
+    manifestSnapshot?.rootPath &&
+    ["README.md", "RESOURCE_MANIFEST.md", "AGENTS.md", "resource-manifest.json"].includes(
+      relativePath
+    )
+      ? path.join(manifestSnapshot.rootPath, relativePath)
+      : null;
+  if (!file && !manifestFile) {
     return {
       ok: false as const,
       error: {
@@ -575,7 +709,11 @@ ipcMain.handle("agent:readWorkspaceFile", async (_event, input: unknown) => {
       }
     };
   }
-  if (relativePath.startsWith("downloads/")) {
+  if (
+    relativePath.startsWith("downloads/") ||
+    relativePath.startsWith("sources/") ||
+    relativePath.startsWith("dependencies/")
+  ) {
     return {
       ok: false as const,
       error: {
@@ -586,7 +724,7 @@ ipcMain.handle("agent:readWorkspaceFile", async (_event, input: unknown) => {
     };
   }
   try {
-    const content = await readFile(file.absolutePath, "utf8");
+    const content = await readFile(file?.absolutePath ?? manifestFile!, "utf8");
     return { ok: true as const, content };
   } catch (error) {
     return {
@@ -605,13 +743,22 @@ ipcMain.handle("agent:openWorkspace", async (_event, input: unknown) => {
   if (!taskRevision) {
     return { ok: false as const, error: "工作区打开请求无效。" };
   }
-  const output = await (
-    await getTaskStore()
-  ).getWorkspaceExport(taskRevision.taskId, taskRevision.revision);
-  if (!output) {
+  const store = await getTaskStore();
+  const output = await store.getWorkspaceExport(
+    taskRevision.taskId,
+    taskRevision.revision
+  );
+  const manifestSnapshot = output
+    ? null
+    : await store.getLatestManifestSnapshot(
+        taskRevision.taskId,
+        taskRevision.revision
+      );
+  const rootPath = output?.rootPath ?? manifestSnapshot?.rootPath;
+  if (!rootPath) {
     return { ok: false as const, error: "未找到已导出的工作区。" };
   }
-  const error = await shell.openPath(output.rootPath);
+  const error = await shell.openPath(rootPath);
   return error
     ? { ok: false as const, error }
     : { ok: true as const };

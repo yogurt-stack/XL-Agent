@@ -1,7 +1,12 @@
 import { catalogById, clarificationQuestions, windows11Profile } from "./catalog";
 import { validatePlannedResources, validatePlanResourceIds } from "./planValidation";
+import {
+  githubAcquisitionRequirements,
+  validateGitHubAcquisitionPlan
+} from "./githubAcquisition";
 import { isSystemProfileToolOutput } from "./systemProfile";
 import { deriveTaskRequirements } from "./taskRequirements";
+import { cancelTaskPlan, confirmTaskPlan } from "./taskPlan";
 import type {
   AgentEvent,
   AgentLogEntry,
@@ -312,6 +317,8 @@ export function createInitialAgentState(): AgentState {
     task: "",
     route: null,
     routeDecision: null,
+    taskPlan: null,
+    taskPlanValidation: null,
     systemProfile: windows11Profile,
     hostProfile: null,
     clarifications: clarificationQuestions,
@@ -319,6 +326,15 @@ export function createInitialAgentState(): AgentState {
     answers: {},
     resources: [],
     localArtifacts: [],
+    localRepository: null,
+    githubPublish: {
+      status: "idle",
+      plan: null,
+      approvedAt: null,
+      result: null,
+      error: null,
+      partialRepositoryUrl: null
+    },
     replanReason: null,
     requestedReplanStrategy: null,
     activeResourceId: null,
@@ -373,7 +389,9 @@ export function getActiveClarification(state: AgentState) {
 export function transition(state: AgentState, event: AgentEvent): AgentState {
   switch (event.type) {
     case "RESET":
-      return createInitialAgentState();
+      return state.githubPublish.status === "publishing"
+        ? state
+        : createInitialAgentState();
 
     case "SUBMIT_TASK": {
       const task = event.task.trim();
@@ -381,7 +399,8 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         !task ||
         state.phase === "downloading" ||
         state.phase === "verifying" ||
-        state.phase === "exporting"
+        state.phase === "exporting" ||
+        state.githubPublish.status === "publishing"
       ) {
         return state;
       }
@@ -409,6 +428,158 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       );
     }
 
+    case "LOCAL_REPOSITORY_IMPORTED": {
+      if (
+        state.phase === "downloading" ||
+        state.phase === "verifying" ||
+        state.phase === "exporting" ||
+        state.agentB.status === "running" ||
+        state.githubPublish.status === "publishing"
+      ) {
+        return state;
+      }
+      const initialState = createInitialAgentState();
+      const repository = event.repository;
+      return withLog(
+        {
+          ...initialState,
+          taskId: event.taskId,
+          phase: "handoff",
+          revision: 1,
+          task: `检查本地仓库 ${repository.displayName}`,
+          route: "local-repository-import",
+          routeDecision: {
+            status: "supported",
+            reason:
+              "用户明确选择本地 Git 仓库；Main 仅执行固定用途的只读 Git 检查。",
+            skillId: "local-repository-import",
+            sourceProviderId: "local-git",
+            userLinks: [],
+            resourceIds: [],
+            clarifications: [],
+            requirements: {
+              intent: "user-links",
+              label: "本地 Git 仓库只读检查",
+              requiredCapabilities: ["project-source"]
+            }
+          },
+          localRepository: repository,
+          taskRequirements: {
+            intent: "user-links",
+            label: "本地 Git 仓库只读检查",
+            requiredCapabilities: ["project-source"]
+          },
+          planExplanation:
+            "仓库保留在原目录；Agent 只接收脱敏元数据，不执行代码、安装依赖或修改仓库。",
+          workspace: {
+            ready: true,
+            files: [
+              "README.md",
+              "RESOURCE_MANIFEST.md",
+              "AGENTS.md",
+              "resource-manifest.json"
+            ],
+            nextAction: "运行 Agent B 读取 Manifest，或单独创建 GitHub 发布计划。",
+            exportStatus: "ready",
+            manifestRevision: 0,
+            overallStatus: "ready",
+            fileRecords: []
+          },
+          agentRun: {
+            ...initialState.agentRun,
+            status: "complete"
+          }
+        },
+        "success",
+        `已只读导入本地仓库 ${repository.displayName}@${repository.commitSha.slice(0, 12)}；源目录未被修改。`
+      );
+    }
+
+    case "GITHUB_PUBLISH_PLAN_PREPARED":
+      if (
+        state.phase !== "handoff" ||
+        state.route !== "local-repository-import" ||
+        state.localRepository?.repositoryHandleId !==
+          event.plan.repositoryHandleId
+      ) {
+        return state;
+      }
+      return withLog(
+        {
+          ...state,
+          githubPublish: {
+            status: "waiting_approval",
+            plan: event.plan,
+            approvedAt: null,
+            result: null,
+            error: null,
+            partialRepositoryUrl: null
+          }
+        },
+        "info",
+        `GitHub 发布计划已固定到 ${event.plan.targetOwner}/${event.plan.targetRepository}，等待独立审批。`
+      );
+
+    case "GITHUB_PUBLISH_STARTED":
+      if (
+        state.githubPublish.status !== "waiting_approval" ||
+        state.githubPublish.plan?.publishId !== event.publishId
+      ) {
+        return state;
+      }
+      return withLog(
+        {
+          ...state,
+          githubPublish: {
+            ...state.githubPublish,
+            status: "publishing",
+            approvedAt: event.approvedAt,
+            error: null
+          }
+        },
+        "warning",
+        "GitHub 发布计划已由本地用户明确批准，开始执行受控写入。"
+      );
+
+    case "GITHUB_PUBLISH_COMPLETED":
+      if (
+        state.githubPublish.plan?.publishId !== event.result.publishId
+      ) {
+        return state;
+      }
+      return withLog(
+        {
+          ...state,
+          githubPublish: {
+            ...state.githubPublish,
+            status: "published",
+            result: event.result,
+            error: null,
+            partialRepositoryUrl: null
+          }
+        },
+        "success",
+        `已发布到 ${event.result.fullName}@${event.result.commitSha.slice(0, 12)}。`
+      );
+
+    case "GITHUB_PUBLISH_FAILED":
+      if (state.githubPublish.plan?.publishId !== event.publishId) {
+        return state;
+      }
+      return withLog(
+        {
+          ...state,
+          githubPublish: {
+            ...state.githubPublish,
+            status: "failed",
+            error: event.reason,
+            partialRepositoryUrl: event.partialRepositoryUrl ?? null
+          }
+        },
+        "error",
+        event.reason
+      );
+
     case "ROUTE_RESOLVED":
       if (state.phase !== "routing") return state;
       if (event.decision.status === "unsupported") {
@@ -435,31 +606,96 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         return withLog(
           {
             ...state,
-            phase: "planning",
+            phase: "task_planning",
             route: "user-provided-links",
             routeDecision: event.decision,
-            clarifications: [],
+            clarifications: event.decision.clarifications,
             clarificationIndex: 0,
             taskRequirements: event.decision.requirements,
             agentRun: { ...state.agentRun, status: "thinking" }
           },
           "success",
-          "用户链接已由可信来源 Provider 精确解析，进入基础资源计划流程。"
+          "用户链接已由可信来源 Provider 精确解析，正在提出首轮 Task Plan。"
         );
       }
       return withLog(
         {
           ...state,
-          phase: event.decision.clarifications.length > 0 ? "clarifying" : "planning",
+          phase: "task_planning",
           route: event.decision.skillId,
           routeDecision: event.decision,
           clarifications: event.decision.clarifications,
           clarificationIndex: 0,
-          taskRequirements: event.decision.requirements
+          taskRequirements: event.decision.requirements,
+          agentRun: { ...state.agentRun, status: "thinking" }
         },
         "success",
-        `已路由到 ${event.decision.skillId ?? "未知"} Domain Skill。`
+        `已路由到 ${event.decision.skillId ?? "未知"} Domain Skill，正在生成可确认的 Task Plan。`
       );
+
+    case "TASK_PLAN_PROPOSED":
+      if (
+        state.phase !== "task_planning" ||
+        event.plan.taskId !== state.taskId ||
+        event.validation.checkedRevision !== event.plan.revision ||
+        !event.validation.valid ||
+        event.plan.status !== "waiting_confirmation"
+      ) {
+        return state;
+      }
+      return withLog(
+        {
+          ...state,
+          phase: "waiting_task_plan_confirmation",
+          taskPlan: event.plan,
+          taskPlanValidation: event.validation,
+          agentRun: { ...state.agentRun, status: "waiting_approval" },
+          workspace: {
+            ...state.workspace,
+            nextAction: `确认 Task Plan r${event.plan.revision} 后继续；确认不会授予下载或写入权限。`
+          }
+        },
+        "success",
+        `Task Plan r${event.plan.revision} 已通过结构与权限校验，等待用户确认。`
+      );
+
+    case "TASK_PLAN_CONFIRMED": {
+      if (
+        state.phase !== "waiting_task_plan_confirmation" ||
+        !state.taskPlan ||
+        state.taskPlan.revision !== event.revision ||
+        state.taskPlanValidation?.checkedRevision !== event.revision ||
+        !state.taskPlanValidation.valid
+      ) {
+        return state;
+      }
+      let taskPlan;
+      try {
+        taskPlan = confirmTaskPlan(state.taskPlan, {
+          revision: event.revision,
+          confirmedAt: event.confirmedAt
+        });
+      } catch {
+        return state;
+      }
+      const requiresClarification = state.clarifications.length > 0;
+      return withLog(
+        {
+          ...state,
+          phase: requiresClarification ? "clarifying" : "planning",
+          taskPlan,
+          agentRun: { ...state.agentRun, status: requiresClarification ? "idle" : "thinking" },
+          workspace: {
+            ...state.workspace,
+            nextAction: requiresClarification
+              ? "按已确认的 Task Plan 完成关键需求澄清。"
+              : "按已确认的 Task Plan 进入只读工具与资源规划阶段。"
+          }
+        },
+        "info",
+        `用户已确认 Task Plan r${event.revision}；下载、导出等写入步骤仍需后续独立审批。`
+      );
+    }
 
     case "TASK_REQUIREMENTS_RESOLVED":
       if (state.phase !== "planning" || state.taskRequirements !== null) {
@@ -526,6 +762,52 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         },
         "success",
         `可信资源计划 r${revision} 已通过严格验证，等待用户确认。`
+      );
+    }
+
+    case "GITHUB_ACQUISITION_PREPARED": {
+      if (
+        state.phase !== "result" ||
+        state.routeDecision?.skillId !== "github-project-discovery"
+      ) return state;
+      const revision = state.revision + 1;
+      const resources = event.resources.map((resource) => ({
+        ...resource,
+        selected: resource.github ? true : resource.selected,
+        status: "pending" as const,
+        progress: 0,
+        attempts: 0
+      }));
+      const planValidation = validateGitHubAcquisitionPlan(
+        resources,
+        revision
+      );
+      if (!planValidation.valid) {
+        return withLog(
+          { ...state, planValidation },
+          "error",
+          `GitHub 源码快照计划无效：${planValidation.issues[0]?.message ?? "未知错误"}`
+        );
+      }
+      return withLog(
+        {
+          ...state,
+          phase: "waiting_approval",
+          revision,
+          resources,
+          taskRequirements: githubAcquisitionRequirements,
+          planValidation,
+          approvedRevision: null,
+          planExplanation: event.explanation,
+          agentRun: { ...state.agentRun, status: "waiting_approval" },
+          workspace: {
+            ...state.workspace,
+            nextAction:
+              "选择本地工作区目录并确认后，下载固定 commit 的源码快照。"
+          }
+        },
+        "success",
+        `GitHub 仓库已固定为不可变源码快照计划 r${revision}。`
       );
     }
 
@@ -680,6 +962,10 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       return withLog(
         {
           ...state,
+          phase:
+            state.routeDecision?.skillId === "github-project-discovery"
+              ? "result"
+              : state.phase,
           agentRun: { ...state.agentRun, status: "complete" },
           workspace: { ...state.workspace, nextAction: event.summary }
         },
@@ -715,6 +1001,16 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       if (state.phase !== "waiting_approval") return state;
       const resource = state.resources.find((item) => item.id === event.resourceId);
       if (!resource || resource.selected === event.selected) return state;
+      if (
+        resource.npm &&
+        !(
+          state.agentB.status === "completed" &&
+          state.agentB.answer?.integrity === "valid" &&
+          state.agentB.answer.planRevision < state.revision
+        )
+      ) {
+        return state;
+      }
       if (resource.required && !event.selected) {
         return enterReplanning(
           state,
@@ -728,11 +1024,14 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         item.id === event.resourceId ? { ...item, selected: event.selected } : item
       );
       const taskRequirements = state.taskRequirements ?? deriveTaskRequirements(state);
-      const planValidation = validatePlannedResources(resources, {
-        requirements: taskRequirements,
-        systemProfile: state.systemProfile,
-        revision: state.revision
-      });
+      const planValidation =
+        state.routeDecision?.skillId === "github-project-discovery"
+          ? validateGitHubAcquisitionPlan(resources, state.revision)
+          : validatePlannedResources(resources, {
+              requirements: taskRequirements,
+              systemProfile: state.systemProfile,
+              revision: state.revision
+            });
       return withLog(
         {
           ...state,
@@ -746,20 +1045,135 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       );
     }
 
+    case "TOGGLE_NODE_DEPENDENCIES": {
+      if (
+        state.phase !== "waiting_approval" ||
+        state.routeDecision?.skillId !== "github-project-discovery" ||
+        state.agentB.status !== "completed" ||
+        state.agentB.answer?.integrity !== "valid" ||
+        state.agentB.answer.planRevision >= state.revision
+      ) {
+        return state;
+      }
+      const resources = state.resources.map((resource) =>
+        resource.npm
+          ? {
+              ...resource,
+              selected: event.selected,
+              status: "pending" as const,
+              progress: 0
+            }
+          : resource
+      );
+      const planValidation = validateGitHubAcquisitionPlan(
+        resources,
+        state.revision
+      );
+      return withLog(
+        {
+          ...state,
+          resources,
+          planValidation,
+          approvedRevision: null
+        },
+        "info",
+        event.selected
+          ? "已将锁文件完整约束的 npm tarball 加入当前审批范围。"
+          : "已从当前审批范围移除 npm 离线依赖，只准备源码归档。"
+      );
+    }
+
+    case "PREPARE_NODE_DEPENDENCIES": {
+      const npmResources = state.resources.filter((resource) => resource.npm);
+      if (
+        state.phase !== "handoff" ||
+        !state.workspace.ready ||
+        state.routeDecision?.skillId !== "github-project-discovery" ||
+        state.agentB.status !== "completed" ||
+        state.agentB.answer?.integrity !== "valid" ||
+        state.agentB.answer.projectReadiness?.dependencyPreparation !==
+          "package-lock-supported" ||
+        npmResources.length === 0
+      ) {
+        return state;
+      }
+      const revision = state.revision + 1;
+      const resources = state.resources.map((resource) =>
+        resource.npm
+          ? {
+              ...resource,
+              selected: true,
+              status: "pending" as const,
+              progress: 0,
+              attempts: 0,
+              bytesWritten: undefined,
+              totalBytes: undefined,
+              speedBytesPerSecond: undefined,
+              etaSeconds: undefined,
+              failureReason: undefined
+            }
+          : resource
+      );
+      const planValidation = validateGitHubAcquisitionPlan(
+        resources,
+        revision
+      );
+      if (!planValidation.valid) {
+        return withLog(
+          { ...state, planValidation },
+          "error",
+          `npm 离线依赖计划无效：${planValidation.issues[0]?.message ?? "未知错误"}`
+        );
+      }
+      return withLog(
+        {
+          ...state,
+          phase: "waiting_approval",
+          revision,
+          resources,
+          approvedRevision: null,
+          planValidation,
+          planExplanation:
+            `Agent B 已确认源码 Manifest 完整；${npmResources.length} 个 tarball 由同一 commit 的 package-lock SHA512 固定。`,
+          workspace: {
+            ...state.workspace,
+            ready: false,
+            exportStatus: "pending",
+            exportError: undefined,
+            nextAction:
+              "确认新的依赖 revision 后，仅下载并校验 npm tarball。"
+          },
+          agentRun: { ...state.agentRun, status: "waiting_approval" }
+        },
+        "success",
+        `已生成 npm 离线依赖计划 r${revision}，等待第二次用户审批。`
+      );
+    }
+
     case "APPROVE_PLAN": {
       if (state.phase !== "waiting_approval") return state;
       const taskRequirements = state.taskRequirements ?? deriveTaskRequirements(state);
-      const currentPlanValidation = validatePlannedResources(state.resources, {
-        requirements: taskRequirements,
-        systemProfile: state.systemProfile,
-        revision: state.revision
-      });
-      const approvalValidation = validatePlannedResources(state.resources, {
-        requirements: taskRequirements,
-        systemProfile: state.systemProfile,
-        revision: state.revision,
-        approvalRevision: event.revision
-      });
+      const githubPlan =
+        state.routeDecision?.skillId === "github-project-discovery";
+      const currentPlanValidation = githubPlan
+        ? validateGitHubAcquisitionPlan(state.resources, state.revision)
+        : validatePlannedResources(state.resources, {
+            requirements: taskRequirements,
+            systemProfile: state.systemProfile,
+            revision: state.revision
+          });
+      const approvalValidation = githubPlan
+        ? validateGitHubAcquisitionPlan(
+            state.resources,
+            state.revision,
+            event.revision
+          )
+        : validatePlannedResources(state.resources, {
+            requirements: taskRequirements,
+            systemProfile: state.systemProfile,
+            revision: state.revision,
+            approvalRevision: event.revision
+          });
       if (!approvalValidation.valid || !hasRequiredSelection(state.resources)) {
         return withLog(
           {
@@ -1106,7 +1520,10 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
             ready: true,
             generatedAt: event.output.generatedAt,
             files: event.output.files.map((file) => file.relativePath),
-            nextAction: "核对 resource-manifest.json 与 downloads/ 校验信息，再按 README.md 人工处理资源。",
+            nextAction:
+              state.routeDecision?.skillId === "github-project-discovery"
+                ? "核对固定 commit、sources/ 源码归档和 dependencies/npm/ 锁文件依赖，再运行 Agent B 只读检查。"
+                : "核对 resource-manifest.json 与 downloads/ 校验信息，再按 README.md 人工处理资源。",
             exportStatus: "ready",
             manifestRevision: state.workspace.manifestRevision,
             overallStatus: "ready",
@@ -1213,6 +1630,7 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
     }
 
     case "WORKSPACE_ROOT_SELECTED":
+      if (state.phase !== "waiting_approval") return state;
       return withLog(
         {
           ...state,
@@ -1233,6 +1651,10 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
           ...state.workspace,
           manifestRevision: event.manifestRevision,
           currentSnapshotRootPath: event.rootPath,
+          rootPath:
+            state.route === "local-repository-import"
+              ? event.rootPath
+              : state.workspace.rootPath,
           overallStatus: event.status
         }
       };
@@ -1314,12 +1736,26 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
     }
 
     case "CANCEL_TASK":
-      if (state.phase === "handoff" || state.phase === "cancelled" || state.phase === "intake") return state;
+      if (
+        state.phase === "result" ||
+        state.phase === "handoff" ||
+        state.phase === "cancelled" ||
+        state.phase === "intake"
+      ) return state;
+      {
+        const taskPlan =
+          state.taskPlan && state.taskPlan.status !== "completed"
+            ? cancelTaskPlan(
+                state.taskPlan,
+                event.cancelledAt ?? state.taskPlan.updatedAt
+              )
+            : state.taskPlan;
       return withLog(
-        { ...state, phase: "cancelled", activeResourceId: null },
+        { ...state, phase: "cancelled", activeResourceId: null, taskPlan },
         "warning",
         "用户取消了当前任务。"
       );
+      }
 
     default:
       return state;

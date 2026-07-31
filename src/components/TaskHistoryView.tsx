@@ -19,6 +19,9 @@ import type { TaskHistoryViewState } from "../features/task-history/useTaskHisto
 const knownPhases = new Set<AgentPhase>([
   "intake",
   "routing",
+  "unsupported",
+  "task_planning",
+  "waiting_task_plan_confirmation",
   "clarifying",
   "planning",
   "waiting_approval",
@@ -28,6 +31,7 @@ const knownPhases = new Set<AgentPhase>([
   "exporting",
   "awaiting_export_retry",
   "replanning",
+  "result",
   "handoff",
   "cancelled"
 ]);
@@ -53,6 +57,8 @@ const approvalStatusLabels = {
 const supplyChainEventLabels: Record<string, string> = {
   "catalog-approval-pinned": "目录版本已固定",
   "catalog-pin-rejected": "目录版本不匹配",
+  "plan-approval-pinned": "审批计划指纹已固定",
+  "plan-pin-rejected": "审批计划指纹不匹配",
   "download-checkpointed": "下载断点已记录",
   "download-resumed": "下载已断点续传",
   "signature-verified": "制品签名已验证",

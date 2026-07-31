@@ -6,11 +6,14 @@ import type {
   RouteDecision,
   TaskRequirements
 } from "./types";
+import { taskPlanSchema } from "./taskPlan";
 
 const phases = new Set<AgentPhase>([
   "intake",
   "routing",
   "unsupported",
+  "task_planning",
+  "waiting_task_plan_confirmation",
   "clarifying",
   "planning",
   "waiting_approval",
@@ -20,6 +23,7 @@ const phases = new Set<AgentPhase>([
   "exporting",
   "awaiting_export_retry",
   "replanning",
+  "result",
   "handoff",
   "cancelled"
 ]);
@@ -42,6 +46,90 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isLocalRepositorySummary(value: unknown) {
+  if (value === null) return true;
+  if (!isRecord(value) || !isRecord(value.status) || !isRecord(value.analysis)) {
+    return false;
+  }
+  const repositoryStatus = value.status as Record<string, unknown>;
+  return (
+    typeof value.repositoryHandleId === "string" &&
+    value.repositoryHandleId.startsWith("local-repo-") &&
+    typeof value.displayName === "string" &&
+    typeof value.fingerprint === "string" &&
+    /^[a-f0-9]{64}$/iu.test(value.fingerprint) &&
+    typeof value.commitSha === "string" &&
+    /^[a-f0-9]{40,64}$/iu.test(value.commitSha) &&
+    (value.branch === null || typeof value.branch === "string") &&
+    typeof value.detached === "boolean" &&
+    typeof value.clean === "boolean" &&
+    ["modified", "deleted", "untracked", "conflicted", "ahead", "behind"].every(
+      (key) =>
+        typeof repositoryStatus[key] === "number" &&
+        Number.isSafeInteger(repositoryStatus[key]) &&
+        (repositoryStatus[key] as number) >= 0
+    ) &&
+    typeof value.fileCount === "number" &&
+    Number.isSafeInteger(value.fileCount) &&
+    typeof value.trackedFileCount === "number" &&
+    Number.isSafeInteger(value.trackedFileCount) &&
+    typeof value.hasSubmodules === "boolean" &&
+    typeof value.hasSymlinks === "boolean" &&
+    typeof value.inspectedAt === "string" &&
+    isStringArray(value.analysis.ecosystems) &&
+    isStringArray(value.analysis.manifests) &&
+    isStringArray(value.analysis.lockfiles) &&
+    isStringArray(value.analysis.runtimeHints)
+  );
+}
+
+function isGitHubPublishState(value: unknown) {
+  if (!isRecord(value)) return false;
+  if (
+    ![
+      "idle",
+      "waiting_approval",
+      "publishing",
+      "published",
+      "failed"
+    ].includes(String(value.status)) ||
+    (value.approvedAt !== null && typeof value.approvedAt !== "string") ||
+    (value.error !== null && typeof value.error !== "string") ||
+    (value.partialRepositoryUrl !== null &&
+      typeof value.partialRepositoryUrl !== "string")
+  ) {
+    return false;
+  }
+  if (value.plan !== null) {
+    if (
+      !isRecord(value.plan) ||
+      typeof value.plan.publishId !== "string" ||
+      typeof value.plan.repositoryHandleId !== "string" ||
+      typeof value.plan.sourceFingerprint !== "string" ||
+      !/^[a-f0-9]{64}$/iu.test(value.plan.sourceFingerprint) ||
+      typeof value.plan.planSha256 !== "string" ||
+      !/^[a-f0-9]{64}$/iu.test(value.plan.planSha256) ||
+      typeof value.plan.targetOwner !== "string" ||
+      typeof value.plan.targetRepository !== "string"
+    ) {
+      return false;
+    }
+  }
+  return value.result === null || isRecord(value.result);
+}
+
+function isTaskPlanValidation(value: unknown) {
+  return value === null || (
+    isRecord(value) &&
+    typeof value.valid === "boolean" &&
+    typeof value.checkedRevision === "number" &&
+    Number.isInteger(value.checkedRevision) &&
+    Array.isArray(value.issues) &&
+    Array.isArray(value.topologicalOrder) &&
+    isStringArray(value.topologicalOrder)
+  );
 }
 
 export function isRestorableAgentState(value: unknown): value is AgentState {
@@ -71,7 +159,16 @@ export function isRestorableAgentState(value: unknown): value is AgentState {
     ) ||
     !isRecord(value.systemProfile) ||
     !isRecord(value.workspace) ||
-    !isRecord(value.agentRun)
+    !isRecord(value.agentRun) ||
+    !(value.taskPlan === null || taskPlanSchema.safeParse(value.taskPlan).success) ||
+    !isTaskPlanValidation(value.taskPlanValidation) ||
+    (value.phase === "waiting_task_plan_confirmation" &&
+      (value.taskPlan === null ||
+        !isRecord(value.taskPlan) ||
+        value.taskPlan.status !== "waiting_confirmation" ||
+        value.taskPlanValidation === null ||
+        !isRecord(value.taskPlanValidation) ||
+        value.taskPlanValidation.valid !== true))
   ) {
     return false;
   }
@@ -107,6 +204,8 @@ export function isRestorableAgentState(value: unknown): value is AgentState {
     typeof value.workspace.nextAction !== "string" ||
     !Array.isArray(value.resources) ||
     !Array.isArray(value.localArtifacts) ||
+    !isLocalRepositorySummary(value.localRepository) ||
+    !isGitHubPublishState(value.githubPublish) ||
     !Array.isArray(value.logs) ||
     !Array.isArray(value.clarifications) ||
     !isRecord(value.answers) ||
@@ -139,7 +238,8 @@ export function isRestorableAgentState(value: unknown): value is AgentState {
         resource.catalogStatus === "deprecated" ||
         resource.catalogStatus === "revoked") &&
       isRecord(resource.verification) &&
-      resource.verification.checksumAlgorithm === "sha256" &&
+      (resource.verification.checksumAlgorithm === "sha256" ||
+        resource.verification.checksumAlgorithm === "sha512") &&
       typeof resource.verification.checksumSource === "string" &&
       typeof resource.verification.checksumSourceUrl === "string" &&
       typeof resource.verification.signatureType === "string" &&
@@ -153,8 +253,18 @@ export function isRestorableAgentState(value: unknown): value is AgentState {
       Number.isInteger(resource.attempts) &&
       isRecord(resource.download) &&
       typeof resource.download.url === "string" &&
-      typeof resource.download.expectedSha256 === "string" &&
-      /^[a-f0-9]{64}$/i.test(resource.download.expectedSha256) &&
+      ((typeof resource.download.expectedSha256 === "string" &&
+        /^[a-f0-9]{64}$/i.test(resource.download.expectedSha256)) ||
+        (resource.download.expectedSha256 === null &&
+          (resource.download.digestPolicy === "record-after-download" ||
+            (resource.download.digestPolicy === "lockfile-integrity" &&
+              isRecord(resource.download.expectedIntegrity) &&
+              resource.download.expectedIntegrity.algorithm === "sha512" &&
+              typeof resource.download.expectedIntegrity.digestBase64 ===
+                "string" &&
+              /^[A-Za-z0-9+/]{86}==$/.test(
+                resource.download.expectedIntegrity.digestBase64
+              ))))) &&
       typeof resource.download.maxSizeMb === "number" &&
       isStringArray(resource.download.allowedHosts)
   );
@@ -190,9 +300,34 @@ export function normalizeRestorableAgentState(
     : {};
   candidate = {
     ...candidateRecord,
+    taskPlan: Object.prototype.hasOwnProperty.call(candidateRecord, "taskPlan")
+      ? candidateRecord.taskPlan
+      : null,
+    taskPlanValidation: Object.prototype.hasOwnProperty.call(
+      candidateRecord,
+      "taskPlanValidation"
+    )
+      ? candidateRecord.taskPlanValidation
+      : null,
     localArtifacts: Array.isArray(candidateRecord.localArtifacts)
       ? candidateRecord.localArtifacts
       : [],
+    localRepository: Object.prototype.hasOwnProperty.call(
+      candidateRecord,
+      "localRepository"
+    )
+      ? candidateRecord.localRepository
+      : null,
+    githubPublish: isRecord(candidateRecord.githubPublish)
+      ? candidateRecord.githubPublish
+      : {
+          status: "idle",
+          plan: null,
+          approvedAt: null,
+          result: null,
+          error: null,
+          partialRepositoryUrl: null
+        },
     workspace: {
       ...legacyWorkspace,
       manifestRevision:

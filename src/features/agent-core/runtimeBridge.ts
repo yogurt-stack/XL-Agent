@@ -21,6 +21,11 @@ export type PlatformCapabilitySummary = {
   workspaceTemplates: Array<{
     id: string;
   }>;
+  githubPublish?: {
+    configured: boolean;
+    credentialBoundary: "separate-write-token";
+    existingRepositoryPolicy: "create-only";
+  };
 };
 
 export type AgentRuntimeSnapshot = {

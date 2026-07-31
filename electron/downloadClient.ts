@@ -7,7 +7,15 @@ import path from "node:path";
 export type ControlledDownloadRequest = {
   resourceId: string;
   url: string;
-  expectedSha256: string;
+  expectedSha256: string | null;
+  digestPolicy?:
+    | "preverified"
+    | "record-after-download"
+    | "lockfile-integrity";
+  expectedIntegrity?: {
+    algorithm: "sha512";
+    digestBase64: string;
+  };
   maxSizeMb: number;
   allowedHosts: string[];
 };
@@ -238,7 +246,36 @@ export async function downloadTrustedResource(
 ): Promise<ControlledDownloadOutput> {
   const startedAt = options.now?.() ?? Date.now();
   const parsedUrl = parseTrustedUrl(request.url, request.allowedHosts);
-  const expectedSha256 = normalizeExpectedSha256(request.expectedSha256);
+  const recordAfterDownload =
+    request.expectedSha256 === null &&
+    request.digestPolicy === "record-after-download" &&
+    parsedUrl.host === "codeload.github.com" &&
+    /^\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/zip\/[a-f0-9]{40}(?:[a-f0-9]{24})?$/i
+      .test(parsedUrl.pathname);
+  const expectedIntegrity = request.expectedIntegrity;
+  const npmLockIntegrity =
+    request.expectedSha256 === null &&
+    request.digestPolicy === "lockfile-integrity" &&
+    parsedUrl.host === "registry.npmjs.org" &&
+    parsedUrl.pathname.includes("/-/") &&
+    expectedIntegrity?.algorithm === "sha512" &&
+    /^[A-Za-z0-9+/]{86}==$/.test(expectedIntegrity.digestBase64) &&
+    Buffer.from(expectedIntegrity.digestBase64, "base64").byteLength === 64;
+  if (
+    request.expectedSha256 === null &&
+    !recordAfterDownload &&
+    !npmLockIntegrity
+  ) {
+    throw downloadError(
+      "CHECKSUM_METADATA_INVALID",
+      "只有固定 commit 的 GitHub 源码快照或带 SHA512 锁文件完整性的数据包可以在下载后记录 SHA256。",
+      false
+    );
+  }
+  const expectedSha256 =
+    request.expectedSha256 === null
+      ? null
+      : normalizeExpectedSha256(request.expectedSha256);
   const maxBytes = maxBytesFromMb(request.maxSizeMb);
   const fetchRequest = options.fetchRequest ?? fetch;
   const tempRoot = options.tempRoot ?? path.join(os.tmpdir(), "xunlei-ai-task-agent-downloads");
@@ -389,6 +426,7 @@ export async function downloadTrustedResource(
     response.status === 206 ||
     response.headers.get("accept-ranges")?.toLowerCase() === "bytes";
   const hash = createHash("sha256");
+  const lockIntegrityHash = npmLockIntegrity ? createHash("sha512") : null;
   let bytesWritten = resumedFromBytes;
   let file: Awaited<ReturnType<typeof open>> | null = null;
   try {
@@ -399,6 +437,9 @@ export async function downloadTrustedResource(
     }
     if (resumedFromBytes > 0) {
       await hashExistingFile(tempFilePath, hash);
+      if (lockIntegrityHash) {
+        await hashExistingFile(tempFilePath, lockIntegrityHash);
+      }
       file = await open(tempFilePath, "r+");
     } else {
       file = await open(tempFilePath, "wx");
@@ -448,6 +489,7 @@ export async function downloadTrustedResource(
       }
       await writeAll(file, chunk.value, bytesWritten);
       hash.update(chunk.value);
+      lockIntegrityHash?.update(chunk.value);
       bytesWritten += chunk.value.byteLength;
       const elapsedSeconds = Math.max(
         0.001,
@@ -516,11 +558,23 @@ export async function downloadTrustedResource(
   }
 
   const actualSha256 = hash.digest("hex");
-  if (actualSha256 !== expectedSha256) {
+  if (expectedSha256 !== null && actualSha256 !== expectedSha256) {
     await rm(artifactRoot, { force: true, recursive: true });
     throw downloadError(
       "CHECKSUM_MISMATCH",
       "下载文件 SHA256 与可信目录不一致。",
+      true
+    );
+  }
+  if (
+    lockIntegrityHash &&
+    expectedIntegrity &&
+    lockIntegrityHash.digest("base64") !== expectedIntegrity.digestBase64
+  ) {
+    await rm(artifactRoot, { force: true, recursive: true });
+    throw downloadError(
+      "CHECKSUM_MISMATCH",
+      "npm tarball 的 SHA512 与 package-lock 完整性字段不一致。",
       true
     );
   }

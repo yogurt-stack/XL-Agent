@@ -70,6 +70,23 @@ async function runToDownloadFailure(
 ) {
   const harness = createRuntimeHarness(options);
   harness.runtime.dispatch({ type: "SUBMIT_TASK", task: "准备 Windows AI 环境" });
+  await harness.runUntil("waiting_task_plan_confirmation");
+  expect(harness.getState()).toMatchObject({
+    taskPlan: {
+      revision: 1,
+      status: "waiting_confirmation",
+      confirmation: { status: "pending" }
+    },
+    taskPlanValidation: { valid: true, checkedRevision: 1 },
+    agentRun: { toolResults: [] }
+  });
+  harness.runtime.dispatch({ type: "CONFIRM_TASK_PLAN", revision: 2 });
+  expect(harness.getState().phase).toBe("waiting_task_plan_confirmation");
+  harness.runtime.dispatch({ type: "CONFIRM_TASK_PLAN", revision: 1 });
+  expect(harness.getState().taskPlan).toMatchObject({
+    status: "executing",
+    confirmation: { status: "confirmed", confirmedRevision: 1 }
+  });
   await harness.runUntil("clarifying");
   harness.runtime.dispatch({
     type: "ANSWER_CLARIFICATION",
@@ -211,7 +228,7 @@ describe("agent runtime recovery", () => {
           fileName: `${resourceId}.download`,
           urlHost: new URL(resource.download.url).host,
           bytesWritten: 7,
-          sha256: resource.download.expectedSha256,
+          sha256: resource.download.expectedSha256!,
           tempFilePath: `/tmp/${resourceId}.download`,
           elapsedMs: 1
         }
