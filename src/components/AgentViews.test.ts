@@ -4,8 +4,12 @@ import { describe, expect, it } from "vitest";
 import { catalogById } from "../features/agent-core/catalog";
 import { createInitialAgentState, transition } from "../features/agent-core/machine";
 import type { ModelConnectionState } from "../features/agent-core/modelConnection";
+import type { AgentState } from "../features/agent-core/types";
 import { ExtensibleAgentRouter } from "../features/agent-core/router";
-import { proposeTaskPlanForTest } from "../features/agent-core/taskPlanTestSupport";
+import {
+  confirmTaskPlanForTest,
+  proposeTaskPlanForTest
+} from "../features/agent-core/taskPlanTestSupport";
 import {
   AgentHomeView,
   ClarificationView,
@@ -229,6 +233,53 @@ describe("clarification view", () => {
     expect(html).not.toContain("正在生成资源计划");
   });
 
+  it("reports an unrenderable GitHub decision as a plan recovery instead of an API failure", () => {
+    let state = transition(createInitialAgentState(), {
+      type: "SUBMIT_TASK",
+      task: "帮我在 GitHub 上找一个名叫 tau 的项目",
+      taskId: "github-stalled-plan"
+    });
+    state = transition(state, new ExtensibleAgentRouter().route(state)!);
+    state = proposeTaskPlanForTest(state);
+    const plan = structuredClone(state.taskPlan!);
+    plan.status = "waiting_user_input";
+    plan.confirmation = {
+      ...plan.confirmation,
+      status: "confirmed",
+      confirmedAt: "2026-08-03T06:30:14.000Z",
+      confirmedRevision: plan.revision
+    };
+    plan.steps = [{
+      ...plan.steps[0],
+      id: "clarify-search-params",
+      title: "确认搜索参数",
+      description: "询问时间窗口和排序指标。",
+      kind: "user_decision",
+      tool: null,
+      staticInput: {},
+      status: "waiting_user_input",
+      startedAt: "2026-08-03T06:30:14.000Z"
+    }];
+    const stalled = {
+      ...state,
+      phase: "result",
+      taskPlan: plan,
+      agentRun: { ...state.agentRun, toolResults: [] }
+    } as AgentState;
+
+    const html = renderToStaticMarkup(createElement(ClarificationView, {
+      dispatch: async (event) => transition(stalled, event),
+      onNavigate: () => undefined,
+      onRetryLocally: async () => stalled,
+      state: stalled
+    }));
+
+    expect(html).toContain("查询尚未开始");
+    expect(html).toContain("GitHub API 尚未被调用");
+    expect(html).toContain("重新规划并继续");
+    expect(html).not.toContain("没有收到可展示的 GitHub API 结果");
+  });
+
   it("renders a named GitHub result with the local preparation action", () => {
     const initial = createInitialAgentState();
     const state = {
@@ -352,5 +403,52 @@ describe("clarification view", () => {
     expect(completedHtml).not.toContain("剩余约 0s");
     expect(activeHtml).toContain("1.0 MB/s");
     expect(activeHtml).toContain("剩余约 8s");
+  });
+
+  it("renders handoff as completed with an explicit workspace action", () => {
+    const initial = createInitialAgentState();
+    const state: AgentState = {
+      ...initial,
+      phase: "handoff",
+      agentRun: { ...initial.agentRun, status: "complete" },
+      workspace: {
+        ...initial.workspace,
+        ready: true,
+        exportStatus: "ready",
+        rootPath: "/tmp/task/revision-1"
+      }
+    };
+    const html = renderToStaticMarkup(createElement(ExecutionView, {
+      dispatch: async (event) => transition(state, event),
+      modelConnection: localModelConnection,
+      onNavigate: () => undefined,
+      state
+    }));
+
+    expect(html).toContain("Agent 已完成工作区交接");
+    expect(html).toContain("工作区交接包已就绪");
+    expect(html).toContain("查看工作区");
+    expect(html).not.toContain("Agent 正在工作区交接");
+  });
+
+  it("shows the TaskPlan step cursor and per-step audit status during execution", () => {
+    let state = transition(createInitialAgentState(), {
+      type: "SUBMIT_TASK",
+      task: "准备 Windows AI 环境",
+      taskId: "task-plan-execution-view"
+    });
+    state = transition(state, new ExtensibleAgentRouter().route(state)!);
+    state = confirmTaskPlanForTest(state);
+    const html = renderToStaticMarkup(createElement(ExecutionView, {
+      dispatch: async (event) => transition(state, event),
+      modelConnection: localModelConnection,
+      onNavigate: () => undefined,
+      state: { ...state, phase: "downloading" }
+    }));
+
+    expect(html).toContain("task-plan-execution");
+    expect(html).toContain("Task Plan r1");
+    expect(html).toContain("当前步骤");
+    expect(html).toContain("等待输入");
   });
 });

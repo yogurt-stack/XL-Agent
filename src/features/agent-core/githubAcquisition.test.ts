@@ -1,5 +1,20 @@
 import { describe, expect, it } from "vitest";
+import { DefaultAgentPolicy, InMemoryAgentToolExecutor } from "./agentServices";
+import type { AgentScheduler } from "./interfaces";
+import { LocalRuleModelRuntime } from "./localRuleModel";
 import { createInitialAgentState, transition } from "./machine";
+import { FixedWindowsPlanner, MockVerifier } from "./mockServices";
+import { ExtensibleAgentRouter } from "./router";
+import { AgentRuntime } from "./runtime";
+import {
+  completeTaskPlanStep,
+  confirmTaskPlan,
+  createTaskPlan,
+  defaultTaskPlanToolPolicies,
+  prepareTaskPlanForConfirmation,
+  startTaskPlanStep,
+  validateTaskPlan
+} from "./taskPlan";
 import type { PlannedResource } from "./types";
 
 const commitSha = "a".repeat(40);
@@ -128,6 +143,188 @@ function npmResource(): PlannedResource {
 }
 
 describe("GitHub source and npm dependency revisions", () => {
+  it("opens a new TaskPlan revision when local preparation is added after search completion", () => {
+    const validationContext = {
+      tools: defaultTaskPlanToolPolicies,
+      requireInitialConfirmation: true
+    };
+    const createdAt = "2026-08-01T00:00:00.000Z";
+    const draft = createTaskPlan({
+      planId: "github-search-plan",
+      taskId: "github-search-task",
+      createdBy: "local-rule",
+      createdAt,
+      proposal: {
+        objective: "查找 openai/example",
+        deliverables: ["仓库结果"],
+        assumptions: [],
+        constraints: ["只读查询"],
+        steps: [{
+          id: "present-results",
+          title: "展示结果",
+          description: "展示 GitHub 查询结果。",
+          kind: "handoff",
+          tool: null,
+          dependsOn: [],
+          staticInput: {},
+          inputBindings: {},
+          expectedOutput: "仓库结果",
+          risk: "read_only",
+          approval: { required: false, reason: null }
+        }],
+        confirmation: { required: true, reason: "确认查询流程。" }
+      }
+    });
+    let taskPlan = confirmTaskPlan(
+      prepareTaskPlanForConfirmation(draft, validationContext, createdAt),
+      { revision: 1, confirmedAt: createdAt }
+    );
+    taskPlan = completeTaskPlanStep(
+      startTaskPlanStep(taskPlan, "present-results", createdAt),
+      {
+        stepId: "present-results",
+        completedAt: createdAt,
+        result: { reference: "github:results", summary: "查询结果已展示。" }
+      }
+    );
+    const initial = createInitialAgentState();
+    const resultState = {
+      ...initial,
+      taskId: "github-search-task",
+      task: "查找 openai/example",
+      phase: "result" as const,
+      route: "github-project-discovery",
+      routeDecision: {
+        status: "supported" as const,
+        reason: "matched",
+        skillId: "github-project-discovery",
+        sourceProviderId: "github-api",
+        userLinks: [],
+        resourceIds: [],
+        clarifications: [],
+        requirements: null
+      },
+      taskPlan,
+      taskPlanValidation: validateTaskPlan(taskPlan, validationContext)
+    };
+    const extended = transition(resultState, {
+      type: "GITHUB_ACQUISITION_PREPARED",
+      resources: [sourceResource()],
+      explanation: "固定提交并创建资源计划。"
+    });
+
+    expect(extended).toMatchObject({
+      phase: "waiting_task_plan_confirmation",
+      revision: 1,
+      taskPlan: {
+        revision: 2,
+        previousRevision: 1,
+        status: "waiting_confirmation"
+      }
+    });
+  });
+
+  it("writes repository selection and pinned commit back into the running TaskPlan", async () => {
+    const jobs: Array<() => void | Promise<void>> = [];
+    const scheduler: AgentScheduler = {
+      schedule(task) {
+        jobs.push(task);
+        return () => undefined;
+      }
+    };
+    const tools = new InMemoryAgentToolExecutor(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async () => ({
+        ok: true,
+        output: {
+          criteria: {
+            mode: "exact" as const,
+            fullName: "openai/example",
+            match: "exact" as const,
+            licenseRequired: true
+          },
+          repositories: [{
+            id: 1,
+            fullName: "openai/example",
+            url: "https://github.com/openai/example",
+            description: "Example",
+            stars: 100,
+            forks: 10,
+            openIssues: 1,
+            language: "TypeScript",
+            topics: ["agent"],
+            license: { spdxId: "MIT", name: "MIT License" },
+            createdAt: "2026-07-01T00:00:00.000Z",
+            updatedAt: "2026-07-29T00:00:00.000Z",
+            pushedAt: "2026-07-29T00:00:00.000Z"
+          }],
+          totalCount: 1,
+          incompleteResults: false,
+          fetchedAt: "2026-08-01T00:00:00.000Z",
+          authenticated: false,
+          rateLimit: { remaining: 9, resetAt: null }
+        }
+      })
+    );
+    const runtime = new AgentRuntime({
+      router: new ExtensibleAgentRouter(),
+      planner: new FixedWindowsPlanner(),
+      verifier: new MockVerifier(),
+      scheduler,
+      model: new LocalRuleModelRuntime(),
+      tools,
+      policy: new DefaultAgentPolicy(),
+      downloadTool: "controlled_download",
+      stepDelayMs: 0,
+      createTaskId: () => "github-acquisition-task"
+    });
+    runtime.start();
+    runtime.dispatch({
+      type: "SUBMIT_TASK",
+      task: "找到 GitHub openai/example 并下载到本地"
+    });
+    for (let index = 0; index < 20; index += 1) {
+      if (runtime.getState().phase === "waiting_task_plan_confirmation") {
+        runtime.dispatch({ type: "CONFIRM_TASK_PLAN", revision: 1 });
+      }
+      if (runtime.getState().phase === "result") break;
+      const job = jobs.shift();
+      if (!job) throw new Error(`Runtime stalled at ${runtime.getState().phase}.`);
+      await job();
+    }
+    expect(runtime.getState()).toMatchObject({
+      phase: "result",
+      taskPlan: {
+        status: "waiting_user_input",
+        steps: expect.arrayContaining([
+          expect.objectContaining({ id: "select-repository", status: "waiting_user_input" })
+        ])
+      }
+    });
+
+    runtime.reportExternalEvent({
+      type: "GITHUB_ACQUISITION_PREPARED",
+      resources: [sourceResource()],
+      explanation: "固定提交并创建资源计划。"
+    });
+    await jobs.shift()?.();
+
+    expect(runtime.getState()).toMatchObject({
+      phase: "waiting_approval",
+      taskPlan: {
+        status: "waiting_approval",
+        steps: expect.arrayContaining([
+          expect.objectContaining({ id: "select-repository", status: "completed" }),
+          expect.objectContaining({ id: "pin-repository", status: "completed" }),
+          expect.objectContaining({ id: "download-repository", status: "waiting_approval" })
+        ])
+      }
+    });
+  });
+
   it("keeps npm packages out of the first approval and enables them only after Agent B", () => {
     const initial = createInitialAgentState();
     const resultState = {

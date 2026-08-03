@@ -87,17 +87,34 @@ function createGitHubTaskPlan(context: ModelContext): TaskPlanProposal {
   const input = githubSearchInputFromState(state);
   const acquisition = wantsLocalAcquisition(state.task);
   const canDownload = context.availableTools.includes("controlled_download");
-  const steps: TaskPlanStepProposal[] = [
+  const steps: TaskPlanStepProposal[] = [];
+  let previousStepId: string | null = null;
+  state.routeDecision?.clarifications.forEach((question, index) => {
+    const stepId = `clarify-github-${index + 1}`;
+    steps.push(
+      passiveStep(
+        stepId,
+        question.prompt,
+        question.reason,
+        "user_decision",
+        previousStepId ? [previousStepId] : [],
+        `已确认的用户选择：${question.options.join(" / ")}`,
+        { questionId: question.id, required: question.required }
+      )
+    );
+    previousStepId = stepId;
+  });
+  steps.push(
     readStep(
       "search-github",
       "按用户意图查询 GitHub",
       "使用 GitHub API 执行一次受控只读查询，并保留搜索条件与额度信息。",
       "search_github_repositories",
-      [],
+      previousStepId ? [previousStepId] : [],
       input,
       "带许可证、Star、更新时间和来源链接的仓库结果"
     )
-  ];
+  );
 
   if (acquisition && canDownload) {
     steps.push(
@@ -107,7 +124,8 @@ function createGitHubTaskPlan(context: ModelContext): TaskPlanProposal {
         "让用户从候选结果中选择唯一仓库，避免 Agent 猜测目标。",
         "user_decision",
         ["search-github"],
-        "唯一的 owner/repo 选择"
+        "唯一的 owner/repo 选择",
+        { interaction: "repository_selection" }
       ),
       passiveStep(
         "pin-repository",
@@ -160,7 +178,8 @@ function createGitHubTaskPlan(context: ModelContext): TaskPlanProposal {
         "让用户从候选结果中选择唯一仓库，避免 Agent 猜测目标。",
         "user_decision",
         ["search-github"],
-        "唯一的 owner/repo 选择"
+        "唯一的 owner/repo 选择",
+        { interaction: "repository_selection" }
       ),
       passiveStep(
         "pin-repository",
@@ -269,23 +288,45 @@ function createResourceTaskPlan(context: ModelContext): TaskPlanProposal {
     )
   );
 
-  if (context.availableTools.includes("controlled_download")) {
+  const downloadTool = context.availableTools.includes("controlled_download")
+    ? "controlled_download" as const
+    : context.availableTools.includes("simulate_download")
+      ? "simulate_download" as const
+      : null;
+  if (downloadTool) {
+    const downloadStepId = downloadTool === "controlled_download"
+      ? "download-approved-resources"
+      : "simulate-approved-downloads";
     steps.push(
-      writeStep(
-        "download-approved-resources",
-        "下载已审批资源",
-        "只下载当前审批 revision 中被选中的资源。",
-        "controlled_download",
-        ["create-resource-plan"],
-        "写入受控临时目录的资源文件",
-        "下载会访问可信来源并向本地临时目录写入文件。"
-      ),
+      downloadTool === "controlled_download"
+        ? writeStep(
+            downloadStepId,
+            "下载已审批资源",
+            "只下载当前审批 revision 中被选中的资源。",
+            downloadTool,
+            ["create-resource-plan"],
+            "写入受控临时目录的资源文件",
+            "下载会访问可信来源并向本地临时目录写入文件。"
+          )
+        : {
+            id: "simulate-approved-downloads",
+            title: "模拟已审批资源下载",
+            description: "在测试 Runtime 中按资源计划执行无本地写入的模拟传输。",
+            kind: "verification",
+            tool: downloadTool,
+            dependsOn: ["create-resource-plan"],
+            staticInput: {},
+            inputBindings: {},
+            expectedOutput: "每项资源的模拟传输结果",
+            risk: "read_only",
+            approval: { required: false, reason: null }
+          },
       passiveStep(
         "verify-resources",
         "验证下载结果",
         "校验摘要、来源、许可证、签名策略和资源元数据。",
         "verification",
-        ["download-approved-resources"],
+        [downloadStepId],
         "每项资源的可审计验证记录"
       ),
       writeStep(

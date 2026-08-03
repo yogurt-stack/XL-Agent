@@ -215,7 +215,17 @@ describe("default agent policy", () => {
 
     expect(state.phase).toBe("planning");
     expect(policy.evaluate(namedSearch, state).outcome).toBe("allow");
-    expect(policy.evaluate(substitutedDiscovery, state).outcome).toBe("deny");
+    expect(policy.evaluate(substitutedDiscovery, state)).toMatchObject({
+      outcome: "deny",
+      reason: "GitHub 搜索参数与用户已确认的检索意图不一致。"
+    });
+    expect(policy.evaluate(namedSearch, {
+      ...state,
+      phase: "clarifying"
+    })).toMatchObject({
+      outcome: "deny",
+      reason: expect.stringContaining("当前阶段为 clarifying")
+    });
   });
 
   it("allows controlled downloads only after approval and trusted HTTPS catalog host validation", () => {

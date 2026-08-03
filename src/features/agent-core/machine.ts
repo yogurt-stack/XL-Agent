@@ -4,9 +4,30 @@ import {
   githubAcquisitionRequirements,
   validateGitHubAcquisitionPlan
 } from "./githubAcquisition";
+import {
+  isGitHubRepositorySearchOutput,
+  latestGitHubRepositorySearchResult
+} from "./githubSearch";
 import { isSystemProfileToolOutput } from "./systemProfile";
 import { deriveTaskRequirements } from "./taskRequirements";
-import { cancelTaskPlan, confirmTaskPlan } from "./taskPlan";
+import {
+  approveTaskPlanStep,
+  beginTaskPlanReplanning,
+  cancelTaskPlan,
+  completeTaskPlanStep,
+  confirmTaskPlan,
+  defaultTaskPlanToolPolicies,
+  extendCompletedTaskPlan,
+  failTaskPlanStep,
+  prepareTaskPlanForConfirmation,
+  requestTaskPlanStepApproval,
+  requestTaskPlanStepInput,
+  reviseTaskPlan,
+  resumeTaskPlanStepAfterInput,
+  startTaskPlanStep,
+  suspendTaskPlanStepForInput,
+  validateTaskPlan
+} from "./taskPlan";
 import type {
   AgentEvent,
   AgentLogEntry,
@@ -15,6 +36,7 @@ import type {
   ReplanReason,
   ReplanStrategy,
   ResourceStatus,
+  TaskPlanProposal,
   TrustedResource
 } from "./types";
 
@@ -249,17 +271,36 @@ function enterReplanning(
       ? { ...resource, status: "failed" as ResourceStatus, failureReason: message }
       : resource
   );
+  const replanningState: AgentState = {
+    ...state,
+    phase: "replanning",
+    resources,
+    activeResourceId: null,
+    replanReason: reason,
+    requestedReplanStrategy,
+    approvedRevision: null,
+    agentRun: { ...state.agentRun, status: "thinking" }
+  };
+  const revisedAt =
+    state.taskPlan?.updatedAt ?? new Date(0).toISOString();
+  const taskPlanRevision = reviseTaskPlanForRecovery(
+    replanningState,
+    message,
+    revisedAt
+  );
 
   return withLog(
     {
-      ...state,
-      phase: "replanning",
-      resources,
-      activeResourceId: null,
-      replanReason: reason,
-      requestedReplanStrategy,
-      approvedRevision: null,
-      agentRun: { ...state.agentRun, status: "thinking" }
+      ...replanningState,
+      phase: taskPlanRevision
+        ? "waiting_task_plan_confirmation"
+        : "replanning",
+      taskPlan: taskPlanRevision?.taskPlan ?? state.taskPlan,
+      taskPlanValidation:
+        taskPlanRevision?.validation ?? state.taskPlanValidation,
+      agentRun: taskPlanRevision
+        ? { ...state.agentRun, status: "waiting_approval" }
+        : replanningState.agentRun
     },
     "warning",
     `${message}，进入重规划。`
@@ -378,6 +419,265 @@ export function createInitialAgentState(): AgentState {
  */
 export function getActiveClarification(state: AgentState) {
   return state.phase === "clarifying" ? state.clarifications[state.clarificationIndex] ?? null : null;
+}
+
+function resolveTaskPlanClarification(
+  state: AgentState,
+  questionId: string,
+  answer: string,
+  resolvedAt: string
+) {
+  const plan = state.taskPlan;
+  const step = plan?.steps.find(
+    (candidate) => candidate.status === "waiting_user_input"
+  );
+  if (!plan || !step) return plan;
+  if (step.kind === "user_decision") {
+    const plannedQuestionId = step.staticInput.questionId;
+    if (
+      typeof plannedQuestionId === "string" &&
+      plannedQuestionId !== questionId
+    ) {
+      return plan;
+    }
+    return completeTaskPlanStep(plan, {
+      stepId: step.id,
+      completedAt: resolvedAt,
+      result: {
+        reference: `user-answer:${questionId}`,
+        summary: `用户已回答：${answer}`,
+        output: { questionId, answer }
+      }
+    });
+  }
+  if (step.kind === "resource_plan") {
+    return resumeTaskPlanStepAfterInput(plan, step.id, resolvedAt);
+  }
+  return plan;
+}
+
+function requestNextPlannedClarification(
+  plan: AgentState["taskPlan"],
+  questionId: string | undefined,
+  requestedAt: string
+) {
+  if (!plan || !questionId || plan.status !== "executing") return plan;
+  const step = plan.steps.find(
+    (candidate) =>
+      candidate.status === "pending" &&
+      candidate.kind === "user_decision" &&
+      candidate.staticInput.questionId === questionId
+  );
+  if (!step) return plan;
+  try {
+    return requestTaskPlanStepInput(plan, step.id, requestedAt);
+  } catch {
+    return plan;
+  }
+}
+
+function proposalFromTaskPlan(plan: NonNullable<AgentState["taskPlan"]>) {
+  return {
+    objective: plan.objective,
+    deliverables: [...plan.deliverables],
+    assumptions: [...plan.assumptions],
+    constraints: [...plan.constraints],
+    steps: plan.steps.map((step) => ({
+      id: step.id,
+      title: step.title,
+      description: step.description,
+      kind: step.kind,
+      tool: step.tool,
+      dependsOn: [...step.dependsOn],
+      staticInput: structuredClone(step.staticInput),
+      inputBindings: structuredClone(step.inputBindings),
+      expectedOutput: step.expectedOutput,
+      risk: step.risk,
+      approval: {
+        required: step.approval.required,
+        reason: step.approval.reason
+      }
+    })),
+    confirmation: {
+      required: plan.confirmation.required,
+      reason: plan.confirmation.reason
+    }
+  };
+}
+
+function reviseTaskPlanForRecovery(
+  state: AgentState,
+  reason: string,
+  revisedAt: string
+) {
+  const plan = state.taskPlan;
+  if (!plan) return null;
+  try {
+    const running = plan.steps.find((step) =>
+      ["running", "waiting_user_input", "waiting_approval"].includes(
+        step.status
+      )
+    );
+    const failed = running
+      ? failTaskPlanStep(plan, running.id, reason, revisedAt)
+      : plan;
+    const replanning = beginTaskPlanReplanning(failed, revisedAt);
+    const preservedStepIds = replanning.steps
+      .filter(
+        (step) =>
+          step.status === "completed" &&
+          (step.kind === "user_decision" || step.kind === "read_tool")
+      )
+      .map((step) => step.id);
+    const draft = reviseTaskPlan(replanning, {
+      proposal: proposalFromTaskPlan(replanning),
+      reason,
+      revisedAt,
+      createdBy: "local-rule",
+      preserveCompletedStepIds: preservedStepIds
+    });
+    const validationContext = {
+      tools: defaultTaskPlanToolPolicies,
+      requireInitialConfirmation: true
+    };
+    const validation = validateTaskPlan(draft, validationContext);
+    const taskPlan = prepareTaskPlanForConfirmation(
+      draft,
+      validationContext,
+      revisedAt
+    );
+    return { taskPlan, validation };
+  } catch {
+    return null;
+  }
+}
+
+function failOrCancelTaskPlan(state: AgentState, reason: string) {
+  const plan = state.taskPlan;
+  if (!plan || plan.status === "completed" || plan.status === "cancelled") {
+    return plan;
+  }
+  const active = plan.steps.find((step) =>
+    ["running", "waiting_user_input", "waiting_approval"].includes(
+      step.status
+    )
+  );
+  try {
+    return active
+      ? failTaskPlanStep(plan, active.id, reason, plan.updatedAt)
+      : cancelTaskPlan(plan, plan.updatedAt);
+  } catch {
+    return plan;
+  }
+}
+
+function localAcquisitionExtensionProposal(
+  objective: string,
+  downloadTitle: string,
+  downloadDescription: string
+): TaskPlanProposal {
+  return {
+    objective,
+    deliverables: ["经验证的本地资源", "更新后的工作区与 Manifest"],
+    assumptions: ["资源详情和不可变版本已经由上一阶段固定。"],
+    constraints: [
+      "只处理当前资源 revision 中已选择的资源。",
+      "不会执行仓库代码、安装依赖或运行脚本。"
+    ],
+    steps: [
+      {
+        id: "download-extension-resources",
+        title: downloadTitle,
+        description: downloadDescription,
+        kind: "write_tool",
+        tool: "controlled_download",
+        dependsOn: [],
+        staticInput: {},
+        inputBindings: {},
+        expectedOutput: "写入受控临时目录的固定版本文件",
+        risk: "local_write",
+        approval: {
+          required: true,
+          reason: "该步骤会访问已固定来源并写入本地文件。"
+        }
+      },
+      {
+        id: "verify-extension-resources",
+        title: "验证新增资源",
+        description: "复核摘要、来源、许可证和固定版本信息。",
+        kind: "verification",
+        tool: null,
+        dependsOn: ["download-extension-resources"],
+        staticInput: {},
+        inputBindings: {},
+        expectedOutput: "新增资源的可审计验证记录",
+        risk: "read_only",
+        approval: { required: false, reason: null }
+      },
+      {
+        id: "export-extension-workspace",
+        title: "更新工作区与 Manifest",
+        description: "将新增资源原子写入新的工作区快照。",
+        kind: "write_tool",
+        tool: "export_workspace",
+        dependsOn: ["verify-extension-resources"],
+        staticInput: {},
+        inputBindings: {},
+        expectedOutput: "包含新增资源的工作区快照",
+        risk: "local_write",
+        approval: {
+          required: true,
+          reason: "该步骤会创建新的工作区快照并更新 Manifest。"
+        }
+      },
+      {
+        id: "handoff-extension-workspace",
+        title: "交接更新后的工作区",
+        description: "展示新快照路径和验证摘要。",
+        kind: "handoff",
+        tool: null,
+        dependsOn: ["export-extension-workspace"],
+        staticInput: {},
+        inputBindings: {},
+        expectedOutput: "可供用户与 Agent B 检查的工作区",
+        risk: "read_only",
+        approval: { required: false, reason: null }
+      }
+    ],
+    confirmation: {
+      required: true,
+      reason: "这是用户在查询或交接完成后新增的本地写入范围，需要重新确认处理流程。"
+    }
+  };
+}
+
+function extendCompletedPlan(
+  state: AgentState,
+  proposal: TaskPlanProposal,
+  reason: string
+) {
+  if (!state.taskPlan || state.taskPlan.status !== "completed") return null;
+  try {
+    const draft = extendCompletedTaskPlan(state.taskPlan, {
+      proposal,
+      reason,
+      extendedAt: state.taskPlan.updatedAt,
+      createdBy: "local-rule"
+    });
+    const validationContext = {
+      tools: defaultTaskPlanToolPolicies,
+      requireInitialConfirmation: true
+    };
+    const validation = validateTaskPlan(draft, validationContext);
+    const taskPlan = prepareTaskPlanForConfirmation(
+      draft,
+      validationContext,
+      state.taskPlan.updatedAt
+    );
+    return { taskPlan, validation };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -678,16 +978,45 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       } catch {
         return state;
       }
-      const requiresClarification = state.clarifications.length > 0;
+      const recovering = state.requestedReplanStrategy !== null;
+      const preparedExtension =
+        !recovering &&
+        state.revision > 0 &&
+        state.planValidation?.valid === true &&
+        state.resources.some((resource) => resource.selected) &&
+        taskPlan.steps.some((step) => step.approval.required);
+      const requiresClarification =
+        !recovering &&
+        state.clarificationIndex < state.clarifications.length;
+      const confirmedTaskPlan = requiresClarification
+        ? requestNextPlannedClarification(
+            taskPlan,
+            state.clarifications[0]?.id,
+            event.confirmedAt
+          )
+        : taskPlan;
       return withLog(
         {
           ...state,
-          phase: requiresClarification ? "clarifying" : "planning",
-          taskPlan,
-          agentRun: { ...state.agentRun, status: requiresClarification ? "idle" : "thinking" },
+          phase: recovering
+            ? "replanning"
+            : preparedExtension
+              ? "waiting_approval"
+            : requiresClarification
+              ? "clarifying"
+              : "planning",
+          taskPlan: confirmedTaskPlan,
+          agentRun: {
+            ...state.agentRun,
+            status: requiresClarification ? "idle" : "thinking"
+          },
           workspace: {
             ...state.workspace,
-            nextAction: requiresClarification
+            nextAction: recovering
+              ? "按确认后的 Task Plan 生成新的资源计划 revision。"
+              : preparedExtension
+                ? "Task Plan 已确认，等待当前资源 revision 的独立审批。"
+              : requiresClarification
               ? "按已确认的 Task Plan 完成关键需求澄清。"
               : "按已确认的 Task Plan 进入只读工具与资源规划阶段。"
           }
@@ -695,6 +1024,173 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         "info",
         `用户已确认 Task Plan r${event.revision}；下载、导出等写入步骤仍需后续独立审批。`
       );
+    }
+
+    case "TASK_PLAN_STEP_INPUT_REQUESTED": {
+      if (!state.taskPlan) return state;
+      const step = state.taskPlan.steps.find(
+        (candidate) => candidate.id === event.stepId
+      );
+      if (!step) return state;
+      let taskPlan;
+      try {
+        taskPlan = step.status === "running"
+          ? suspendTaskPlanStepForInput(
+              state.taskPlan,
+              event.stepId,
+              event.requestedAt
+            )
+          : requestTaskPlanStepInput(
+              state.taskPlan,
+              event.stepId,
+              event.requestedAt
+            );
+      } catch {
+        return state;
+      }
+      const repositorySelection =
+        state.routeDecision?.skillId === "github-project-discovery" &&
+        step.kind === "user_decision" &&
+        step.staticInput.interaction === "repository_selection" &&
+        (() => {
+          const searchResult = latestGitHubRepositorySearchResult(state);
+          return searchResult?.status === "success" &&
+            isGitHubRepositorySearchOutput(searchResult.output);
+        })();
+      return withLog(
+        {
+          ...state,
+          taskPlan,
+          phase: repositorySelection ? "result" : "clarifying",
+          agentRun: { ...state.agentRun, status: "idle" }
+        },
+        "info",
+        `Task Plan 步骤 ${step.title} 正在等待用户输入。`
+      );
+    }
+
+    case "TASK_PLAN_STEP_STARTED": {
+      if (!state.taskPlan) return state;
+      try {
+        const taskPlan = startTaskPlanStep(
+          state.taskPlan,
+          event.stepId,
+          event.startedAt
+        );
+        return withLog(
+          {
+            ...state,
+            taskPlan,
+            agentRun: { ...state.agentRun, status: "executing" }
+          },
+          "info",
+          `Task Plan 开始执行步骤 ${event.stepId}。`
+        );
+      } catch {
+        return state;
+      }
+    }
+
+    case "TASK_PLAN_STEP_COMPLETED": {
+      if (!state.taskPlan) return state;
+      try {
+        const taskPlan = completeTaskPlanStep(state.taskPlan, {
+          stepId: event.stepId,
+          completedAt: event.completedAt,
+          result: event.result
+        });
+        const terminal = event.terminalPhase ?? null;
+        return withLog(
+          {
+            ...state,
+            taskPlan,
+            phase: terminal ?? state.phase,
+            agentRun: {
+              ...state.agentRun,
+              status: taskPlan.status === "completed"
+                ? "complete"
+                : state.agentRun.status
+            },
+            workspace: terminal === "result"
+              ? {
+                  ...state.workspace,
+                  nextAction: event.result.summary
+                }
+              : state.workspace
+          },
+          "success",
+          `Task Plan 步骤 ${event.stepId} 已完成：${event.result.summary}`
+        );
+      } catch {
+        return state;
+      }
+    }
+
+    case "TASK_PLAN_STEP_FAILED": {
+      if (!state.taskPlan) return state;
+      try {
+        const failed = failTaskPlanStep(
+          state.taskPlan,
+          event.stepId,
+          event.reason,
+          event.failedAt
+        );
+        const taskPlan = event.replanning
+          ? beginTaskPlanReplanning(failed, event.failedAt)
+          : failed;
+        return withLog(
+          { ...state, taskPlan },
+          "error",
+          `Task Plan 步骤 ${event.stepId} 失败：${event.reason}`
+        );
+      } catch {
+        return state;
+      }
+    }
+
+    case "TASK_PLAN_STEP_APPROVAL_REQUESTED": {
+      if (!state.taskPlan) return state;
+      try {
+        const taskPlan = requestTaskPlanStepApproval(
+          state.taskPlan,
+          event.stepId,
+          event.requestedAt
+        );
+        return withLog(
+          {
+            ...state,
+            taskPlan,
+            agentRun: { ...state.agentRun, status: "waiting_approval" }
+          },
+          "info",
+          `Task Plan 步骤 ${event.stepId} 等待当前资源计划审批。`
+        );
+      } catch {
+        return state;
+      }
+    }
+
+    case "TASK_PLAN_STEP_AUTO_APPROVED": {
+      if (!state.taskPlan) return state;
+      try {
+        const waiting = requestTaskPlanStepApproval(
+          state.taskPlan,
+          event.stepId,
+          event.approvedAt
+        );
+        const taskPlan = approveTaskPlanStep(waiting, {
+          stepId: event.stepId,
+          revision: event.revision,
+          approvedAt: event.approvedAt
+        });
+        return withLog(
+          { ...state, taskPlan },
+          "info",
+          `Task Plan 步骤 ${event.stepId} 继承当前资源计划 r${event.revision} 的本地写入审批。`
+        );
+      } catch {
+        return state;
+      }
     }
 
     case "TASK_REQUIREMENTS_RESOLVED":
@@ -712,8 +1208,21 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       const answers = { ...state.answers, [question.id]: event.answer };
       const nextIndex = state.clarificationIndex + 1;
       const nextPhase = nextIndex >= state.clarifications.length ? "planning" : "clarifying";
+      const resolvedAt =
+        event.answeredAt ?? state.taskPlan?.updatedAt ?? new Date(0).toISOString();
+      const resolvedTaskPlan = resolveTaskPlanClarification(
+        state,
+        question.id,
+        event.answer,
+        resolvedAt
+      );
+      const taskPlan = requestNextPlannedClarification(
+        resolvedTaskPlan,
+        state.clarifications[nextIndex]?.id,
+        resolvedAt
+      );
       return withLog(
-        { ...state, answers, clarificationIndex: nextIndex, phase: nextPhase },
+        { ...state, answers, clarificationIndex: nextIndex, phase: nextPhase, taskPlan },
         "info",
         nextPhase === "planning" ? "澄清完成，正在生成资源计划。" : "已记录澄清答案，准备下一项关键问题。"
       );
@@ -725,8 +1234,21 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       const answers = { ...state.answers, [question.id]: "skipped" as const };
       const nextIndex = state.clarificationIndex + 1;
       const nextPhase = nextIndex >= state.clarifications.length ? "planning" : "clarifying";
+      const resolvedAt =
+        event.skippedAt ?? state.taskPlan?.updatedAt ?? new Date(0).toISOString();
+      const resolvedTaskPlan = resolveTaskPlanClarification(
+        state,
+        question.id,
+        "已跳过",
+        resolvedAt
+      );
+      const taskPlan = requestNextPlannedClarification(
+        resolvedTaskPlan,
+        state.clarifications[nextIndex]?.id,
+        resolvedAt
+      );
       return withLog(
-        { ...state, answers, clarificationIndex: nextIndex, phase: nextPhase },
+        { ...state, answers, clarificationIndex: nextIndex, phase: nextPhase, taskPlan },
         "info",
         nextPhase === "planning" ? "已跳过非必填澄清，正在生成资源计划。" : "已跳过非必填澄清。"
       );
@@ -789,12 +1311,26 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
           `GitHub 源码快照计划无效：${planValidation.issues[0]?.message ?? "未知错误"}`
         );
       }
+      const taskPlanExtension = extendCompletedPlan(
+        state,
+        localAcquisitionExtensionProposal(
+          `将 ${resources.find((resource) => resource.github)?.github?.fullName ?? "已选择的 GitHub 仓库"} 准备到本地`,
+          "下载固定 commit 源码",
+          "下载已经固定 commit SHA 的仓库归档和当前 revision 中选择的离线资源。"
+        ),
+        "用户在 GitHub 查询完成后选择将仓库准备到本地。"
+      );
       return withLog(
         {
           ...state,
-          phase: "waiting_approval",
+          phase: taskPlanExtension
+            ? "waiting_task_plan_confirmation"
+            : "waiting_approval",
           revision,
           resources,
+          taskPlan: taskPlanExtension?.taskPlan ?? state.taskPlan,
+          taskPlanValidation:
+            taskPlanExtension?.validation ?? state.taskPlanValidation,
           taskRequirements: githubAcquisitionRequirements,
           planValidation,
           approvedRevision: null,
@@ -803,7 +1339,9 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
           workspace: {
             ...state.workspace,
             nextAction:
-              "选择本地工作区目录并确认后，下载固定 commit 的源码快照。"
+              taskPlanExtension
+                ? "先确认新增的本地准备流程，再选择目录并审批资源计划。"
+                : "选择本地工作区目录并确认后，下载固定 commit 的源码快照。"
           }
         },
         "success",
@@ -978,6 +1516,10 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         {
           ...state,
           phase: "cancelled",
+          taskPlan: failOrCancelTaskPlan(
+            state,
+            `模型已达到 ${state.agentRun.maxSteps} 步安全上限。`
+          ),
           agentRun: { ...state.agentRun, status: "failed" },
           activeResourceId: null
         },
@@ -990,6 +1532,7 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         {
           ...state,
           phase: "cancelled",
+          taskPlan: failOrCancelTaskPlan(state, event.reason),
           agentRun: { ...state.agentRun, status: "failed" },
           activeResourceId: null
         },
@@ -1125,12 +1668,26 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
           `npm 离线依赖计划无效：${planValidation.issues[0]?.message ?? "未知错误"}`
         );
       }
+      const taskPlanExtension = extendCompletedPlan(
+        state,
+        localAcquisitionExtensionProposal(
+          "为已验证的 GitHub 工作区准备锁文件依赖",
+          "下载锁文件固定的 npm 包",
+          "仅下载 package-lock 完整固定且由 Agent B 确认可离线准备的 npm tarball。"
+        ),
+        "用户在源码交接完成后新增 npm 离线依赖准备范围。"
+      );
       return withLog(
         {
           ...state,
-          phase: "waiting_approval",
+          phase: taskPlanExtension
+            ? "waiting_task_plan_confirmation"
+            : "waiting_approval",
           revision,
           resources,
+          taskPlan: taskPlanExtension?.taskPlan ?? state.taskPlan,
+          taskPlanValidation:
+            taskPlanExtension?.validation ?? state.taskPlanValidation,
           approvedRevision: null,
           planValidation,
           planExplanation:
@@ -1141,7 +1698,9 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
             exportStatus: "pending",
             exportError: undefined,
             nextAction:
-              "确认新的依赖 revision 后，仅下载并校验 npm tarball。"
+              taskPlanExtension
+                ? "确认新增的依赖准备流程后，再审批资源 revision。"
+                : "确认新的依赖 revision 后，仅下载并校验 npm tarball。"
           },
           agentRun: { ...state.agentRun, status: "waiting_approval" }
         },
@@ -1192,10 +1751,45 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         state.resources.every(
           (resource) => !resource.selected || resource.status === "verified"
         );
+      const resourcesReadyForVerification =
+        !resourcesReadyForExport &&
+        state.resources.some((resource) => resource.selected) &&
+        state.resources.every(
+          (resource) =>
+            !resource.selected ||
+            resource.status === "downloaded" ||
+            resource.status === "verified"
+        );
+      const executionPhase = resourcesReadyForExport
+        ? "exporting" as const
+        : resourcesReadyForVerification
+          ? "verifying" as const
+          : "downloading" as const;
+      let taskPlan = state.taskPlan;
+      const waitingTaskPlanStep = taskPlan?.steps.find(
+        (step) => step.status === "waiting_approval"
+      );
+      if (taskPlan && waitingTaskPlanStep) {
+        try {
+          taskPlan = approveTaskPlanStep(taskPlan, {
+            stepId: waitingTaskPlanStep.id,
+            revision: taskPlan.revision,
+            approvedAt:
+              event.approvedAt ?? taskPlan.updatedAt
+          });
+        } catch {
+          return withLog(
+            state,
+            "error",
+            `Task Plan 步骤 ${waitingTaskPlanStep.id} 的审批状态无效。`
+          );
+        }
+      }
       return withLog(
         {
           ...state,
-          phase: resourcesReadyForExport ? "exporting" : "downloading",
+          taskPlan,
+          phase: executionPhase,
           resources: prepared.resources,
           activeResourceId: prepared.activeResourceId,
           replanReason: null,
@@ -1210,12 +1804,16 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
             exportError: undefined,
             nextAction: resourcesReadyForExport
               ? "审批已更新，等待重新导出工作区交接包。"
+              : resourcesReadyForVerification
+                ? "本地资源已接入，开始验证来源与完整性。"
               : "等待资源下载和验证完成。"
           }
         },
         "success",
         resourcesReadyForExport
           ? `用户重新确认资源计划 r${state.revision}，继续导出工作区。`
+          : resourcesReadyForVerification
+            ? `用户确认资源计划 r${state.revision}，开始验证已接入的本地资源。`
           : `用户确认资源计划 r${state.revision}，开始受控下载。`
       );
     }
@@ -1356,9 +1954,28 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       if (!failedResource) return state;
 
       if (event.action === "delegate-agent-b") {
+        let taskPlan = state.taskPlan;
+        const runningStep = taskPlan?.steps.find((step) =>
+          ["running", "waiting_user_input", "waiting_approval"].includes(
+            step.status
+          )
+        );
+        if (taskPlan && runningStep) {
+          try {
+            taskPlan = failTaskPlanStep(
+              taskPlan,
+              runningStep.id,
+              failedResource.failureReason ?? "资源下载失败并交由 Agent B 处理。",
+              event.resolvedAt ?? taskPlan.updatedAt
+            );
+          } catch {
+            // 保留原计划，交接状态仍由现有状态机处理。
+          }
+        }
         return withLog(
           {
             ...state,
+            taskPlan,
             phase: "handoff",
             agentRun: { ...state.agentRun, status: "delegated" },
             workspace: {
@@ -1386,14 +2003,34 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       }
 
       if (event.action === "trusted-mirror" && !failedResource.fallbackId) return state;
+      const revisedAt =
+        event.resolvedAt ?? state.taskPlan?.updatedAt ?? new Date(0).toISOString();
+      const taskPlanRevision = reviseTaskPlanForRecovery(
+        state,
+        `用户选择${event.action === "trusted-mirror" ? "可信替代来源" : "重试原来源"}：${failedResource.failureReason ?? "下载失败"}`,
+        revisedAt
+      );
       return withLog(
         {
           ...state,
-          phase: "replanning",
+          phase: taskPlanRevision
+            ? "waiting_task_plan_confirmation"
+            : "replanning",
           requestedReplanStrategy: event.action,
           approvedRevision: null,
-          agentRun: { ...state.agentRun, status: "thinking" },
-          workspace: { ...state.workspace, nextAction: "等待模型生成新的待审批资源计划。" }
+          taskPlan: taskPlanRevision?.taskPlan ?? state.taskPlan,
+          taskPlanValidation:
+            taskPlanRevision?.validation ?? state.taskPlanValidation,
+          agentRun: {
+            ...state.agentRun,
+            status: taskPlanRevision ? "waiting_approval" : "thinking"
+          },
+          workspace: {
+            ...state.workspace,
+            nextAction: taskPlanRevision
+              ? "确认修订后的 Task Plan，再生成新的待审批资源计划。"
+              : "等待模型生成新的待审批资源计划。"
+          }
         },
         "info",
         event.action === "trusted-mirror"
@@ -1533,7 +2170,13 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
             fileRecords: event.output.files,
             exportError: undefined
           },
-          agentRun: { ...state.agentRun, status: "complete" }
+          agentRun: {
+            ...state.agentRun,
+            status:
+              state.taskPlan && state.taskPlan.status !== "completed"
+                ? "executing"
+                : "complete"
+          }
         },
         "success",
         `工作区交接包已原子写入 ${event.output.rootPath}。`

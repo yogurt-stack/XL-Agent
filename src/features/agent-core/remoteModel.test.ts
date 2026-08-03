@@ -400,7 +400,7 @@ describe("remote model runtime", () => {
     expect(runtime.getState()).toMatchObject({
       phase: "waiting_approval",
       revision: 1,
-      agentRun: { step: 5 }
+      agentRun: { step: 3 }
     });
     expect(runtime.getState().resources.map((resource) => resource.id)).toEqual([
       "python-312",

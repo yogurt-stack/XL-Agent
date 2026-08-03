@@ -10,7 +10,11 @@ import type {
   AgentVerifier
 } from "./interfaces";
 import { DefaultAgentPolicy, InMemoryAgentToolExecutor } from "./agentServices";
-import { parseModelDecision } from "./agentSchemas";
+import { parseAgentToolCall, parseModelDecision } from "./agentSchemas";
+import {
+  githubSearchInputFromState,
+  sameGitHubSearchInput
+} from "./githubSearch";
 import { LocalRuleModelRuntime } from "./localRuleModel";
 import { createInitialAgentState, transition } from "./machine";
 import { MockVerifier, FixedWindowsPlanner, FixedWindowsRouter } from "./mockServices";
@@ -20,6 +24,12 @@ import {
   prepareTaskPlanForConfirmation,
   validateTaskPlan
 } from "./taskPlan";
+import {
+  activeTaskPlanStep,
+  nextTaskPlanExecutorCommand,
+  type TaskPlanExecutorCommand
+} from "./taskPlanExecutor";
+import { createLocalTaskPlanProposal } from "./taskPlanTemplates";
 import type {
   AgentAction,
   AgentEvent,
@@ -87,6 +97,14 @@ export class AgentRuntime implements AgentRuntimePort {
               revision: event.revision,
               confirmedAt: new Date().toISOString()
             }
+          : event.type === "ANSWER_CLARIFICATION" && !event.answeredAt
+            ? { ...event, answeredAt: new Date().toISOString() }
+          : event.type === "SKIP_CLARIFICATION" && !event.skippedAt
+            ? { ...event, skippedAt: new Date().toISOString() }
+          : event.type === "APPROVE_PLAN" && !event.approvedAt
+            ? { ...event, approvedAt: new Date().toISOString() }
+          : event.type === "RESOLVE_DOWNLOAD_FAILURE" && !event.resolvedAt
+            ? { ...event, resolvedAt: new Date().toISOString() }
           : event.type === "CANCEL_TASK" && !event.cancelledAt
             ? { ...event, cancelledAt: new Date().toISOString() }
           : event;
@@ -107,8 +125,62 @@ export class AgentRuntime implements AgentRuntimePort {
    */
   reportExternalEvent(event: AgentEvent) {
     this.applyEvent(event);
+    if (event.type === "GITHUB_ACQUISITION_PREPARED") {
+      this.completeGitHubAcquisitionSteps(event);
+    }
     this.drive();
     return this.state;
+  }
+
+  private completeGitHubAcquisitionSteps(
+    event: Extract<AgentEvent, { type: "GITHUB_ACQUISITION_PREPARED" }>
+  ) {
+    const plan = this.state.taskPlan;
+    const selectedRepository = event.resources.find(
+      (resource) => resource.github
+    );
+    if (!plan || !selectedRepository?.github) return;
+    const selectedStep = plan.steps.find(
+      (step) =>
+        step.status === "waiting_user_input" &&
+        step.kind === "user_decision"
+    );
+    if (!selectedStep) return;
+    const now = new Date().toISOString();
+    this.applyEvent({
+      type: "TASK_PLAN_STEP_COMPLETED",
+      stepId: selectedStep.id,
+      completedAt: now,
+      result: {
+        reference: `github:${selectedRepository.github.fullName}`,
+        summary: `用户已选择 ${selectedRepository.github.fullName}。`,
+        output: { fullName: selectedRepository.github.fullName }
+      }
+    });
+    const pinStep = this.state.taskPlan?.steps.find(
+      (step) => step.status === "pending" && step.kind === "resource_plan"
+    );
+    if (!pinStep) return;
+    this.applyEvent({
+      type: "TASK_PLAN_STEP_STARTED",
+      stepId: pinStep.id,
+      startedAt: now
+    });
+    this.applyEvent({
+      type: "TASK_PLAN_STEP_COMPLETED",
+      stepId: pinStep.id,
+      completedAt: now,
+      result: {
+        reference: `resource-plan:r${this.state.revision}`,
+        summary: `${selectedRepository.github.fullName} 已固定到不可变 commit。`,
+        output: {
+          revision: this.state.revision,
+          fullName: selectedRepository.github.fullName,
+          commitSha: selectedRepository.github.commitSha,
+          resourceIds: event.resources.map((resource) => resource.id)
+        }
+      }
+    });
   }
 
   private applyEvent(event: AgentEvent) {
@@ -143,21 +215,6 @@ export class AgentRuntime implements AgentRuntimePort {
       this.verifierStepRunning
     ) return;
 
-    if (
-      this.state.phase === "planning" &&
-      this.state.taskRequirements === null &&
-      this.dependencies.router.resolveRequirements
-    ) {
-      const requirements =
-        this.dependencies.router.resolveRequirements(this.state);
-      if (requirements) {
-        this.applyEvent({
-          type: "TASK_REQUIREMENTS_RESOLVED",
-          requirements
-        });
-      }
-    }
-
     if (this.state.phase === "routing") {
       const event = this.dependencies.router.route(this.state);
       if (!event) return;
@@ -171,11 +228,7 @@ export class AgentRuntime implements AgentRuntimePort {
       return;
     }
 
-    if (
-      this.state.phase === "task_planning" ||
-      (this.dependencies.model &&
-        (this.state.phase === "planning" || this.state.phase === "replanning"))
-    ) {
+    if (this.state.phase === "task_planning") {
       if (this.state.agentRun.step >= this.state.agentRun.maxSteps) {
         this.applyEvent({ type: "MODEL_STEP_LIMIT_REACHED" });
         return;
@@ -187,10 +240,38 @@ export class AgentRuntime implements AgentRuntimePort {
         if (!this.started || version !== this.workVersion) return;
         await this.runModelStep(
           version,
-          this.state.phase === "task_planning"
-            ? this.dependencies.model ?? this.taskPlanFallbackModel
-            : this.dependencies.model
+          this.dependencies.model ?? this.taskPlanFallbackModel
         );
+      }, this.stepDelayMs);
+      return;
+    }
+
+    if (
+      this.state.taskPlan &&
+      this.state.taskPlan.confirmation.status === "confirmed" &&
+      this.state.taskPlan.status !== "replanning" &&
+      this.state.taskPlan.status !== "failed" &&
+      this.state.taskPlan.status !== "cancelled" &&
+      this.state.taskPlan.status !== "completed"
+    ) {
+      const command = nextTaskPlanExecutorCommand(this.state);
+      if (command) this.scheduleTaskPlanCommand(command);
+      return;
+    }
+
+    if (
+      this.dependencies.model &&
+      (this.state.phase === "planning" || this.state.phase === "replanning")
+    ) {
+      if (this.state.agentRun.step >= this.state.agentRun.maxSteps) {
+        this.applyEvent({ type: "MODEL_STEP_LIMIT_REACHED" });
+        return;
+      }
+      const version = this.workVersion;
+      this.cancelScheduledStep = this.dependencies.scheduler.schedule(async () => {
+        this.cancelScheduledStep = null;
+        if (!this.started || version !== this.workVersion) return;
+        await this.runModelStep(version, this.dependencies.model);
       }, this.stepDelayMs);
       return;
     }
@@ -237,6 +318,272 @@ export class AgentRuntime implements AgentRuntimePort {
     }, this.stepDelayMs);
   }
 
+  private scheduleTaskPlanCommand(command: TaskPlanExecutorCommand) {
+    const version = this.workVersion;
+    this.cancelScheduledStep = this.dependencies.scheduler.schedule(async () => {
+      this.cancelScheduledStep = null;
+      if (!this.started || version !== this.workVersion) return;
+      await this.runTaskPlanCommand(command, version);
+    }, this.stepDelayMs);
+  }
+
+  private async runTaskPlanCommand(
+    command: TaskPlanExecutorCommand,
+    version: number
+  ) {
+    const now = new Date().toISOString();
+    if (command.type === "request_input") {
+      this.applyEvent({
+        type: "TASK_PLAN_STEP_INPUT_REQUESTED",
+        stepId: command.stepId,
+        requestedAt: now
+      });
+      this.drive();
+      return;
+    }
+    if (command.type === "request_approval") {
+      this.applyEvent({
+        type: "TASK_PLAN_STEP_APPROVAL_REQUESTED",
+        stepId: command.stepId,
+        requestedAt: now
+      });
+      this.drive();
+      return;
+    }
+    if (command.type === "auto_approve") {
+      this.applyEvent({
+        type: "TASK_PLAN_STEP_AUTO_APPROVED",
+        stepId: command.stepId,
+        revision: this.state.taskPlan?.revision ?? 0,
+        approvedAt: now
+      });
+      this.drive();
+      return;
+    }
+    if (command.type === "start_step") {
+      this.applyEvent({
+        type: "TASK_PLAN_STEP_STARTED",
+        stepId: command.stepId,
+        startedAt: now
+      });
+      this.drive();
+      return;
+    }
+    if (command.type === "complete_passive") {
+      this.applyEvent({
+        type: "TASK_PLAN_STEP_COMPLETED",
+        stepId: command.stepId,
+        completedAt: now,
+        result: {
+          reference: `state:${this.state.phase}`,
+          summary: command.terminalPhase === "result"
+            ? "GitHub 查询结果已交付，等待用户选择是否继续准备到本地。"
+            : command.terminalPhase === "handoff"
+              ? "Task Plan 的交接目标已经达成。"
+              : "计划步骤已由受控状态机完成。",
+          output: {
+            phase: command.terminalPhase ?? this.state.phase,
+            revision: this.state.revision
+          }
+        },
+        terminalPhase: command.terminalPhase
+      });
+      this.drive();
+      return;
+    }
+    if (command.type === "execute_tool") {
+      await this.runTaskPlanReadTool(command, version);
+      return;
+    }
+    if (command.type === "generate_resource_plan") {
+      if (
+        this.state.taskRequirements === null &&
+        this.dependencies.router.resolveRequirements
+      ) {
+        const requirements =
+          this.dependencies.router.resolveRequirements(this.state);
+        if (requirements) {
+          this.applyEvent({
+            type: "TASK_REQUIREMENTS_RESOLVED",
+            requirements
+          });
+        }
+      }
+      if (this.dependencies.model) {
+        await this.runModelStep(version, this.dependencies.model);
+        return;
+      }
+      const event = this.state.phase === "replanning"
+        ? this.dependencies.planner.createReplan(this.state)
+        : this.dependencies.planner.createPlan(this.state);
+      if (!event) {
+        this.failRunningTaskPlanStep(
+          command.stepId,
+          "资源规划器没有生成可执行计划。"
+        );
+        return;
+      }
+      this.applyEvent(event);
+      this.completeRunningTaskPlanStep(
+        command.stepId,
+        "资源计划已生成并通过严格验证。",
+        {
+          revision: this.state.revision,
+          resourceIds: this.state.resources.map((resource) => resource.id)
+        }
+      );
+      this.drive();
+      return;
+    }
+    if (command.type === "execute_download_batch") {
+      if (this.state.phase === "verifying") {
+        this.completeRunningTaskPlanStep(
+          command.stepId,
+          "全部已审批资源下载完成。",
+          {
+            resourceIds: this.state.resources
+              .filter((resource) => resource.selected)
+              .map((resource) => resource.id)
+          }
+        );
+        this.drive();
+        return;
+      }
+      if (this.state.phase === "downloading" && this.state.activeResourceId) {
+        await this.runDownloadToolStep(version);
+      }
+      return;
+    }
+    if (command.type === "verify_resources") {
+      if (this.state.phase === "exporting" || this.state.phase === "handoff") {
+        this.completeRunningTaskPlanStep(
+          command.stepId,
+          "选中资源已通过来源与完整性验证。",
+          {
+            verifiedResourceIds: this.state.resources
+              .filter((resource) => resource.selected && resource.status === "verified")
+              .map((resource) => resource.id)
+          }
+        );
+        this.drive();
+        return;
+      }
+      if (this.state.phase === "verifying") {
+        await this.runVerifierStep(version);
+      }
+      return;
+    }
+    if (command.type === "export_workspace") {
+      if (this.state.phase === "handoff") {
+        this.completeRunningTaskPlanStep(
+          command.stepId,
+          "工作区与 Manifest 已原子导出。",
+          {
+            rootPath: this.state.workspace.rootPath,
+            files: this.state.workspace.fileRecords
+          }
+        );
+        this.drive();
+        return;
+      }
+      if (
+        this.state.phase === "exporting" &&
+        this.state.workspace.exportStatus === "pending"
+      ) {
+        await this.runWorkspaceExportToolStep(version);
+      }
+    }
+  }
+
+  private async runTaskPlanReadTool(
+    command: Extract<TaskPlanExecutorCommand, { type: "execute_tool" }>,
+    version: number
+  ) {
+    const step = this.state.taskPlan?.steps.find(
+      (candidate) => candidate.id === command.stepId
+    );
+    if (!step) return;
+    const action: Extract<AgentAction, { type: "call_tool" }> = {
+      actionId: `executor-${command.call.callId}`,
+      type: "call_tool",
+      purpose: step.description,
+      call: command.call
+    };
+    this.toolStepRunning = true;
+    try {
+      const policyDecision = this.dependencies.policy.evaluate(
+        action,
+        this.state
+      );
+      this.applyEvent({
+        type: "MODEL_POLICY_RECORDED",
+        actionId: action.actionId,
+        decision: policyDecision
+      });
+      if (policyDecision.outcome !== "allow") {
+        this.failRunningTaskPlanStep(command.stepId, policyDecision.reason);
+        this.applyEvent({
+          type: "MODEL_RUNTIME_FAILED",
+          reason: policyDecision.reason
+        });
+        return;
+      }
+      const result = await this.dependencies.tools.execute(
+        command.call,
+        this.state
+      );
+      if (!this.isCurrentWork(version)) return;
+      this.applyEvent({ type: "MODEL_TOOL_COMPLETED", result });
+      if (result.status !== "success") {
+        const reason = result.error?.message ?? `工具 ${result.tool} 执行失败。`;
+        this.failRunningTaskPlanStep(command.stepId, reason);
+        this.applyEvent({ type: "MODEL_RUNTIME_FAILED", reason });
+        return;
+      }
+      this.completeRunningTaskPlanStep(
+        command.stepId,
+        `工具 ${result.tool} 已返回可审计结果。`,
+        result.output
+      );
+    } finally {
+      this.toolStepRunning = false;
+      if (this.isCurrentWork(version)) this.drive();
+    }
+  }
+
+  private completeRunningTaskPlanStep(
+    stepId: string,
+    summary: string,
+    output?: unknown
+  ) {
+    this.applyEvent({
+      type: "TASK_PLAN_STEP_COMPLETED",
+      stepId,
+      completedAt: new Date().toISOString(),
+      result: {
+        reference: `task-plan-step:${stepId}`,
+        summary,
+        ...(output === undefined
+          ? {}
+          : { output: taskPlanJsonOutput(output) })
+      }
+    });
+  }
+
+  private failRunningTaskPlanStep(
+    stepId: string,
+    reason: string,
+    replanning = false
+  ) {
+    this.applyEvent({
+      type: "TASK_PLAN_STEP_FAILED",
+      stepId,
+      failedAt: new Date().toISOString(),
+      reason,
+      replanning
+    });
+  }
+
   private async runModelStep(
     version: number,
     selectedModel: ModelRuntime | undefined
@@ -279,6 +626,7 @@ export class AgentRuntime implements AgentRuntimePort {
         if (!this.isCurrentWork(version)) return;
         this.applyEvent({ type: "MODEL_TOOL_COMPLETED", result });
       } else if (action.type === "ask_clarification") {
+        const runningStep = activeTaskPlanStep(this.state.taskPlan);
         this.applyEvent({
           type: "MODEL_CLARIFICATION_REQUESTED",
           question: {
@@ -289,20 +637,69 @@ export class AgentRuntime implements AgentRuntimePort {
             options: action.options
           }
         });
+        if (
+          runningStep?.status === "running" &&
+          runningStep.kind === "resource_plan"
+        ) {
+          this.applyEvent({
+            type: "TASK_PLAN_STEP_INPUT_REQUESTED",
+            stepId: runningStep.id,
+            requestedAt: new Date().toISOString()
+          });
+        }
       } else if (action.type === "create_plan") {
+        const runningStep = activeTaskPlanStep(this.state.taskPlan);
         this.applyEvent({
           type: "MODEL_PLAN_PROPOSED",
           resourceIds: action.resourceIds,
           explanation: action.explanation
         });
+        if (
+          runningStep?.status === "running" &&
+          runningStep.kind === "resource_plan" &&
+          this.state.phase === "waiting_approval"
+        ) {
+          this.completeRunningTaskPlanStep(
+            runningStep.id,
+            "模型资源计划已生成并通过严格验证。",
+            {
+              revision: this.state.revision,
+              resourceIds: this.state.resources.map((resource) => resource.id)
+            }
+          );
+        }
       } else if (action.type === "create_replan") {
+        const runningStep = activeTaskPlanStep(this.state.taskPlan);
         this.applyEvent({
           type: "MODEL_REPLAN_PROPOSED",
           strategy: action.strategy,
           explanation: action.explanation
         });
+        if (
+          runningStep?.status === "running" &&
+          runningStep.kind === "resource_plan" &&
+          this.state.phase === "waiting_approval"
+        ) {
+          this.completeRunningTaskPlanStep(
+            runningStep.id,
+            "替代资源计划已生成并通过严格验证。",
+            {
+              revision: this.state.revision,
+              strategy: action.strategy,
+              resourceIds: this.state.resources.map((resource) => resource.id)
+            }
+          );
+        }
       } else if (action.type === "finish") {
-        this.applyEvent({ type: "MODEL_FINISHED", summary: action.summary });
+        const runningStep = activeTaskPlanStep(this.state.taskPlan);
+        if (runningStep?.status === "running") {
+          const reason =
+            `模型在 Task Plan 步骤 ${runningStep.id} 完成前提前结束。`;
+          this.failRunningTaskPlanStep(runningStep.id, reason);
+          this.applyEvent({ type: "MODEL_RUNTIME_FAILED", reason });
+        } else {
+          this.applyEvent({ type: "MODEL_FINISHED", summary: action.summary });
+        }
       }
     } catch (error) {
       if (this.isCurrentWork(version)) {
@@ -349,20 +746,88 @@ export class AgentRuntime implements AgentRuntimePort {
       ),
       requireInitialConfirmation: true
     };
-    const draft = createTaskPlan({
-      planId,
-      taskId: this.state.taskId,
-      proposal: action.proposal,
-      createdBy: provider,
-      createdAt
-    });
-    const validation = validateTaskPlan(draft, validationContext);
-    const plan = prepareTaskPlanForConfirmation(
-      draft,
-      validationContext,
-      createdAt
-    );
+    const buildPlan = (
+      proposal: typeof action.proposal,
+      createdBy: "local-rule" | "remote-llm"
+    ) => {
+      const draft = createTaskPlan({
+        planId,
+        taskId: this.state.taskId,
+        proposal,
+        createdBy,
+        createdAt
+      });
+      const validation = validateTaskPlan(draft, validationContext);
+      return {
+        validation,
+        plan: prepareTaskPlanForConfirmation(
+          draft,
+          validationContext,
+          createdAt
+        )
+      };
+    };
+
+    let prepared;
+    try {
+      if (!this.taskPlanDecisionProtocolMatchesState(action.proposal)) {
+        throw new Error("Task Plan 包含宿主无法安全展示的用户决策或 GitHub 查询参数。");
+      }
+      prepared = buildPlan(action.proposal, provider);
+    } catch (error) {
+      if (provider !== "remote-llm") throw error;
+      const localProposal = createLocalTaskPlanProposal({
+        state: this.state,
+        step: this.state.agentRun.step,
+        maxSteps: this.state.agentRun.maxSteps,
+        availableTools,
+        toolResults: this.state.agentRun.toolResults
+      });
+      prepared = buildPlan(localProposal, "local-rule");
+    }
+    const { plan, validation } = prepared;
     this.applyEvent({ type: "TASK_PLAN_PROPOSED", plan, validation });
+  }
+
+  private taskPlanDecisionProtocolMatchesState(
+    proposal: Extract<AgentAction, { type: "propose_task_plan" }>["proposal"]
+  ) {
+    const clarificationIds = new Set(
+      this.state.routeDecision?.clarifications.map((question) => question.id) ?? []
+    );
+    const decisionsValid = proposal.steps
+      .filter((step) => step.kind === "user_decision")
+      .every((step) => {
+        const questionId = step.staticInput.questionId;
+        if (typeof questionId === "string") {
+          return clarificationIds.has(questionId);
+        }
+        return this.state.routeDecision?.skillId === "github-project-discovery" &&
+          step.staticInput.interaction === "repository_selection";
+      });
+    if (!decisionsValid) return false;
+    if (this.state.routeDecision?.skillId !== "github-project-discovery") {
+      return true;
+    }
+
+    const searchSteps = proposal.steps.filter(
+      (step) => step.tool === "search_github_repositories"
+    );
+    if (searchSteps.length !== 1) return false;
+    try {
+      const call = parseAgentToolCall({
+        callId: "task-plan-github-search-validation",
+        name: "search_github_repositories",
+        input: searchSteps[0].staticInput
+      });
+      return call.name === "search_github_repositories" &&
+        sameGitHubSearchInput(
+          call.input,
+          githubSearchInputFromState(this.state)
+        );
+    } catch {
+      return false;
+    }
   }
 
   private async runDownloadToolStep(version: number) {
@@ -458,6 +923,24 @@ export class AgentRuntime implements AgentRuntimePort {
           progress: result.output.progress
         });
       }
+      if (this.state.phase === "verifying") {
+        const runningStep = activeTaskPlanStep(this.state.taskPlan);
+        if (
+          runningStep?.status === "running" &&
+          (runningStep.tool === "controlled_download" ||
+            runningStep.tool === "simulate_download")
+        ) {
+          this.completeRunningTaskPlanStep(
+            runningStep.id,
+            "全部已审批资源下载完成。",
+            {
+              resourceIds: this.state.resources
+                .filter((item) => item.selected)
+                .map((item) => item.id)
+            }
+          );
+        }
+      }
     } finally {
       this.toolStepRunning = false;
       if (this.isCurrentWork(version)) this.drive();
@@ -528,6 +1011,19 @@ export class AgentRuntime implements AgentRuntimePort {
         return;
       }
       this.applyEvent({ type: "WORKSPACE_EXPORT_COMPLETED", output: result.output });
+      if (this.state.phase === "handoff") {
+        const runningStep = activeTaskPlanStep(this.state.taskPlan);
+        if (
+          runningStep?.status === "running" &&
+          runningStep.tool === "export_workspace"
+        ) {
+          this.completeRunningTaskPlanStep(
+            runningStep.id,
+            "工作区与 Manifest 已原子导出。",
+            result.output
+          );
+        }
+      }
     } finally {
       this.toolStepRunning = false;
       if (this.isCurrentWork(version)) this.drive();
@@ -540,6 +1036,25 @@ export class AgentRuntime implements AgentRuntimePort {
       const event = await this.dependencies.verifier.verify(this.state);
       if (!event || !this.isCurrentWork(version)) return;
       this.applyEvent(event);
+      if (this.state.phase === "exporting") {
+        const runningStep = activeTaskPlanStep(this.state.taskPlan);
+        if (
+          runningStep?.status === "running" &&
+          runningStep.kind === "verification"
+        ) {
+          this.completeRunningTaskPlanStep(
+            runningStep.id,
+            "选中资源已通过来源与完整性验证。",
+            {
+              verifiedResourceIds: this.state.resources
+                .filter((resource) =>
+                  resource.selected && resource.status === "verified"
+                )
+                .map((resource) => resource.id)
+            }
+          );
+        }
+      }
     } catch (error) {
       if (this.isCurrentWork(version)) {
         const resourceId =
@@ -631,6 +1146,15 @@ function isWorkspaceExportOutput(value: unknown): value is WorkspaceExportOutput
     typeof output.reusedExisting === "boolean" &&
     Array.isArray(output.files)
   );
+}
+
+function taskPlanJsonOutput(value: unknown): unknown {
+  try {
+    const encoded = JSON.stringify(value);
+    return encoded === undefined ? null : JSON.parse(encoded) as unknown;
+  } catch {
+    return { unavailable: true };
+  }
 }
 
 export function createMockAgentRuntime(

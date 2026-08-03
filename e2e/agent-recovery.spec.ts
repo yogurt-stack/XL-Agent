@@ -167,6 +167,7 @@ async function expectVisualBaseline(name: string) {
 }
 
 async function approveReplacementPlan() {
+  await confirmReplacementTaskPlan();
   await expect(page.getByText("替代计划 r2 已生成")).toBeVisible();
   await page.getByRole("button", { name: "查看并确认" }).click();
   await expect(page.getByText("计划 r2 已通过严格验证")).toBeVisible();
@@ -174,10 +175,21 @@ async function approveReplacementPlan() {
   await page.getByRole("button", { name: "确认下载计划 r2" }).click();
 }
 
+async function confirmReplacementTaskPlan() {
+  await expect(
+    page.getByRole("heading", { name: "先确认 Agent 对任务的理解" })
+  ).toBeVisible();
+  await expect(page.getByText("Task Plan r2", { exact: true })).toBeVisible();
+  await expect(page.getByText("确认的是处理流程，不是执行权限。"))
+    .toBeVisible();
+  await expectMainPanelAtTop("replacement TaskPlan confirmation");
+  await page.getByRole("button", { name: "确认流程并继续" }).click();
+}
+
 async function openCompletedWorkspace() {
-  await expect(page.getByText("工作区交接", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "工作区" }).click();
   await expect(page.getByRole("heading", { name: "交接包已就绪" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "工作区" }))
+    .toHaveAttribute("aria-current", "page");
   await expect(page.getByText("已验证并真实落盘")).toBeVisible();
   await expectMainPanelAtTop("ready workspace");
   await expect(page.locator("pre.workspace-code-preview")).toContainText(
@@ -374,6 +386,7 @@ test("switches to the trusted fallback and records its provenance", async () => 
   await startTaskAndWaitForFailure();
   await page.getByRole("button", { name: "使用可信替代来源" }).click();
 
+  await confirmReplacementTaskPlan();
   await expect(page.getByText("替代计划 r2 已生成")).toBeVisible();
   await page.getByRole("button", { name: "查看并确认" }).click();
   await expectNoSeriousAccessibilityViolations("replacement plan");

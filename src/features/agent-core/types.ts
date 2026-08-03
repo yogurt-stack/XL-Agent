@@ -185,6 +185,7 @@ export type TaskPlanStepApproval = {
 export type TaskPlanStepResult = {
   reference: string;
   summary: string;
+  output?: unknown;
 };
 
 export type TaskPlanStepProposal = {
@@ -270,6 +271,7 @@ export type TaskPlanValidationIssueCode =
   | "CYCLIC_DEPENDENCY"
   | "UNKNOWN_BINDING_SOURCE"
   | "BINDING_DEPENDENCY_MISSING"
+  | "USER_DECISION_PROTOCOL_INVALID"
   | "TOOL_REQUIRED"
   | "TOOL_NOT_ALLOWED"
   | "TOOL_KIND_MISMATCH"
@@ -929,9 +931,32 @@ export type AgentEvent =
       revision: number;
       confirmedAt: string;
     }
+  | { type: "TASK_PLAN_STEP_INPUT_REQUESTED"; stepId: string; requestedAt: string }
+  | { type: "TASK_PLAN_STEP_STARTED"; stepId: string; startedAt: string }
+  | {
+      type: "TASK_PLAN_STEP_COMPLETED";
+      stepId: string;
+      completedAt: string;
+      result: TaskPlanStepResult;
+      terminalPhase?: Extract<AgentPhase, "result" | "handoff">;
+    }
+  | {
+      type: "TASK_PLAN_STEP_FAILED";
+      stepId: string;
+      failedAt: string;
+      reason: string;
+      replanning?: boolean;
+    }
+  | { type: "TASK_PLAN_STEP_APPROVAL_REQUESTED"; stepId: string; requestedAt: string }
+  | {
+      type: "TASK_PLAN_STEP_AUTO_APPROVED";
+      stepId: string;
+      revision: number;
+      approvedAt: string;
+    }
   | { type: "TASK_REQUIREMENTS_RESOLVED"; requirements: TaskRequirements }
-  | { type: "ANSWER_CLARIFICATION"; questionId: string; answer: string }
-  | { type: "SKIP_CLARIFICATION"; questionId: string }
+  | { type: "ANSWER_CLARIFICATION"; questionId: string; answer: string; answeredAt?: string }
+  | { type: "SKIP_CLARIFICATION"; questionId: string; skippedAt?: string }
   | { type: "PREPARE_GITHUB_REPOSITORY"; fullName: string }
   | { type: "PREPARE_NODE_DEPENDENCIES" }
   | { type: "TOGGLE_NODE_DEPENDENCIES"; selected: boolean }
@@ -942,7 +967,7 @@ export type AgentEvent =
       explanation: string;
     }
   | { type: "TOGGLE_RESOURCE"; resourceId: string; selected: boolean }
-  | { type: "APPROVE_PLAN"; revision: number }
+  | { type: "APPROVE_PLAN"; revision: number; approvedAt?: string }
   | { type: "PAUSE_DOWNLOAD"; resourceId: string }
   | { type: "RESUME_DOWNLOAD"; resourceId: string }
   | {
@@ -958,7 +983,11 @@ export type AgentEvent =
   | { type: "DOWNLOAD_RESUMED"; resourceId: string }
   | { type: "DOWNLOAD_FAILED"; resourceId: string; reason: string }
   | { type: "DOWNLOAD_APPROVAL_EXPIRED"; reason: string }
-  | { type: "RESOLVE_DOWNLOAD_FAILURE"; action: FailureResolutionAction }
+  | {
+      type: "RESOLVE_DOWNLOAD_FAILURE";
+      action: FailureResolutionAction;
+      resolvedAt?: string;
+    }
   | { type: "REPLAN_GENERATED"; strategy: ReplanStrategy }
   | {
       type: "VERIFY_RESOURCES";

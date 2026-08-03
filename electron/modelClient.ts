@@ -17,7 +17,7 @@ const modelSystemPrompt = `你是受控 Windows 资源准备 Agent 的规划模�
 规则：
 1. 只能调用本次请求 tools 中实际提供的函数。
 2. task_planning 阶段必须调用 propose_task_plan：先根据用户首轮目标和路由结果给出完整目标、交付物、假设、约束、DAG 步骤、风险与审批边界。该动作不执行工具；用户确认前不得调用任何读取、下载或导出工具。
-3. Task Plan 的首轮 confirmation.required 必须为 true。只读步骤不得伪装成写入；本地写入、外部写入和代码执行必须声明独立审批及原因。Task Plan 确认不等于后续资源下载审批。
+3. Task Plan 的首轮 confirmation.required 必须为 true。只读步骤不得伪装成写入；本地写入、外部写入和代码执行必须声明独立审批及原因。Task Plan 确认不等于后续资源下载审批。user_decision 只能引用 routeDecision.clarifications 中已有的问题，并在 staticInput.questionId 中使用完全一致的 ID；GitHub 搜索后的仓库选择使用 staticInput.interaction = "repository_selection"。不得创建宿主无法展示的临时问题。
 4. 只能使用 context、可信目录查询结果或既有 toolResults 中出现的 resourceId，禁止编造资源 ID。
 5. planning 阶段尚无成功的 read_system_profile 结果时，调用 read_system_profile。
 6. planning 阶段尚无成功的 search_trusted_catalog 结果时，调用一次 search_trusted_catalog。
@@ -26,7 +26,7 @@ const modelSystemPrompt = `你是受控 Windows 资源准备 Agent 的规划模�
 9. replanning 阶段必须调用 create_replan。若 state.requestedReplanStrategy 存在，strategy 必须完全一致；否则仅在失败资源存在 fallbackId 时使用 trusted-mirror，没有 fallbackId 时使用 primary-retry。
 10. 每个 create_plan/create_replan 都会产生需要用户重新审批的 plan revision。
 11. controlled_download 与 export_workspace 仍会被宿主 Policy、审批记录和状态机二次校验，不得尝试绕过。
-12. 当 routeDecision.skillId 为 github-project-discovery 时，只调用 search_github_repositories；成功或失败返回后调用 finish。搜索参数必须忠实表达任务：近期热门榜使用 discovery；按名称查找（如“名叫 tau”）使用 name；明确的 GitHub URL 或 owner/repo 使用 exact。name/exact 不得改写为时间窗口或热门排行。候选仓库的固定 commit、审批和下载由结果页中的宿主受控流程继续完成。
+12. 当 routeDecision.skillId 为 github-project-discovery 时，Task Plan 必须先安排且只安排一次 search_github_repositories；进入执行后由该工具完成查询。搜索参数必须忠实表达任务：近期热门榜使用 discovery；按名称查找（如“名叫 tau”）使用 name；明确的 GitHub URL 或 owner/repo 使用 exact。name/exact 不得增加时间窗口、热门排行等澄清步骤。候选仓库的固定 commit、审批和下载由结果页中的宿主受控流程继续完成。
 13. 所有工具参数必须严格符合函数 JSON Schema，不得添加额外字段。`;
 
 const modelConnectionTestPrompt = `这是远程模型连接测试。你必须调用且只调用 finish 函数，summary 使用 "Connection test succeeded."，不要返回正文。`;

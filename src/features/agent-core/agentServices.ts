@@ -574,16 +574,32 @@ export class DefaultAgentPolicy implements AgentPolicy {
           (result) => result.tool === "search_github_repositories"
         );
         const expectedInput = githubSearchInputFromState(state);
-        if (
-          state.phase !== "planning" ||
-          state.routeDecision?.skillId !== "github-project-discovery" ||
-          alreadyCalled ||
-          !sameGitHubSearchInput(call.input, expectedInput)
-        ) {
+        if (state.phase !== "planning") {
+          return {
+            outcome: "deny",
+            risk: "high",
+            reason: `GitHub 只读搜索只能在 planning 阶段执行；当前阶段为 ${state.phase}。`
+          };
+        }
+        if (state.routeDecision?.skillId !== "github-project-discovery") {
+          return {
+            outcome: "deny",
+            risk: "high",
+            reason: "当前任务没有路由到 GitHub 项目检索能力。"
+          };
+        }
+        if (alreadyCalled) {
           return {
             outcome: "deny",
             risk: "high",
             reason: "GitHub 只读搜索仅允许在对应检索任务中执行一次。"
+          };
+        }
+        if (!sameGitHubSearchInput(call.input, expectedInput)) {
+          return {
+            outcome: "deny",
+            risk: "high",
+            reason: "GitHub 搜索参数与用户已确认的检索意图不一致。"
           };
         }
         return {

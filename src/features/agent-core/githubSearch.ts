@@ -123,6 +123,7 @@ function explicitRepositoryName(task: string) {
     /github\s*(?:上)?(?:的)?\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_.-]{0,99})\s*(?:项目|仓库|repo(?:sitory)?)/iu,
     /(?:在\s*)?github\s*(?:上|中|里)?\s*(?:搜索|查找|寻找|检索|搜|找)\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_.-]{0,99})/iu,
     /(?:搜索|查找|寻找|检索|搜|找)\s*github\s*(?:上|中|里)?\s*(?:的|for)?\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_.-]{0,99})/iu,
+    /(?:搜索|查找|寻找|检索|搜|找)\s*(?:一个|一下)?\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_.-]{0,99})\s*(?:的)?\s*(?:开源)?(?:项目|仓库|repo(?:sitory)?)/iu,
     /\b(?:search|find|locate)\s+github\s+(?:for\s+)?[“"']?([A-Za-z0-9][A-Za-z0-9_.-]{0,99})/iu
   ];
   const genericCandidates = new Set([
@@ -278,7 +279,52 @@ export function isGitHubRepositorySearchOutput(
 export function latestGitHubRepositorySearchResult(
   state: AgentState
 ): ToolResult | null {
-  return [...state.agentRun.toolResults]
+  const recordedResult = [...state.agentRun.toolResults]
     .reverse()
     .find((result) => result.tool === "search_github_repositories") ?? null;
+  if (recordedResult) return recordedResult;
+
+  // TaskPlan is now the executor's durable source of truth. Older views and
+  // Main-side follow-up actions still consume ToolResult, so reconstruct the
+  // audit result when a restored snapshot only retained the DAG step output.
+  const step = [...(state.taskPlan?.steps ?? [])]
+    .reverse()
+    .find(
+      (candidate) =>
+        candidate.tool === "search_github_repositories" &&
+        (candidate.result !== null || candidate.error !== null)
+    );
+  if (!step) return null;
+
+  const startedAt = step.startedAt ?? state.taskPlan?.createdAt ?? "unknown";
+  const finishedAt =
+    step.completedAt ?? state.taskPlan?.updatedAt ?? startedAt;
+  if (
+    step.status === "completed" &&
+    isGitHubRepositorySearchOutput(step.result?.output)
+  ) {
+    return {
+      callId: `task-plan-r${state.taskPlan?.revision ?? state.revision}-${step.id}`,
+      tool: "search_github_repositories",
+      status: "success",
+      output: step.result.output,
+      startedAt,
+      finishedAt
+    };
+  }
+  if (step.error) {
+    return {
+      callId: `task-plan-r${state.taskPlan?.revision ?? state.revision}-${step.id}`,
+      tool: "search_github_repositories",
+      status: "error",
+      error: {
+        code: "TASK_PLAN_STEP_FAILED",
+        message: step.error,
+        retriable: true
+      },
+      startedAt,
+      finishedAt
+    };
+  }
+  return null;
 }

@@ -8,6 +8,7 @@ import {
   confirmTaskPlan,
   createTaskPlan,
   defaultTaskPlanToolPolicies,
+  extendCompletedTaskPlan,
   getReadyTaskPlanSteps,
   failTaskPlanStep,
   parseTaskPlan,
@@ -15,8 +16,10 @@ import {
   prepareTaskPlanForConfirmation,
   requestTaskPlanStepApproval,
   requestTaskPlanStepInput,
+  resumeTaskPlanStepAfterInput,
   reviseTaskPlan,
   startTaskPlanStep,
+  suspendTaskPlanStepForInput,
   validateTaskPlan
 } from "./taskPlan";
 import type {
@@ -89,6 +92,7 @@ function tauProposal(): TaskPlanProposal {
         kind: "user_decision",
         tool: null,
         dependsOn: ["search-tau"],
+        staticInput: { interaction: "repository_selection" },
         inputBindings: {
           repositories: {
             sourceStepId: "search-tau",
@@ -219,6 +223,22 @@ describe("TaskPlan domain core", () => {
       ]
     });
     expect(parseTaskPlan(plan)).toEqual(plan);
+  });
+
+  it("rejects user decisions that the host cannot render", () => {
+    const plan = createTauPlan();
+    const selection = plan.steps.find(
+      (candidate) => candidate.id === "select-repository"
+    );
+    expect(selection).toBeDefined();
+    selection!.staticInput = {};
+
+    expect(validation(plan).issues).toContainEqual(
+      expect.objectContaining({
+        code: "USER_DECISION_PROTOCOL_INVALID",
+        stepId: "select-repository"
+      })
+    );
   });
 
   it("rejects invalid dependencies, unregistered tools and hidden side effects", () => {
@@ -439,6 +459,59 @@ describe("TaskPlan domain core", () => {
     expect(validation(plan).valid).toBe(true);
   });
 
+  it("suspends and resumes a running resource-plan step for model clarification", () => {
+    let plan = completeSearch(confirmedTauPlan());
+    plan = requestTaskPlanStepInput(
+      plan,
+      "select-repository",
+      timestamps.inputRequested
+    );
+    plan = completeTaskPlanStep(plan, {
+      stepId: "select-repository",
+      completedAt: timestamps.inputCompleted,
+      result: {
+        reference: "user-selection:owner/tau",
+        summary: "用户选择 owner/tau。",
+        output: { fullName: "owner/tau" }
+      }
+    });
+    plan = startTaskPlanStep(
+      plan,
+      "create-resource-plan",
+      timestamps.planStarted
+    );
+
+    const waiting = suspendTaskPlanStepForInput(
+      plan,
+      "create-resource-plan",
+      timestamps.planCompleted
+    );
+    expect(waiting).toMatchObject({
+      status: "waiting_user_input",
+      steps: expect.arrayContaining([
+        expect.objectContaining({
+          id: "create-resource-plan",
+          status: "waiting_user_input"
+        })
+      ])
+    });
+    expect(
+      resumeTaskPlanStepAfterInput(
+        waiting,
+        "create-resource-plan",
+        timestamps.approvalRequested
+      )
+    ).toMatchObject({
+      status: "executing",
+      steps: expect.arrayContaining([
+        expect.objectContaining({
+          id: "create-resource-plan",
+          status: "running"
+        })
+      ])
+    });
+  });
+
   it("creates a new revision, resets confirmation and only preserves unchanged completed steps", () => {
     const searched = completeSearch(confirmedTauPlan());
     const replanning = beginTaskPlanReplanning(
@@ -525,6 +598,39 @@ describe("TaskPlan domain core", () => {
 
     const cancelled = cancelTaskPlan(createTauPlan(), timestamps.replanning);
     expect(cancelled.status).toBe("cancelled");
+    expect(cancelled.steps.every((step) => step.status === "skipped")).toBe(true);
+  });
+
+  it("adds a separately confirmed revision after a completed plan", () => {
+    let completed = confirmedTauPlan();
+    for (const step of completed.steps) {
+      if (step.status === "pending") {
+        step.status = "completed";
+        step.result = {
+          reference: `test:${step.id}`,
+          summary: `${step.title} 已完成。`
+        };
+        step.startedAt = timestamps.searchStarted;
+        step.completedAt = timestamps.downloadCompleted;
+      }
+    }
+    completed.status = "completed";
+    const proposal = tauProposal();
+    proposal.objective = "追加本地下载范围";
+    const extension = extendCompletedTaskPlan(completed, {
+      proposal,
+      reason: "用户在查询完成后选择准备到本地。",
+      extendedAt: timestamps.revised,
+      createdBy: "local-rule"
+    });
+
+    expect(extension).toMatchObject({
+      revision: 2,
+      previousRevision: 1,
+      status: "draft",
+      confirmation: { status: "pending" }
+    });
+    expect(extension.steps.every((step) => step.status === "pending")).toBe(true);
   });
 
   it("accepts only strict JSON-safe planner proposals", () => {

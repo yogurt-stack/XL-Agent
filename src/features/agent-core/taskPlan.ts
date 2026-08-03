@@ -100,7 +100,8 @@ const taskPlanStepSchema = z.object({
   ]),
   result: z.object({
     reference: z.string().trim().min(1).max(500),
-    summary: textSchema
+    summary: textSchema,
+    output: z.json().optional()
   }).strict().nullable(),
   error: textSchema.nullable(),
   startedAt: nullableTimestampSchema,
@@ -181,6 +182,13 @@ export type ReviseTaskPlanInput = {
   preserveCompletedStepIds?: readonly string[];
 };
 
+export type ExtendTaskPlanInput = {
+  proposal: TaskPlanProposal;
+  reason: string;
+  extendedAt: string;
+  createdBy: TaskPlan["createdBy"];
+};
+
 export type TaskPlanOperationErrorCode =
   | "PLAN_INVALID"
   | "PLAN_STATUS_INVALID"
@@ -191,7 +199,8 @@ export type TaskPlanOperationErrorCode =
   | "STEP_APPROVAL_REQUIRED"
   | "STEP_APPROVAL_NOT_REQUIRED"
   | "STEP_STATUS_INVALID"
-  | "STEP_NOT_PRESERVABLE";
+  | "STEP_NOT_PRESERVABLE"
+  | "STEP_INPUT_NOT_PENDING";
 
 export class TaskPlanOperationError extends Error {
   constructor(
@@ -567,6 +576,23 @@ export function validateTaskPlan(
             "BINDING_DEPENDENCY_MISSING",
             `步骤 ${step.id} 使用了 ${binding.sourceStepId} 的输出，但没有依赖该步骤。`,
             { stepId: step.id, dependencyId: binding.sourceStepId }
+          )
+        );
+      }
+    }
+
+    if (step.kind === "user_decision") {
+      const questionId = step.staticInput.questionId;
+      const interaction = step.staticInput.interaction;
+      if (
+        !(typeof questionId === "string" && questionId.trim()) &&
+        interaction !== "repository_selection"
+      ) {
+        issues.push(
+          validationIssue(
+            "USER_DECISION_PROTOCOL_INVALID",
+            `步骤 ${step.id} 没有绑定可展示的澄清问题或仓库选择交互。`,
+            { stepId: step.id }
           )
         );
       }
@@ -958,6 +984,80 @@ export function requestTaskPlanStepInput(
   };
 }
 
+/** 暂停正在运行的资源规划步骤，以接收模型发现的补充输入。 */
+export function suspendTaskPlanStepForInput(
+  plan: TaskPlan,
+  stepId: string,
+  updatedAt: string
+): TaskPlan {
+  if (plan.status !== "executing") {
+    throw new TaskPlanOperationError(
+      "PLAN_STATUS_INVALID",
+      "只有执行中的 Task Plan 才能暂停等待补充输入。"
+    );
+  }
+  const step = plan.steps.find((candidate) => candidate.id === stepId);
+  if (!step) {
+    throw new TaskPlanOperationError(
+      "STEP_NOT_FOUND",
+      `任务计划中不存在步骤 ${stepId}。`
+    );
+  }
+  if (step.status !== "running" || step.kind !== "resource_plan") {
+    throw new TaskPlanOperationError(
+      "STEP_STATUS_INVALID",
+      `步骤 ${stepId} 当前不能暂停等待补充输入。`
+    );
+  }
+  const at = timestampSchema.parse(updatedAt);
+  return {
+    ...clone(plan),
+    status: "waiting_user_input",
+    steps: updatePlanStep(plan, stepId, (candidate) => ({
+      ...candidate,
+      status: "waiting_user_input"
+    })),
+    updatedAt: at
+  };
+}
+
+/** 用户补充输入后恢复先前暂停的资源规划步骤。 */
+export function resumeTaskPlanStepAfterInput(
+  plan: TaskPlan,
+  stepId: string,
+  updatedAt: string
+): TaskPlan {
+  if (plan.status !== "waiting_user_input") {
+    throw new TaskPlanOperationError(
+      "PLAN_STATUS_INVALID",
+      "Task Plan 当前没有等待中的补充输入。"
+    );
+  }
+  const step = plan.steps.find((candidate) => candidate.id === stepId);
+  if (!step) {
+    throw new TaskPlanOperationError(
+      "STEP_NOT_FOUND",
+      `任务计划中不存在步骤 ${stepId}。`
+    );
+  }
+  if (step.status !== "waiting_user_input" || step.kind !== "resource_plan") {
+    throw new TaskPlanOperationError(
+      "STEP_INPUT_NOT_PENDING",
+      `步骤 ${stepId} 当前没有等待模型补充输入。`
+    );
+  }
+  const at = timestampSchema.parse(updatedAt);
+  return {
+    ...clone(plan),
+    status: "executing",
+    steps: updatePlanStep(plan, stepId, (candidate) => ({
+      ...candidate,
+      status: "running"
+    })),
+    updatedAt: at
+  };
+}
+
 export function startTaskPlanStep(
   plan: TaskPlan,
   stepId: string,
@@ -1026,7 +1126,8 @@ export function completeTaskPlanStep(
   const completedAt = timestampSchema.parse(input.completedAt);
   const result = z.object({
     reference: z.string().trim().min(1).max(500),
-    summary: textSchema
+    summary: textSchema,
+    output: z.json().optional()
   }).strict().parse(input.result) as TaskPlanStepResult;
   const steps = updatePlanStep(plan, input.stepId, (candidate) => ({
     ...candidate,
@@ -1212,6 +1313,46 @@ export function reviseTaskPlan(
   }) as TaskPlan;
 }
 
+/** 为已经完成的任务追加一段由用户显式触发的新执行范围。 */
+export function extendCompletedTaskPlan(
+  plan: TaskPlan,
+  input: ExtendTaskPlanInput
+): TaskPlan {
+  if (plan.status !== "completed") {
+    throw new TaskPlanOperationError(
+      "PLAN_STATUS_INVALID",
+      "只有已完成的 Task Plan 才能追加新的执行范围。"
+    );
+  }
+  const proposal = parseTaskPlanProposal(input.proposal);
+  const extendedAt = timestampSchema.parse(input.extendedAt);
+  const reason = textSchema.parse(input.reason);
+  const revision = plan.revision + 1;
+  return taskPlanSchema.parse({
+    schemaVersion: 1,
+    planId: plan.planId,
+    taskId: plan.taskId,
+    revision,
+    previousRevision: plan.revision,
+    revisionReason: reason,
+    objective: proposal.objective,
+    deliverables: proposal.deliverables,
+    assumptions: proposal.assumptions,
+    constraints: proposal.constraints,
+    steps: proposal.steps.map((step) => initializeStep(step, revision)),
+    status: "draft",
+    confirmation: {
+      ...proposal.confirmation,
+      status: proposal.confirmation.required ? "pending" : "not_required",
+      confirmedAt: null,
+      confirmedRevision: proposal.confirmation.required ? null : revision
+    },
+    createdBy: input.createdBy,
+    createdAt: extendedAt,
+    updatedAt: extendedAt
+  }) as TaskPlan;
+}
+
 export function cancelTaskPlan(
   plan: TaskPlan,
   cancelledAt: string
@@ -1225,6 +1366,15 @@ export function cancelTaskPlan(
   return {
     ...clone(plan),
     status: "cancelled",
+    steps: plan.steps.map((step) =>
+      step.status === "completed" || step.status === "failed"
+        ? clone(step)
+        : {
+            ...clone(step),
+            status: "skipped" as const,
+            error: null
+          }
+    ),
     updatedAt: timestampSchema.parse(cancelledAt)
   };
 }

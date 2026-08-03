@@ -112,11 +112,15 @@ describe("agent state machine", () => {
     });
 
     expect(replanning).toMatchObject({
-      phase: "replanning",
+      phase: "waiting_task_plan_confirmation",
       revision: 1,
       replanReason: "required_resource_cancelled",
       requestedReplanStrategy: "trusted-mirror",
-      approvedRevision: null
+      approvedRevision: null,
+      taskPlan: {
+        revision: 2,
+        status: "waiting_confirmation"
+      }
     });
 
     const mismatchedStrategy = transition(replanning, {
@@ -125,7 +129,14 @@ describe("agent state machine", () => {
     });
     expect(mismatchedStrategy).toBe(replanning);
 
-    const replacement = transition(replanning, {
+    const confirmedReplan = transition(replanning, {
+      type: "TASK_PLAN_CONFIRMED",
+      revision: 2,
+      confirmedAt: "2026-08-01T00:00:00.000Z"
+    });
+    expect(confirmedReplan.phase).toBe("replanning");
+
+    const replacement = transition(confirmedReplan, {
       type: "REPLAN_GENERATED",
       strategy: "trusted-mirror"
     });

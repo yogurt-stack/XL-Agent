@@ -349,11 +349,13 @@ function formatRepositoryDate(value: string) {
 function GitHubRepositoryResults({
   state,
   dispatch,
-  onNavigate
+  onNavigate,
+  onRetryLocally
 }: {
   state: AgentState;
   dispatch: Dispatch;
   onNavigate: Navigate;
+  onRetryLocally: () => Promise<AgentState>;
 }) {
   const [preparingRepository, setPreparingRepository] = useState<string | null>(
     null
@@ -365,30 +367,53 @@ function GitHubRepositoryResults({
     isGitHubRepositorySearchOutput(result.output)
       ? result.output
       : null;
+  const unresolvedDecision = state.taskPlan?.steps.find(
+    (step) =>
+      step.status === "waiting_user_input" &&
+      step.kind === "user_decision"
+  );
 
   if (!output) {
+    const planNeedsRecovery = Boolean(unresolvedDecision && !result);
     return (
       <section className="agent-view clarification-view">
         <section className="failure-resolution-panel" role="alert">
           <div className="failure-resolution-heading">
             <span><AlertTriangle size={19} /></span>
             <div>
-              <small>GitHub API Tool</small>
-              <h2>仓库检索未完成</h2>
+              <small>{planNeedsRecovery ? "Task Plan 协议" : "GitHub API Tool"}</small>
+              <h2>{planNeedsRecovery ? "查询尚未开始" : "仓库检索未完成"}</h2>
             </div>
           </div>
-          <p>{result?.error?.message ?? "没有收到可展示的 GitHub API 结果。"}</p>
+          <p>
+            {planNeedsRecovery
+              ? `当前计划停在“${unresolvedDecision?.title}”，但没有绑定可展示的交互；GitHub API 尚未被调用。请使用受控本地规划重新生成流程。`
+              : result?.error?.message ?? "没有收到可展示的 GitHub API 结果。"}
+          </p>
           <div className="failure-actions">
-            <button
-              className="btn btn-primary"
-              type="button"
-              onClick={() => {
-                void dispatch({ type: "RESET" });
-                onNavigate("home");
-              }}
-            >
-              返回任务入口
-            </button>
+            {planNeedsRecovery ? (
+              <button
+                className="btn btn-primary"
+                type="button"
+                onClick={async () => {
+                  onNavigate("clarification");
+                  await onRetryLocally();
+                }}
+              >
+                <RefreshCw size={16} />重新规划并继续
+              </button>
+            ) : (
+              <button
+                className="btn btn-primary"
+                type="button"
+                onClick={() => {
+                  void dispatch({ type: "RESET" });
+                  onNavigate("home");
+                }}
+              >
+                返回任务入口
+              </button>
+            )}
           </div>
         </section>
       </section>
@@ -511,11 +536,13 @@ function GitHubRepositoryResults({
                           (resource) =>
                             resource.github?.fullName === repository.fullName
                         );
-                        if (
-                          nextState.phase === "waiting_approval" &&
-                          prepared
-                        ) {
+                        if (prepared && nextState.phase === "waiting_approval") {
                           onNavigate("plan");
+                        } else if (
+                          prepared &&
+                          nextState.phase === "waiting_task_plan_confirmation"
+                        ) {
+                          onNavigate("clarification");
                         } else {
                           setPreparationError(
                             `未能为 ${repository.fullName} 生成可审批的固定提交计划，请检查操作日志后重试。`
@@ -570,10 +597,12 @@ function GitHubRepositoryResults({
 
 function TaskPlanConfirmationCard({
   state,
-  dispatch
+  dispatch,
+  onNavigate
 }: {
   state: AgentState;
   dispatch: Dispatch;
+  onNavigate?: Navigate;
 }) {
   const [confirming, setConfirming] = useState(false);
   const plan = state.taskPlan;
@@ -650,6 +679,10 @@ function TaskPlanConfirmationCard({
             });
             if (nextState.phase === "waiting_task_plan_confirmation") {
               setConfirming(false);
+            } else if (nextState.phase === "replanning") {
+              onNavigate?.("execution");
+            } else if (nextState.phase === "waiting_approval") {
+              onNavigate?.("plan");
             }
           }}
         >
@@ -660,6 +693,84 @@ function TaskPlanConfirmationCard({
           <XCircle size={16} />取消任务
         </button>
       </div>
+    </section>
+  );
+}
+
+function TaskPlanExecutionPanel({ state }: { state: AgentState }) {
+  const plan = state.taskPlan;
+  if (!plan || plan.confirmation.status !== "confirmed") return null;
+  const completed = plan.steps.filter(
+    (step) => step.status === "completed" || step.status === "skipped"
+  ).length;
+  const active = plan.steps.find((step) =>
+    ["running", "waiting_user_input", "waiting_approval", "failed"].includes(
+      step.status
+    )
+  );
+  const statusLabels = {
+    pending: "待执行",
+    running: "执行中",
+    waiting_user_input: "等待输入",
+    waiting_approval: "等待审批",
+    completed: "已完成",
+    failed: "失败",
+    skipped: "已跳过",
+    blocked: "已阻塞"
+  } as const;
+  return (
+    <section
+      className="agent-panel task-plan-execution-panel"
+      data-testid="task-plan-execution"
+    >
+      <div className="task-plan-execution-heading">
+        <div className="agent-panel-heading">
+          <ListChecks size={17} />
+          <h2>Task Plan r{plan.revision}</h2>
+        </div>
+        <span>{completed}/{plan.steps.length} 步完成</span>
+      </div>
+      <div
+        aria-label="Task Plan 执行进度"
+        aria-valuemax={plan.steps.length}
+        aria-valuemin={0}
+        aria-valuenow={completed}
+        className="progress-track task-plan-progress-track"
+        role="progressbar"
+      >
+        <span style={{ width: `${(completed / plan.steps.length) * 100}%` }} />
+      </div>
+      {active ? (
+        <p className="task-plan-active-copy">
+          当前步骤：<strong>{active.title}</strong>
+          {active.error ? ` · ${active.error}` : ""}
+        </p>
+      ) : null}
+      <ol className="task-plan-execution-steps">
+        {plan.steps.map((step, index) => (
+          <li
+            className={`task-plan-execution-step task-plan-step-${step.status}`}
+            key={step.id}
+          >
+            <span>
+              {step.status === "completed" ? (
+                <CheckCircle2 size={15} />
+              ) : step.status === "failed" ? (
+                <XCircle size={15} />
+              ) : step.status === "running" ? (
+                <Loader2 className="spin" size={15} />
+              ) : (
+                <CircleDot size={15} />
+              )}
+            </span>
+            <div>
+              <strong>{index + 1}. {step.title}</strong>
+              <small>{step.result?.summary ?? step.expectedOutput}</small>
+            </div>
+            <em>{statusLabels[step.status]}</em>
+          </li>
+        ))}
+      </ol>
     </section>
   );
 }
@@ -678,13 +789,14 @@ export function ClarificationView({
   const question = getActiveClarification(state);
   if (!question) {
     if (state.phase === "waiting_task_plan_confirmation") {
-      return <TaskPlanConfirmationCard dispatch={dispatch} state={state} />;
+      return <TaskPlanConfirmationCard dispatch={dispatch} onNavigate={onNavigate} state={state} />;
     }
     if (state.phase === "result") {
       return (
         <GitHubRepositoryResults
           dispatch={dispatch}
           onNavigate={onNavigate}
+          onRetryLocally={onRetryLocally}
           state={state}
         />
       );
@@ -718,7 +830,11 @@ export function ClarificationView({
       );
     }
     if (state.phase === "cancelled") {
+      const failedPlanStep = state.taskPlan?.steps.find(
+        (step) => step.status === "failed"
+      );
       const failureMessage =
+        failedPlanStep?.error ??
         [...state.logs].reverse().find((entry) => entry.level === "error")
           ?.message ?? "模型规划已停止，请选择恢复方式。";
       return (
@@ -727,15 +843,19 @@ export function ClarificationView({
             <div className="failure-resolution-heading">
               <span><AlertTriangle size={19} /></span>
               <div>
-                <small>模型规划已停止</small>
-                <h2>资源计划未能在安全步数内生成</h2>
+                <small>{failedPlanStep ? "Task Plan 执行已停止" : "模型规划已停止"}</small>
+                <h2>
+                  {failedPlanStep
+                    ? `“${failedPlanStep.title}”执行失败`
+                    : "资源计划未能在安全步数内生成"}
+                </h2>
               </div>
             </div>
             <p>{failureMessage}</p>
             <div className="failure-resolution-meta">
-              <span>当前阶段<strong>已停止</strong></span>
+              <span>{failedPlanStep ? "失败步骤" : "当前阶段"}<strong>{failedPlanStep?.id ?? "已停止"}</strong></span>
               <span>模型步骤<strong>{state.agentRun.step}/{state.agentRun.maxSteps}</strong></span>
-              <span>计划 revision<strong>r{state.revision}</strong></span>
+              <span>计划 revision<strong>r{state.taskPlan?.revision ?? state.revision}</strong></span>
             </div>
             <div className="failure-actions">
               <button className="btn btn-primary" type="button" onClick={() => void onRetryLocally()}>
@@ -753,7 +873,9 @@ export function ClarificationView({
               </button>
             </div>
             <small className="failure-resolution-note">
-              本地重试仍会重新生成计划并要求你确认，不会自动下载资源。
+              {failedPlanStep
+                ? "重试会重新生成并再次确认 Task Plan，不会复用失败步骤或自动下载资源。"
+                : "本地重试仍会重新生成计划并要求你确认，不会自动下载资源。"}
             </small>
           </section>
         </section>
@@ -803,7 +925,10 @@ export function ResourcePlanView({
   onSelectLocalResources?: () => Promise<unknown>;
   onSelectWorkspaceRoot?: () => Promise<unknown>;
 }) {
-  if (state.phase === "task_planning" || state.phase === "waiting_task_plan_confirmation" || state.phase === "planning" || state.phase === "routing" || state.phase === "clarifying") return <WaitingPanel title="正在生成计划" copy="先确认 Task Plan，再由系统画像和澄清答案生成资源计划。" />;
+  if (state.phase === "waiting_task_plan_confirmation") {
+    return <TaskPlanConfirmationCard dispatch={dispatch} onNavigate={onNavigate} state={state} />;
+  }
+  if (state.phase === "task_planning" || state.phase === "planning" || state.phase === "routing" || state.phase === "clarifying") return <WaitingPanel title="正在生成计划" copy="先确认 Task Plan，再由系统画像和澄清答案生成资源计划。" />;
   if (state.resources.length === 0) return <WaitingPanel title="尚无资源计划" copy="请先在首页提交任务并完成澄清。" />;
   const waitingApproval = state.phase === "waiting_approval";
   const validationCurrent = state.planValidation?.checkedRevision === state.revision;
@@ -985,7 +1110,8 @@ export function ResourcePlanView({
 }
 
 export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: { state: AgentState; dispatch: Dispatch; onNavigate: Navigate; modelConnection: ModelConnectionState }) {
-  const isWorking = ["downloading", "awaiting_failure_action", "verifying", "exporting", "replanning"].includes(state.phase);
+  const isWorking = ["downloading", "awaiting_failure_action", "verifying", "exporting", "replanning", "waiting_task_plan_confirmation"].includes(state.phase);
+  const handoffComplete = state.phase === "handoff" && state.workspace.ready;
   const failedResource = state.resources.find((resource) => resource.status === "failed");
   const fallbackResource = failedResource?.fallbackId ? catalogById.get(failedResource.fallbackId) : undefined;
   const failedToolResult = [...state.agentRun.toolResults]
@@ -998,8 +1124,9 @@ export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: 
   const toolResultGroups = groupedToolResults(state);
   return (
     <section className="agent-view execution-view">
-      <div className="agent-page-heading"><div><span>执行监控</span><h1>Agent 正在{phaseLabel(state.phase)}</h1></div><button className="btn btn-ghost" disabled={!isWorking} type="button" onClick={() => dispatch({ type: "CANCEL_TASK" })}><XCircle size={16} />取消任务</button></div>
+      <div className="agent-page-heading"><div><span>执行监控</span><h1>{handoffComplete ? "Agent 已完成工作区交接" : `Agent 正在${phaseLabel(state.phase)}`}</h1></div><button className="btn btn-ghost" disabled={!isWorking} type="button" onClick={() => dispatch({ type: "CANCEL_TASK" })}><XCircle size={16} />取消任务</button></div>
       <div className="execution-summary"><div><span>总体进度</span><strong>{overallProgress(state)}%</strong></div><div><span>本轮模型步骤</span><strong>{state.agentRun.step}/{state.agentRun.maxSteps}</strong></div><div><span>模型来源</span><strong>{modelConnection.activeProvider === "remote-llm" ? "远程 LLM" : "本地规则"}</strong></div><div><span>计划修订</span><strong>r{state.revision}</strong></div></div>
+      <TaskPlanExecutionPanel state={state} />
       {modelConnection.status === "fallback_local" && modelConnection.error ? <section className="model-fallback-notice" role="status" aria-live="polite"><WifiOff size={17} /><div><strong>远程模型不可用，任务已切换到本地规则模型</strong><span>{modelConnection.error.message}</span></div><button className="btn btn-ghost" type="button" onClick={() => onNavigate("settings")}>查看连接</button></section> : null}
       {state.phase === "awaiting_failure_action" && failedResource ? (
         <section className="failure-resolution-panel" role="alert" aria-live="assertive">
@@ -1007,17 +1134,19 @@ export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: 
           <p>{failedResource.failureReason ?? "资源下载失败，请选择恢复方式。"}</p>
           <div className="failure-resolution-meta"><span>错误码<strong>{failedToolResult?.error?.code ?? "DOWNLOAD_FAILED"}</strong></span><span>来源<strong>{failedResource.source}</strong></span><span>已尝试<strong>{failedResource.attempts} 次</strong></span></div>
           <div className="failure-actions">
-            <button className="btn btn-secondary" type="button" onClick={() => dispatch({ type: "RESOLVE_DOWNLOAD_FAILURE", action: "primary-retry" })}><RefreshCw size={16} />重试原来源</button>
-            <button className="btn btn-primary" disabled={!fallbackResource} type="button" title={fallbackResource ? `切换到 ${fallbackResource.source}` : "可信目录中没有可用替代来源"} onClick={() => dispatch({ type: "RESOLVE_DOWNLOAD_FAILURE", action: "trusted-mirror" })}><GitBranch size={16} />使用可信替代来源</button>
+            <button className="btn btn-secondary" type="button" onClick={async () => { const nextState = await dispatch({ type: "RESOLVE_DOWNLOAD_FAILURE", action: "primary-retry" }); if (nextState.phase === "waiting_task_plan_confirmation") onNavigate("clarification"); }}><RefreshCw size={16} />重试原来源</button>
+            <button className="btn btn-primary" disabled={!fallbackResource} type="button" title={fallbackResource ? `切换到 ${fallbackResource.source}` : "可信目录中没有可用替代来源"} onClick={async () => { const nextState = await dispatch({ type: "RESOLVE_DOWNLOAD_FAILURE", action: "trusted-mirror" }); if (nextState.phase === "waiting_task_plan_confirmation") onNavigate("clarification"); }}><GitBranch size={16} />使用可信替代来源</button>
             <button className="btn btn-ghost" type="button" onClick={async () => { const nextState = await dispatch({ type: "RESOLVE_DOWNLOAD_FAILURE", action: "delegate-agent-b" }); if (nextState.phase === "handoff" && nextState.agentRun.status === "delegated") onNavigate("workspace"); }}><Bot size={16} />交给 Agent B</button>
           </div>
           <small className="failure-resolution-note">重试或替代来源都会生成新的资源计划，并等待再次确认后执行。</small>
         </section>
       ) : null}
       {state.phase === "replanning" && state.replanReason ? <section className="replan-status-band"><Loader2 className="spin" size={17} /><div><strong>Agent 正在分析失败上下文</strong><span>模型将按用户选择生成新的可信资源计划。</span></div></section> : null}
+      {state.phase === "waiting_task_plan_confirmation" ? <section className="replan-status-band replan-ready"><ListChecks size={17} /><div><strong>Task Plan r{state.taskPlan?.revision} 已根据失败上下文修订</strong><span>确认新的步骤边界后才会重新规划资源，不会沿用旧审批。</span></div><button className="btn btn-primary" type="button" onClick={() => onNavigate("clarification")}><ClipboardCheck size={16} />查看并确认</button></section> : null}
       {state.phase === "waiting_approval" && state.replanReason ? <section className="replan-status-band replan-ready"><ClipboardCheck size={17} /><div><strong>替代计划 r{state.revision} 已生成</strong><span>该 revision 尚未获得执行权限。</span></div><button className="btn btn-primary" type="button" onClick={() => onNavigate("plan")}><ShieldCheck size={16} />查看并确认</button></section> : null}
       {state.phase === "waiting_approval" && !state.replanReason ? <section className="replan-status-band replan-ready"><ShieldCheck size={17} /><div><strong>当前审批已失效</strong><span>必须重新确认计划 r{state.revision} 后才能继续受控执行。</span></div><button className="btn btn-primary" type="button" onClick={() => onNavigate("plan")}>重新确认</button></section> : null}
       {state.phase === "exporting" ? <section className="replan-status-band"><Loader2 className="spin" size={17} /><div><strong>正在原子生成工作区交接包</strong><span>只有目录完整写入后才会标记为可交接。</span></div></section> : null}
+      {handoffComplete ? <section className="replan-status-band replan-ready"><CheckCircle2 size={17} /><div><strong>工作区交接包已就绪</strong><span>{state.workspace.rootPath}</span></div><button className="btn btn-primary" type="button" onClick={() => onNavigate("workspace")}><FolderOpen size={16} />查看工作区</button></section> : null}
       {state.phase === "awaiting_export_retry" ? <section className="failure-resolution-panel" role="alert"><div className="failure-resolution-heading"><span><AlertTriangle size={19} /></span><div><small>工作区导出失败</small><h2>交接包需要重新写入</h2></div></div><p>{state.workspace.exportError}</p><div className="failure-actions"><button className="btn btn-primary" type="button" onClick={() => dispatch({ type: "RETRY_WORKSPACE_EXPORT" })}><RefreshCw size={16} />重试导出</button><button className="btn btn-ghost" type="button" onClick={() => onNavigate("workspace")}><FileCode2 size={16} />查看状态</button></div></section> : null}
       <div className="execution-grid">
         <section className="agent-panel">
@@ -1275,7 +1404,7 @@ export function WorkspaceView({
       previewFile.startsWith("sources/") ||
       previewFile.startsWith("dependencies/")
     ) {
-      setPreview("该条目是已校验下载物。为避免把二进制内容送入 Renderer，请使用“打开本地工作目录”查看。");
+      setPreview("该条目是已校验下载物。为避免把二进制内容送入 Renderer，请使用“打开工作区文件夹”查看。");
       return () => {
         active = false;
       };
@@ -1611,7 +1740,7 @@ export function WorkspaceView({
       ) : null}
       {state.agentB.status === "failed" ? <section className="failure-resolution-panel" role="alert"><p>{state.agentB.error}</p></section> : null}
       {state.workspace.exportStatus === "failed" ? <section className="failure-resolution-panel" role="alert"><p>{state.workspace.exportError}</p><button className="btn btn-primary" type="button" onClick={() => dispatch({ type: "RETRY_WORKSPACE_EXPORT" })}><RefreshCw size={16} />重试导出</button></section> : null}
-      <div className="workspace-agent-grid"><section className="agent-panel"><div className="agent-panel-heading"><FileCode2 size={17} /><h2>文件清单</h2></div><div className="workspace-file-buttons">{state.workspace.files.map((file) => { const record = state.workspace.fileRecords.find((item) => item.relativePath === file); return <button className={previewFile === file ? "file-selected" : ""} key={file} type="button" onClick={() => setPreviewFile(file)}>{file === "resource-manifest.json" ? <FileJson2 size={15} /> : <FileText size={15} />}{file}{record ? <small>{record.bytesWritten} B</small> : null}</button>; })}</div></section><section className="agent-panel"><div className="agent-panel-heading"><FileText size={17} /><h2>{previewFile} {state.workspace.ready ? "真实文件" : "预览"}</h2></div>{selectedFileRecord ? <small className="agent-empty-copy">SHA256 {selectedFileRecord.sha256}</small> : null}<pre aria-label={`${previewFile} 内容`} className="workspace-code-preview" tabIndex={0}>{preview}</pre></section><section className="agent-panel"><div className="agent-panel-heading"><Bot size={17} /><h2>Agent 交接面板</h2></div><div className="handoff-list"><span><strong>目标</strong>{state.task || "尚未输入任务"}</span><span><strong>资源状态</strong>{state.workspace.ready ? "已验证并真实落盘" : "仍有资源或导出未完成"}</span><span><strong>缺失项</strong>{missing.length ? missing.map((resource) => resource.name).join("、") : "无"}</span><span><strong>下一步</strong>{state.workspace.nextAction}</span></div><div className="failure-actions"><button className="btn btn-ghost" disabled={!state.workspace.ready} type="button" onClick={() => void onOpenWorkspace()}><FolderOpen size={16} />打开本地工作目录</button><button className="btn btn-ghost" data-testid="run-agent-b" disabled={state.workspace.manifestRevision <= 0 || state.agentB.status === "running"} title="只授予当前 task、plan revision 与 inspect_workspace 权限" type="button" onClick={() => void dispatch({ type: "RUN_AGENT_B" })}><Bot size={16} />{state.agentB.status === "running" ? "检查中" : "运行 Agent B"}</button>{canPrepareNodeDependencies ? <button className="btn btn-primary" type="button" onClick={async () => { const nextState = await dispatch({ type: "PREPARE_NODE_DEPENDENCIES" }); if (nextState.phase === "waiting_approval") onNavigate("plan"); }}><PackageCheck size={16} />准备 npm 离线依赖</button> : null}</div></section></div>
+      <div className="workspace-agent-grid"><section className="agent-panel"><div className="agent-panel-heading"><FileCode2 size={17} /><h2>文件清单</h2></div><div className="workspace-file-buttons">{state.workspace.files.map((file) => { const record = state.workspace.fileRecords.find((item) => item.relativePath === file); return <button className={previewFile === file ? "file-selected" : ""} key={file} type="button" onClick={() => setPreviewFile(file)}>{file === "resource-manifest.json" ? <FileJson2 size={15} /> : <FileText size={15} />}{file}{record ? <small>{record.bytesWritten} B</small> : null}</button>; })}</div></section><section className="agent-panel"><div className="agent-panel-heading"><FileText size={17} /><h2>{previewFile} {state.workspace.ready ? "真实文件" : "预览"}</h2></div>{selectedFileRecord ? <small className="agent-empty-copy">SHA256 {selectedFileRecord.sha256}</small> : null}<pre aria-label={`${previewFile} 内容`} className="workspace-code-preview" tabIndex={0}>{preview}</pre></section><section className="agent-panel"><div className="agent-panel-heading"><Bot size={17} /><h2>Agent 交接面板</h2></div><div className="handoff-list"><span><strong>目标</strong>{state.task || "尚未输入任务"}</span><span><strong>资源状态</strong>{state.workspace.ready ? "已验证并真实落盘" : "仍有资源或导出未完成"}</span><span><strong>缺失项</strong>{missing.length ? missing.map((resource) => resource.name).join("、") : "无"}</span><span><strong>下一步</strong>{state.workspace.nextAction}</span></div><div className="failure-actions"><button className="btn btn-ghost" disabled={!state.workspace.ready} type="button" onClick={() => void onOpenWorkspace()}><FolderOpen size={16} />打开工作区文件夹</button><button className="btn btn-ghost" data-testid="run-agent-b" disabled={state.workspace.manifestRevision <= 0 || state.agentB.status === "running"} title="只授予当前 task、plan revision 与 inspect_workspace 权限" type="button" onClick={() => void dispatch({ type: "RUN_AGENT_B" })}><Bot size={16} />{state.agentB.status === "running" ? "检查中" : "运行 Agent B"}</button>{canPrepareNodeDependencies ? <button className="btn btn-primary" type="button" onClick={async () => { const nextState = await dispatch({ type: "PREPARE_NODE_DEPENDENCIES" }); if (nextState.phase === "waiting_approval") onNavigate("plan"); else if (nextState.phase === "waiting_task_plan_confirmation") onNavigate("clarification"); }}><PackageCheck size={16} />准备 npm 离线依赖</button> : null}</div></section></div>
     </section>
   );
 }

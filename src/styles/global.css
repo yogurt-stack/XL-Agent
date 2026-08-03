@@ -2111,6 +2111,106 @@ textarea:focus-visible {
   display: block;
 }
 
+.task-plan-execution-panel {
+  margin-top: 16px;
+}
+
+.task-plan-execution-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.task-plan-execution-heading > span,
+.task-plan-active-copy,
+.task-plan-execution-step small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-plan-progress-track {
+  margin-top: 12px;
+}
+
+.task-plan-active-copy {
+  margin: 10px 0 0;
+}
+
+.task-plan-active-copy strong {
+  color: #e6f1fb;
+}
+
+.task-plan-execution-steps {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 13px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task-plan-execution-step {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid rgb(255 255 255 / 7%);
+  border-radius: 6px;
+  background: rgb(11 19 31 / 36%);
+  padding: 9px 10px;
+}
+
+.task-plan-execution-step > span {
+  display: grid;
+  color: var(--subtle);
+  place-items: center;
+}
+
+.task-plan-execution-step strong,
+.task-plan-execution-step small {
+  display: block;
+}
+
+.task-plan-execution-step strong {
+  color: #dfeaf5;
+  font-size: 12px;
+}
+
+.task-plan-execution-step small {
+  overflow: hidden;
+  margin-top: 3px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-plan-execution-step em {
+  color: var(--subtle);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.task-plan-step-completed > span,
+.task-plan-step-completed > em {
+  color: #70d8ba;
+}
+
+.task-plan-step-running > span,
+.task-plan-step-running > em,
+.task-plan-step-waiting_user_input > em,
+.task-plan-step-waiting_approval > em {
+  color: var(--cyan);
+}
+
+.task-plan-step-failed {
+  border-color: rgb(243 109 116 / 28%);
+}
+
+.task-plan-step-failed > span,
+.task-plan-step-failed > em {
+  color: #ff9ca3;
+}
+
 .execution-summary span {
   color: var(--subtle);
   font-size: 12px;
@@ -2374,7 +2474,9 @@ textarea:focus-visible {
 
 .github-plan-inspection {
   display: grid;
+  grid-column: 2;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 0;
   overflow: hidden;
   margin-top: 10px;
   border: 1px solid rgb(33 196 217 / 16%);
@@ -3898,6 +4000,10 @@ textarea:focus-visible {
 
   .execution-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .task-plan-execution-steps {
+    grid-template-columns: 1fr;
   }
 
   .failure-resolution-meta {

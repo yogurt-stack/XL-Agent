@@ -11,7 +11,10 @@ import {
 import { trustedCatalog } from "./catalog";
 import { createInitialAgentState, transition } from "./machine";
 import { LocalRuleModelRuntime } from "./localRuleModel";
-import { githubSearchInputFromState } from "./githubSearch";
+import {
+  githubSearchInputFromState,
+  latestGitHubRepositorySearchResult
+} from "./githubSearch";
 import { FixedWindowsPlanner, MockVerifier } from "./mockServices";
 import { ExtensibleAgentRouter } from "./router";
 import { AgentRuntime } from "./runtime";
@@ -140,6 +143,17 @@ describe("extensible routing and registries", () => {
         input: { mode: "name", query: "tau", limit: 10 }
       }
     });
+
+    const conversational = submitted(
+      "帮我在 GitHub 上找一个 tau 的开源项目"
+    );
+    const conversationalRoute = router.route(conversational);
+    expect(conversationalRoute?.decision.clarifications).toEqual([]);
+    expect(
+      githubSearchInputFromState(
+        transition(conversational, conversationalRoute!)
+      )
+    ).toEqual({ mode: "name", query: "tau", limit: 10 });
   });
 
   it("routes a GitHub repository URL as an exact lookup without clarifications", () => {
@@ -157,6 +171,152 @@ describe("extensible routing and registries", () => {
       mode: "exact",
       fullName: "openai/tau",
       limit: 1
+    });
+  });
+
+  it("falls back when a remote GitHub plan invents an unrenderable decision", async () => {
+    const jobs: Array<() => void | Promise<void>> = [];
+    const scheduler: AgentScheduler = {
+      schedule(job) {
+        jobs.push(job);
+        return () => undefined;
+      }
+    };
+    const runtime = new AgentRuntime({
+      router: new ExtensibleAgentRouter(),
+      planner: new FixedWindowsPlanner(),
+      verifier: new MockVerifier(),
+      scheduler,
+      model: {
+        async decide(context) {
+          return {
+            decisionId: "remote-invalid-github-plan",
+            provider: "remote-llm" as const,
+            model: "remote-test",
+            explanation: "错误地增加热门榜参数。",
+            action: {
+              actionId: "remote-invalid-github-plan-action",
+              type: "propose_task_plan" as const,
+              explanation: "先询问不相关参数。",
+              proposal: {
+                objective: context.state.task,
+                deliverables: ["tau 仓库列表"],
+                assumptions: [],
+                constraints: ["只读查询"],
+                steps: [{
+                  id: "clarify-search-params",
+                  title: "确认搜索参数",
+                  description: "询问时间窗口和排序指标。",
+                  kind: "user_decision" as const,
+                  tool: null,
+                  dependsOn: [],
+                  staticInput: {},
+                  inputBindings: {},
+                  expectedOutput: "时间窗口与排序指标",
+                  risk: "read_only" as const,
+                  approval: { required: false, reason: null }
+                }, {
+                  id: "search-tau-repos",
+                  title: "搜索 tau",
+                  description: "使用 GitHub API 搜索。",
+                  kind: "read_tool" as const,
+                  tool: "search_github_repositories",
+                  dependsOn: ["clarify-search-params"],
+                  staticInput: { query: "tau", searchMode: "name" },
+                  inputBindings: {},
+                  expectedOutput: "候选仓库",
+                  risk: "read_only" as const,
+                  approval: { required: false, reason: null }
+                }, {
+                  id: "present-results",
+                  title: "展示结果",
+                  description: "向用户展示候选仓库。",
+                  kind: "handoff" as const,
+                  tool: null,
+                  dependsOn: ["search-tau-repos"],
+                  staticInput: {},
+                  inputBindings: {},
+                  expectedOutput: "仓库列表",
+                  risk: "read_only" as const,
+                  approval: { required: false, reason: null }
+                }],
+                confirmation: { required: true, reason: "确认查询流程。" }
+              }
+            }
+          };
+        }
+      },
+      tools: new InMemoryAgentToolExecutor(),
+      policy: new DefaultAgentPolicy(),
+      stepDelayMs: 0,
+      createTaskId: () => "github-invalid-plan-fallback"
+    });
+
+    runtime.start();
+    runtime.dispatch({
+      type: "SUBMIT_TASK",
+      task: "帮我在 GitHub 上找一个名叫 tau 的项目"
+    });
+    await jobs.shift()?.();
+    await jobs.shift()?.();
+
+    expect(runtime.getState()).toMatchObject({
+      phase: "waiting_task_plan_confirmation",
+      taskPlan: {
+        createdBy: "local-rule",
+        steps: [{
+          id: "search-github",
+          tool: "search_github_repositories",
+          staticInput: { mode: "name", query: "tau", limit: 10 }
+        }, {
+          id: "present-github-results",
+          kind: "handoff"
+        }]
+      }
+    });
+  });
+
+  it("recovers a GitHub result from the durable TaskPlan step output", () => {
+    const router = new ExtensibleAgentRouter();
+    const initial = submitted("帮我找一个 GitHub 上名叫 tau 的项目");
+    const taskPlanning = transition(initial, router.route(initial)!);
+    const proposed = confirmTaskPlanForTest(taskPlanning);
+    const taskPlan = structuredClone(proposed.taskPlan!);
+    const searchStep = taskPlan.steps.find(
+      (step) => step.tool === "search_github_repositories"
+    )!;
+    searchStep.status = "completed";
+    searchStep.startedAt = "2026-08-03T06:30:13.000Z";
+    searchStep.completedAt = "2026-08-03T06:30:14.000Z";
+    searchStep.result = {
+      reference: "task-plan-step:search-github",
+      summary: "GitHub 查询完成。",
+      output: {
+        criteria: {
+          mode: "name",
+          query: "tau",
+          match: "repository-name",
+          order: "best-match",
+          licenseRequired: true
+        },
+        repositories: [],
+        totalCount: 0,
+        incompleteResults: false,
+        fetchedAt: "2026-08-03T06:30:14.000Z",
+        authenticated: false,
+        rateLimit: { remaining: 9, resetAt: null }
+      }
+    };
+    const restored = {
+      ...proposed,
+      taskPlan,
+      agentRun: { ...proposed.agentRun, toolResults: [] }
+    };
+
+    expect(latestGitHubRepositorySearchResult(restored)).toMatchObject({
+      tool: "search_github_repositories",
+      status: "success",
+      output: { criteria: { mode: "name", query: "tau" } }
     });
   });
 
@@ -372,6 +532,28 @@ describe("extensible routing and registries", () => {
     await jobs.shift()?.();
     expect(runtime.getState().phase).toBe("waiting_task_plan_confirmation");
     runtime.dispatch({ type: "CONFIRM_TASK_PLAN", revision: 1 });
+    expect(runtime.getState()).toMatchObject({
+      phase: "clarifying",
+      taskPlan: {
+        steps: [
+          expect.objectContaining({
+            id: "clarify-github-1",
+            status: "waiting_user_input",
+            staticInput: expect.objectContaining({
+              questionId: "github-created-window"
+            })
+          }),
+          expect.objectContaining({ id: "clarify-github-2", status: "pending" }),
+          expect.objectContaining({
+            id: "search-github",
+            status: "pending",
+            dependsOn: ["clarify-github-2"]
+          }),
+          expect.objectContaining({ id: "present-github-results", status: "pending" })
+        ]
+      }
+    });
+    expect(jobs).toHaveLength(0);
     runtime.dispatch({
       type: "ANSWER_CLARIFICATION",
       questionId: "github-created-window",
@@ -404,6 +586,86 @@ describe("extensible routing and registries", () => {
         status: "success"
       })
     ]);
+  });
+
+  it("executes the conversational tau lookup exactly once through the TaskPlan executor", async () => {
+    const jobs: Array<() => void | Promise<void>> = [];
+    const calls: unknown[] = [];
+    const scheduler: AgentScheduler = {
+      schedule(task) {
+        jobs.push(task);
+        return () => undefined;
+      }
+    };
+    const tools = new InMemoryAgentToolExecutor(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async (input) => {
+        calls.push(input);
+        if (input.mode !== "name") {
+          throw new Error("Expected repository-name search input.");
+        }
+        return {
+          ok: true,
+          output: {
+            criteria: {
+              mode: "name" as const,
+              query: input.query,
+              match: "repository-name" as const,
+              order: "best-match" as const,
+              licenseRequired: true as const
+            },
+            repositories: [],
+            totalCount: 0,
+            incompleteResults: false,
+            fetchedAt: "2026-08-03T06:50:00.000Z",
+            authenticated: false,
+            rateLimit: { remaining: 9, resetAt: null }
+          }
+        };
+      }
+    );
+    const runtime = new AgentRuntime({
+      router: new ExtensibleAgentRouter(),
+      planner: new FixedWindowsPlanner(),
+      verifier: new MockVerifier(),
+      scheduler,
+      model: new LocalRuleModelRuntime(),
+      tools,
+      policy: new DefaultAgentPolicy(),
+      stepDelayMs: 0,
+      createTaskId: () => "github-conversational-tau"
+    });
+
+    runtime.start();
+    runtime.dispatch({
+      type: "SUBMIT_TASK",
+      task: "帮我在 GitHub 上找一个 tau 的开源项目"
+    });
+    await jobs.shift()?.();
+    await jobs.shift()?.();
+    expect(runtime.getState().phase).toBe("waiting_task_plan_confirmation");
+    runtime.dispatch({ type: "CONFIRM_TASK_PLAN", revision: 1 });
+
+    for (
+      let step = 0;
+      step < 10 && runtime.getState().phase !== "result";
+      step += 1
+    ) {
+      const job = jobs.shift();
+      if (!job) throw new Error(`Runtime stalled at ${runtime.getState().phase}.`);
+      await job();
+    }
+
+    expect(runtime.getState()).toMatchObject({
+      phase: "result",
+      taskPlan: { status: "completed" },
+      agentRun: { status: "complete" }
+    });
+    expect(calls).toEqual([{ mode: "name", query: "tau", limit: 10 }]);
+    expect(runtime.getState().agentRun.toolResults).toHaveLength(1);
   });
 
   it("resolves trusted source metadata and a matching workspace template", () => {

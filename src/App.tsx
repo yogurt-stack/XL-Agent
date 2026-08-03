@@ -34,6 +34,18 @@ export function App() {
   const [activeView, setActiveView] = useState<AppView>("home");
   const historyState = useTaskHistory(activeView === "history");
   const mainPanelRef = useRef<HTMLElement>(null);
+  const previousHandoffReadyRef = useRef(false);
+
+  const handoffReady =
+    state.phase === "handoff" && state.workspace.ready;
+
+  useEffect(() => {
+    const becameReady = handoffReady && !previousHandoffReadyRef.current;
+    previousHandoffReadyRef.current = handoffReady;
+    if (becameReady && activeView === "execution") {
+      setActiveView("workspace");
+    }
+  }, [activeView, handoffReady]);
 
   useEffect(() => {
     const mainPanel = mainPanelRef.current;
