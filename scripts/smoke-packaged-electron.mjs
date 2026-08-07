@@ -113,6 +113,7 @@ try {
   await page.getByRole("button", { name: "确认下载计划 r2" }).click();
 
   await page
+    .getByRole("banner")
     .getByText("工作区交接", { exact: true })
     .waitFor({ timeout: 60_000 });
   await page

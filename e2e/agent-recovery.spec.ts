@@ -245,7 +245,22 @@ async function openCompletedWorkspace() {
     expect(manifest.handoff.files).toContain(resource.artifact!.relativePath);
   }
   expect(JSON.stringify(manifest)).not.toContain("tempFilePath");
-  expect(JSON.parse(await page.locator("pre.workspace-code-preview").innerText())).toEqual(manifest);
+  await expect
+    .poll(
+      async () => {
+        const previewText = await page.locator("pre.workspace-code-preview").innerText();
+        try {
+          return JSON.parse(previewText);
+        } catch {
+          return null;
+        }
+      },
+      {
+        message: "workspace manifest preview should finish loading",
+        timeout: 30_000
+      }
+    )
+    .toEqual(manifest);
   return manifest;
 }
 
