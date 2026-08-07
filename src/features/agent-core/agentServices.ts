@@ -1,5 +1,9 @@
 import { getTrustedCatalogStatus } from "./catalog";
 import { parseAgentToolCall } from "./agentSchemas";
+import {
+  githubSearchInputFromState,
+  sameGitHubSearchInput
+} from "./githubSearch";
 import type { AgentPolicy, AgentToolExecutor } from "./interfaces";
 import { createSystemProfileToolOutput } from "./systemProfile";
 import { resourceIdsForTask } from "./taskRequirements";
@@ -13,6 +17,8 @@ import type {
   AgentToolCall,
   ControlledDownloadOutput,
   ControlledDownloadResult,
+  GitHubRepositorySearchInput,
+  GitHubRepositorySearchResult,
   PolicyDecision,
   SimulatedDownloadOutput,
   SystemProfileToolOutput,
@@ -31,6 +37,9 @@ export type WorkspaceExportRunner = (request: {
   taskId: string;
   revision: number;
 }) => Promise<WorkspaceExportResult>;
+export type GitHubRepositorySearchRunner = (
+  input: GitHubRepositorySearchInput
+) => Promise<GitHubRepositorySearchResult>;
 
 const simulatedWorkspaceFiles = [
   "README.md",
@@ -131,7 +140,12 @@ function isValidControlledDownloadOutput(
     output.bytesWritten >= 0 &&
     output.bytesWritten <= resource.download.maxSizeMb * 1024 * 1024 &&
     typeof output.sha256 === "string" &&
-    output.sha256.toLowerCase() === resource.download.expectedSha256.toLowerCase() &&
+    /^[a-f0-9]{64}$/i.test(output.sha256) &&
+    (resource.download.expectedSha256 === null
+      ? resource.download.digestPolicy === "record-after-download" ||
+        resource.download.digestPolicy === "lockfile-integrity"
+      : output.sha256.toLowerCase() ===
+        resource.download.expectedSha256.toLowerCase()) &&
     typeof output.tempFilePath === "string" &&
     output.tempFilePath.length > 0 &&
     typeof output.elapsedMs === "number" &&
@@ -215,11 +229,13 @@ export class InMemoryAgentToolExecutor implements AgentToolExecutor {
     private readonly workspaceExport: WorkspaceExportRunner | undefined =
       controlledDownload ? undefined : simulatedWorkspaceExport,
     private readonly sourceProvider: SourceProvider =
-      new TrustedCatalogSourceProvider()
+      new TrustedCatalogSourceProvider(),
+    private readonly githubRepositorySearch?: GitHubRepositorySearchRunner
   ) {
     for (const name of [
       "read_system_profile",
       "search_trusted_catalog",
+      "search_github_repositories",
       "simulate_download",
       "controlled_download",
       "export_workspace"
@@ -276,6 +292,51 @@ export class InMemoryAgentToolExecutor implements AgentToolExecutor {
           : this.sourceProvider.search({ query: call.input.query })
       ).filter((resource) => resource.sourceTrust !== "trusted-mirror");
       return successResult(call, state, resources);
+    }
+
+    if (call.name === "search_github_repositories") {
+      if (
+        state.phase !== "planning" ||
+        state.routeDecision?.skillId !== "github-project-discovery"
+      ) {
+        return errorResult(
+          call,
+          state,
+          "GITHUB_SEARCH_NOT_AUTHORIZED",
+          "GitHub 仓库搜索只能在 GitHub 项目检索任务的 planning 阶段执行。",
+          false
+        );
+      }
+      if (!this.githubRepositorySearch) {
+        return errorResult(
+          call,
+          state,
+          "GITHUB_SEARCH_UNAVAILABLE",
+          "当前运行环境没有提供 GitHub Repository Search 桥接。",
+          false
+        );
+      }
+      try {
+        const result = await this.githubRepositorySearch(call.input);
+        if (result.ok === false) {
+          return errorResult(
+            call,
+            state,
+            result.error.code,
+            result.error.message,
+            result.error.retriable
+          );
+        }
+        return successResult(call, state, result.output);
+      } catch {
+        return errorResult(
+          call,
+          state,
+          "GITHUB_SEARCH_BRIDGE_ERROR",
+          "GitHub Repository Search 桥接调用失败。",
+          true
+        );
+      }
     }
 
     if (call.name === "controlled_download") {
@@ -446,7 +507,30 @@ export class InMemoryAgentToolExecutor implements AgentToolExecutor {
 /** 根据动作风险决定直接允许、要求用户审批或拒绝。 */
 export class DefaultAgentPolicy implements AgentPolicy {
   evaluate(action: AgentAction, state: AgentState): PolicyDecision {
+    if (action.type === "propose_task_plan") {
+      if (state.phase !== "task_planning" || state.taskPlan !== null) {
+        return {
+          outcome: "deny",
+          risk: "medium",
+          reason: "首轮 Task Plan 只能在路由完成后的 task_planning 阶段提出一次。"
+        };
+      }
+      return {
+        outcome: "require_approval",
+        risk: "medium",
+        reason: "Task Plan 会决定后续流程顺序，必须先由用户确认；该确认不授予工具写权限。",
+        approvalId: "task-plan-r1"
+      };
+    }
+
     if (action.type === "create_plan") {
+      if (state.routeDecision?.skillId === "github-project-discovery") {
+        return {
+          outcome: "deny",
+          risk: "high",
+          reason: "GitHub 项目检索是只读结果任务，禁止创建下载资源计划。"
+        };
+      }
       return {
         outcome: "require_approval",
         risk: "medium",
@@ -482,6 +566,46 @@ export class DefaultAgentPolicy implements AgentPolicy {
           outcome: "allow",
           risk: "low",
           reason: "只读工具可以自动执行。"
+        };
+      }
+
+      if (call.name === "search_github_repositories") {
+        const alreadyCalled = state.agentRun.toolResults.some(
+          (result) => result.tool === "search_github_repositories"
+        );
+        const expectedInput = githubSearchInputFromState(state);
+        if (state.phase !== "planning") {
+          return {
+            outcome: "deny",
+            risk: "high",
+            reason: `GitHub 只读搜索只能在 planning 阶段执行；当前阶段为 ${state.phase}。`
+          };
+        }
+        if (state.routeDecision?.skillId !== "github-project-discovery") {
+          return {
+            outcome: "deny",
+            risk: "high",
+            reason: "当前任务没有路由到 GitHub 项目检索能力。"
+          };
+        }
+        if (alreadyCalled) {
+          return {
+            outcome: "deny",
+            risk: "high",
+            reason: "GitHub 只读搜索仅允许在对应检索任务中执行一次。"
+          };
+        }
+        if (!sameGitHubSearchInput(call.input, expectedInput)) {
+          return {
+            outcome: "deny",
+            risk: "high",
+            reason: "GitHub 搜索参数与用户已确认的检索意图不一致。"
+          };
+        }
+        return {
+          outcome: "allow",
+          risk: "low",
+          reason: "GitHub Repository Search 是固定主机上的只读公开数据查询。"
         };
       }
 
@@ -541,6 +665,20 @@ export class DefaultAgentPolicy implements AgentPolicy {
         outcome: "allow",
         risk: "low",
         reason: "该资源已经通过当前 revision 的用户审批。"
+      };
+    }
+
+    if (
+      action.type === "finish" &&
+      state.routeDecision?.skillId === "github-project-discovery" &&
+      !state.agentRun.toolResults.some(
+        (result) => result.tool === "search_github_repositories"
+      )
+    ) {
+      return {
+        outcome: "deny",
+        risk: "medium",
+        reason: "GitHub 项目检索尚未执行 API Tool，不能提前结束。"
       };
     }
 

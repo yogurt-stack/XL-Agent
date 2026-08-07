@@ -76,6 +76,24 @@ contextBridge.exposeInMainWorld("xunleiAgent", {
     ipcRenderer.invoke("agent:retryTaskLocally") as Promise<AgentRuntimeSnapshotResult>,
   testModelConnection: () =>
     ipcRenderer.invoke("agent:testModelConnection") as Promise<AgentRuntimeSnapshotResult>,
+  resetDemoData: () =>
+    ipcRenderer.invoke("agent:resetDemoData", {
+      confirmation: "RESET_DEMO_DATA"
+    }) as Promise<
+      | {
+          ok: true;
+          snapshot: AgentRuntimeSnapshot;
+          reset: {
+            resetAt: string;
+            removedRecords: number;
+            cleanupWarning: string | null;
+          };
+        }
+      | {
+          ok: false;
+          error: { code: string; message: string; retriable: boolean };
+        }
+    >,
   onAgentRuntimeSnapshot: (listener: (snapshot: AgentRuntimeSnapshot) => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, snapshot: AgentRuntimeSnapshot) => {
       listener(snapshot);
@@ -89,6 +107,66 @@ contextBridge.exposeInMainWorld("xunleiAgent", {
     ipcRenderer.invoke("agent:getTaskHistoryDetail", { taskId }) as Promise<TaskHistoryDetailResult>,
   flushTaskPersistence: () =>
     ipcRenderer.invoke("agent:flushTaskPersistence") as Promise<{ ok: true }>,
+  selectLocalResources: () =>
+    ipcRenderer.invoke("agent:selectLocalResources") as Promise<
+      | {
+          ok: true;
+          snapshot: AgentRuntimeSnapshot;
+          imported: number;
+        }
+      | {
+          ok: false;
+          error: { code: string; message: string; retriable: boolean };
+        }
+    >,
+  selectLocalRepository: () =>
+    ipcRenderer.invoke("agent:selectLocalRepository") as Promise<
+      | {
+          ok: true;
+          snapshot: AgentRuntimeSnapshot;
+          imported: boolean;
+        }
+      | {
+          ok: false;
+          error: { code: string; message: string; retriable: boolean };
+        }
+    >,
+  prepareGitHubPublish: (input: {
+    repositoryName: string;
+    visibility: "private" | "public";
+    branch?: string;
+    commitMessage?: string;
+  }) =>
+    ipcRenderer.invoke("agent:prepareGitHubPublish", input) as Promise<
+      | { ok: true; snapshot: AgentRuntimeSnapshot }
+      | {
+          ok: false;
+          error: { code: string; message: string; retriable: boolean };
+        }
+    >,
+  approveGitHubPublish: (input: {
+    publishId: string;
+    planSha256: string;
+  }) =>
+    ipcRenderer.invoke("agent:approveGitHubPublish", input) as Promise<
+      | { ok: true; snapshot: AgentRuntimeSnapshot }
+      | {
+          ok: false;
+          error: { code: string; message: string; retriable: boolean };
+        }
+    >,
+  selectWorkspaceRoot: () =>
+    ipcRenderer.invoke("agent:selectWorkspaceRoot") as Promise<
+      | {
+          ok: true;
+          snapshot: AgentRuntimeSnapshot;
+          selected: boolean;
+        }
+      | {
+          ok: false;
+          error: { code: string; message: string; retriable: boolean };
+        }
+    >,
   readWorkspaceFile: (request: {
     taskId: string;
     revision: number;

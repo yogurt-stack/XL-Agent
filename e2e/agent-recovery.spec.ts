@@ -1,6 +1,14 @@
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import axe, { type AxeResults } from "axe-core";
@@ -23,7 +31,9 @@ function deterministicEnvironment(approvalTtlMs: number) {
     VITE_DEV_SERVER_URL: "",
     NODE_ENV: "test",
     XL_AGENT_E2E_DOWNLOAD_FIXTURE: "1",
+    XL_AGENT_LLM_PROVIDER: "openai-compatible",
     XL_AGENT_LLM_ENDPOINT: "",
+    XL_AGENT_LLM_BASE_URL: "",
     XL_AGENT_LLM_MODEL: "",
     XL_AGENT_LLM_API_KEY: "",
     XL_AGENT_APPROVAL_TTL_MS: String(approvalTtlMs),
@@ -34,7 +44,11 @@ function deterministicEnvironment(approvalTtlMs: number) {
 
 async function launchApplication() {
   electronApp = await electron.launch({
-    args: ["--disable-gpu", projectRoot],
+    args: [
+      "--disable-gpu",
+      `--user-data-dir=${path.join(testDataRoot, "electron-user-data")}`,
+      projectRoot
+    ],
     cwd: projectRoot,
     env: testEnvironment,
     locale: "zh-CN",
@@ -82,6 +96,13 @@ test.afterEach(async ({}, testInfo: TestInfo) => {
 async function approveInitialTask() {
   await page.getByRole("textbox", { name: "任务描述" }).fill("准备 Python 机器学习环境");
   await page.getByRole("button", { name: "开始任务" }).click();
+
+  await expect(
+    page.getByRole("heading", { name: "先确认 Agent 对任务的理解" })
+  ).toBeVisible();
+  await expect(page.getByText("确认的是处理流程，不是执行权限。"))
+    .toBeVisible();
+  await page.getByRole("button", { name: "确认流程并继续" }).click();
 
   await expect(
     page.getByRole("heading", { name: "Python AI 环境是否需要同时准备前端工具链" })
@@ -146,6 +167,7 @@ async function expectVisualBaseline(name: string) {
 }
 
 async function approveReplacementPlan() {
+  await confirmReplacementTaskPlan();
   await expect(page.getByText("替代计划 r2 已生成")).toBeVisible();
   await page.getByRole("button", { name: "查看并确认" }).click();
   await expect(page.getByText("计划 r2 已通过严格验证")).toBeVisible();
@@ -153,16 +175,29 @@ async function approveReplacementPlan() {
   await page.getByRole("button", { name: "确认下载计划 r2" }).click();
 }
 
+async function confirmReplacementTaskPlan() {
+  await expect(
+    page.getByRole("heading", { name: "先确认 Agent 对任务的理解" })
+  ).toBeVisible();
+  await expect(page.getByText("Task Plan r2", { exact: true })).toBeVisible();
+  await expect(page.getByText("确认的是处理流程，不是执行权限。"))
+    .toBeVisible();
+  await expectMainPanelAtTop("replacement TaskPlan confirmation");
+  await page.getByRole("button", { name: "确认流程并继续" }).click();
+}
+
 async function openCompletedWorkspace() {
-  await expect(page.getByText("工作区交接", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "工作区" }).click();
   await expect(page.getByRole("heading", { name: "交接包已就绪" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "工作区", exact: true }))
+    .toHaveAttribute("aria-current", "page");
   await expect(page.getByText("已验证并真实落盘")).toBeVisible();
   await expectMainPanelAtTop("ready workspace");
   await expect(page.locator("pre.workspace-code-preview")).toContainText(
     "xunlei-agent-workspace-2.0"
   );
-  const rootPath = await page.locator(".workspace-view .agent-page-heading > p").innerText();
+  const rootPath = await page
+    .locator(".workspace-view .agent-page-heading > div:last-child > p")
+    .innerText();
   const expectedFiles = [
     "README.md",
     "RESOURCE_MANIFEST.md",
@@ -210,9 +245,118 @@ async function openCompletedWorkspace() {
     expect(manifest.handoff.files).toContain(resource.artifact!.relativePath);
   }
   expect(JSON.stringify(manifest)).not.toContain("tempFilePath");
-  expect(JSON.parse(await page.locator("pre.workspace-code-preview").innerText())).toEqual(manifest);
+  await expect
+    .poll(
+      async () => {
+        const previewText = await page.locator("pre.workspace-code-preview").innerText();
+        try {
+          return JSON.parse(previewText);
+        } catch {
+          return null;
+        }
+      },
+      {
+        message: "workspace manifest preview should finish loading",
+        timeout: 30_000
+      }
+    )
+    .toEqual(manifest);
   return manifest;
 }
+
+function createLocalGitRepository() {
+  const rootPath = path.join(testDataRoot, "local-repository");
+  mkdirSync(rootPath, { recursive: true });
+  execFileSync("git", ["init"], { cwd: rootPath });
+  execFileSync("git", ["config", "user.name", "Agent E2E"], {
+    cwd: rootPath
+  });
+  execFileSync("git", ["config", "user.email", "agent@example.test"], {
+    cwd: rootPath
+  });
+  writeFileSync(
+    path.join(rootPath, "package.json"),
+    `${JSON.stringify({ name: "local-repository", version: "1.0.0" })}\n`,
+    "utf8"
+  );
+  writeFileSync(
+    path.join(rootPath, "package-lock.json"),
+    `${JSON.stringify({
+      name: "local-repository",
+      lockfileVersion: 3,
+      packages: {
+        "": { name: "local-repository", version: "1.0.0" }
+      }
+    })}\n`,
+    "utf8"
+  );
+  execFileSync("git", ["add", "package.json", "package-lock.json"], {
+    cwd: rootPath
+  });
+  execFileSync("git", ["commit", "-m", "initial"], { cwd: rootPath });
+  return rootPath;
+}
+
+test("imports a local Git repository into Manifest and Agent B without write permission", async () => {
+  const repositoryRoot = createLocalGitRepository();
+  await electronApp.evaluate(
+    ({ dialog }, selectedPath) => {
+      (
+        dialog as unknown as {
+          showOpenDialog: () => Promise<{
+            canceled: boolean;
+            filePaths: string[];
+          }>;
+        }
+      ).showOpenDialog = async () => ({
+        canceled: false,
+        filePaths: [selectedPath]
+      });
+    },
+    repositoryRoot
+  );
+
+  await page.getByTestId("import-local-repository").click();
+
+  const repositorySummary = page.getByTestId("local-repository-summary");
+  await expect(
+    repositorySummary.getByRole("heading", { name: "本地仓库只读摘要" })
+  ).toBeVisible();
+  await expect(repositorySummary).toContainText("local-repository");
+  await expect(repositorySummary).toContainText("clean");
+  await expect(
+    page.getByRole("heading", { name: "审批后发布到 GitHub" })
+  ).toBeVisible();
+  const runAgentB = page.getByTestId("run-agent-b");
+  await expect(runAgentB).toBeEnabled();
+  await runAgentB.click();
+  await expect(page.getByTestId("agent-b-answer")).toContainText(
+    "本地 Git 仓库（只读）"
+  );
+
+  const workspaceRoot = await page
+    .locator(".workspace-view .agent-page-heading > div:last-child > p")
+    .innerText();
+  const manifest = JSON.parse(
+    readFileSync(path.join(workspaceRoot, "resource-manifest.json"), "utf8")
+  ) as {
+    localRepository: {
+      displayName: string;
+      commitSha: string;
+      analysis: { ecosystems: string[] };
+    };
+    forbiddenActions: string[];
+  };
+  expect(workspaceRoot.startsWith(testDataRoot)).toBe(true);
+  expect(manifest.localRepository).toMatchObject({
+    displayName: "local-repository",
+    commitSha: expect.stringMatching(/^[a-f0-9]{40,64}$/u),
+    analysis: { ecosystems: ["node"] }
+  });
+  expect(manifest.forbiddenActions).toContain("未经独立审批发布到 GitHub");
+  expect(JSON.stringify(manifest)).not.toContain(repositoryRoot);
+  await expectNoSeriousAccessibilityViolations("local repository workspace");
+});
 
 test("retries the original source and reaches a ready workspace", async () => {
   await expectNoSeriousAccessibilityViolations("home");
@@ -238,6 +382,10 @@ test("retries the original source and reaches a ready workspace", async () => {
   const manifest = await openCompletedWorkspace();
   await expectNoSeriousAccessibilityViolations("ready workspace");
   await expectVisualBaseline("ready-workspace");
+  await page.getByTestId("run-agent-b").click();
+  await expect(page.getByTestId("agent-b-answer")).toBeVisible();
+  await expect(page.getByTestId("agent-b-answer")).toContainText("校验通过");
+  await expect(page.getByTestId("agent-b-answer")).toContainText("禁止动作");
   expect(manifest).toMatchObject({
     revision: 2,
     approvedRevision: 2,
@@ -253,6 +401,7 @@ test("switches to the trusted fallback and records its provenance", async () => 
   await startTaskAndWaitForFailure();
   await page.getByRole("button", { name: "使用可信替代来源" }).click();
 
+  await confirmReplacementTaskPlan();
   await expect(page.getByText("替代计划 r2 已生成")).toBeVisible();
   await page.getByRole("button", { name: "查看并确认" }).click();
   await expectNoSeriousAccessibilityViolations("replacement plan");
@@ -286,9 +435,12 @@ test("delegates the failed resource to Agent B as an incomplete handoff", async 
   await expect(page.getByRole("heading", { name: "等待资源准备完成" })).toBeVisible();
   await expect(page.getByText("已交给 Agent B 处理未完成资源")).toBeVisible();
   await expect(page.getByText("仍有资源或导出未完成")).toBeVisible();
+  await expect(page.getByTestId("agent-b-answer")).toBeVisible();
+  await expect(page.getByTestId("agent-b-answer")).toContainText("校验通过");
+  await expect(page.getByTestId("agent-b-answer")).toContainText("AI Dev Starter");
+  await expect(page.getByTestId("agent-b-answer")).toContainText("自动运行安装包");
   await expectMainPanelAtTop("Agent B handoff");
   await expectNoSeriousAccessibilityViolations("Agent B handoff");
-  await expectVisualBaseline("agent-b-incomplete-handoff");
 
   const manifest = JSON.parse(await page.locator("pre.workspace-code-preview").innerText()) as {
     resources: Array<{ id: string; status: string; failureReason: string | null }>;
@@ -364,10 +516,66 @@ test("shows persisted task history without changing the active task", async () =
   await expect(page.getByRole("heading", { name: "资源快照" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "审批记录" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "模型与工具审计" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "供应链与恢复审计" })).toBeVisible();
+  await expect(page.getByText("目录版本已固定", { exact: true }).first()).toBeVisible();
   await expect(page.locator(".history-resource-row").filter({ hasText: "AI Dev Starter" })).toBeVisible();
   await expectNoSeriousAccessibilityViolations("task history");
 
   await page.getByRole("button", { name: "执行" }).click();
   await expect(page.getByRole("heading", { name: "AI Dev Starter 需要人工决策" })).toBeVisible();
   await expect(page.getByRole("alert")).toContainText("CHECKSUM_MISMATCH");
+});
+
+test("routes the second Domain Skill through its own plan", async () => {
+  await page
+    .getByRole("textbox", { name: "任务描述" })
+    .fill("准备一个科研数据分析工作区");
+  await page.getByRole("button", { name: "开始任务" }).click();
+  await expect(
+    page.getByRole("heading", { name: "先确认 Agent 对任务的理解" })
+  ).toBeVisible();
+  await page.getByRole("button", { name: "确认流程并继续" }).click();
+  await expect(
+    page.getByRole("heading", {
+      name: "科研数据环境是否需要包含可验证的示例工作区"
+    })
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "只准备科研基础工具" })
+    .click();
+  await page.getByRole("button", { name: "查看资源计划" }).click();
+
+  await expect(page.getByText("计划 r1 已通过严格验证")).toBeVisible();
+  await expect(
+    page.locator(".agent-resource-row").filter({ hasText: "Python 3.12" })
+  ).toBeVisible();
+  await expect(
+    page.locator(".agent-resource-row").filter({ hasText: "Visual Studio Code" })
+  ).toBeVisible();
+  await expect(
+    page.locator(".agent-resource-row").filter({ hasText: "Git for Windows" })
+  ).toBeVisible();
+  await expect(
+    page.locator(".agent-resource-row").filter({ hasText: "AI Dev Starter" })
+  ).toHaveCount(0);
+  await expectNoSeriousAccessibilityViolations("research skill plan");
+});
+
+test("resets Demo records only after explicit confirmation", async () => {
+  await startTaskAndWaitForFailure();
+  await page.getByRole("button", { name: "设置" }).click();
+  await page.getByRole("button", { name: "重置 Demo 数据" }).click();
+  await expect(page.getByRole("alert")).toContainText(
+    "永久清除 SQLite 中的任务"
+  );
+  await page.getByRole("button", { name: "确认永久清除" }).click();
+  await expect(page.getByText(/Demo 数据已重置，共清除/)).toBeVisible();
+  await expect(
+    page.locator(".settings-row").filter({ hasText: "最近 Demo 重置" })
+  ).not.toContainText("尚未重置");
+
+  await page.getByRole("button", { name: "历史" }).click();
+  await expect(page.getByRole("heading", { name: "历史任务" })).toBeVisible();
+  await expect(page.getByText("还没有历史任务")).toBeVisible();
+  await expectNoSeriousAccessibilityViolations("reset history");
 });

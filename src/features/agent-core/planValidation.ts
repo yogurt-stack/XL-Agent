@@ -59,6 +59,8 @@ function sameMetadata(resource: TrustedResource, canonical: TrustedResource) {
     "required",
     "sourceTrust",
     "catalogStatus",
+    "statusReason",
+    "replacedBy",
     "fallbackId"
   ];
   if (scalarKeys.some((key) => resource[key] !== canonical[key])) return false;
@@ -146,6 +148,16 @@ function validateCandidates(
     }
 
     if (!resource.selected) continue;
+
+    if (resource.catalogStatus !== "active") {
+      issues.push(
+        issue(
+          "UNTRUSTED_SOURCE",
+          `资源 ${resource.id} 已${resource.catalogStatus === "revoked" ? "撤销" : "弃用"}，不能进入新计划。`,
+          { resourceId: resource.id }
+        )
+      );
+    }
 
     if (
       !resource.supportedOperatingSystems.includes(context.systemProfile.os) ||

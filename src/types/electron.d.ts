@@ -3,6 +3,11 @@ import type {
   AgentRuntimeSnapshotResult
 } from "../features/agent-core/runtimeBridge";
 import type { AgentUserEvent } from "../features/agent-core/types";
+import type {
+  TaskHistoryDetailPayload as TaskHistoryDetail,
+  TaskHistoryIpcError,
+  TaskHistorySummary
+} from "../features/task-history/types";
 
 export type XunleiAppInfo = {
   name: string;
@@ -10,55 +15,6 @@ export type XunleiAppInfo = {
   platform: string;
   electron: string;
   chrome: string;
-};
-
-export type TaskHistorySummary = {
-  taskId: string;
-  task: string;
-  phase: string;
-  revision: number;
-  approvedRevision: number | null;
-  updatedAt: string;
-  resourceCount: number;
-  verifiedResourceCount: number;
-  workspaceReady: boolean;
-  hasErrors: boolean;
-};
-
-export type TaskHistoryApproval = {
-  taskId: string;
-  revision: number;
-  actor: "local-user";
-  approvedAt: string;
-  expiresAt: string;
-  status: "active" | "expired" | "revoked";
-};
-
-export type TaskHistoryWorkspaceExport = {
-  taskId: string;
-  revision: number;
-  rootPath: string;
-  generatedAt: string;
-  reusedExisting: boolean;
-  files: Array<{
-    relativePath: string;
-    absolutePath: string;
-    bytesWritten: number;
-    sha256: string;
-  }>;
-};
-
-export type TaskHistoryDetail = {
-  summary: TaskHistorySummary;
-  state: unknown;
-  approvals: TaskHistoryApproval[];
-  workspaceExports: TaskHistoryWorkspaceExport[];
-};
-
-export type TaskHistoryIpcError = {
-  code: "TASK_HISTORY_INVALID_REQUEST" | "TASK_HISTORY_READ_FAILED";
-  message: string;
-  retriable: boolean;
 };
 
 declare global {
@@ -69,6 +25,21 @@ declare global {
       dispatchAgentEvent: (event: AgentUserEvent) => Promise<AgentRuntimeSnapshotResult>;
       retryTaskLocally: () => Promise<AgentRuntimeSnapshotResult>;
       testModelConnection: () => Promise<AgentRuntimeSnapshotResult>;
+      resetDemoData: () => Promise<
+        | {
+            ok: true;
+            snapshot: AgentRuntimeSnapshot;
+            reset: {
+              resetAt: string;
+              removedRecords: number;
+              cleanupWarning: string | null;
+            };
+          }
+        | {
+            ok: false;
+            error: { code: string; message: string; retriable: boolean };
+          }
+      >;
       onAgentRuntimeSnapshot: (
         listener: (snapshot: AgentRuntimeSnapshot) => void
       ) => () => void;
@@ -81,6 +52,61 @@ declare global {
         | { ok: false; error: TaskHistoryIpcError }
       >;
       flushTaskPersistence: () => Promise<{ ok: true }>;
+      selectLocalResources: () => Promise<
+        | {
+            ok: true;
+            snapshot: AgentRuntimeSnapshot;
+            imported: number;
+          }
+        | {
+            ok: false;
+            error: { code: string; message: string; retriable: boolean };
+          }
+      >;
+      selectLocalRepository: () => Promise<
+        | {
+            ok: true;
+            snapshot: AgentRuntimeSnapshot;
+            imported: boolean;
+          }
+        | {
+            ok: false;
+            error: { code: string; message: string; retriable: boolean };
+          }
+      >;
+      prepareGitHubPublish: (input: {
+        repositoryName: string;
+        visibility: "private" | "public";
+        branch?: string;
+        commitMessage?: string;
+      }) => Promise<
+        | { ok: true; snapshot: AgentRuntimeSnapshot }
+        | {
+            ok: false;
+            error: { code: string; message: string; retriable: boolean };
+          }
+      >;
+      approveGitHubPublish: (input: {
+        publishId: string;
+        planSha256: string;
+      }) => Promise<
+        | { ok: true; snapshot: AgentRuntimeSnapshot }
+        | {
+            ok: false;
+            error: { code: string; message: string; retriable: boolean };
+          }
+      >;
+      selectWorkspaceRoot: () => Promise<
+        | {
+            ok: true;
+            snapshot: AgentRuntimeSnapshot;
+            selected: boolean;
+          }
+        | {
+            ok: false;
+            error: { code: string; message: string; retriable: boolean };
+          }
+      >;
       readWorkspaceFile: (request: {
         taskId: string;
         revision: number;

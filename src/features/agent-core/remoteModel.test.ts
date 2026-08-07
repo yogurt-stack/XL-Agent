@@ -5,6 +5,7 @@ import {
 } from "./agentServices";
 import { ModelConnectionController } from "./modelConnection";
 import { LocalRuleModelRuntime } from "./localRuleModel";
+import { createLocalTaskPlanProposal } from "./taskPlanTemplates";
 import { createInitialAgentState } from "./machine";
 import {
   FixedWindowsPlanner,
@@ -66,6 +67,58 @@ function fullStackPlanningContext(): ModelContext {
 }
 
 describe("remote model runtime", () => {
+  it("rejects non-search actions in the GitHub discovery route", async () => {
+    const context: ModelContext = {
+      state: {
+        ...createInitialAgentState(),
+        phase: "planning",
+        task: "查找 GitHub 热门开源项目",
+        route: "github-project-discovery",
+        routeDecision: {
+          status: "supported",
+          reason: "matched",
+          skillId: "github-project-discovery",
+          sourceProviderId: "github-api",
+          userLinks: [],
+          resourceIds: [],
+          clarifications: [],
+          requirements: null
+        },
+        answers: {
+          "github-created-window": "最近 30 天新建",
+          "github-sort": "按 Star 数"
+        }
+      },
+      step: 1,
+      maxSteps: 6,
+      availableTools: ["search_github_repositories"],
+      toolResults: []
+    };
+    const model = new RemoteLlmModelRuntime({
+      async requestDecision() {
+        return {
+          decisionId: "remote-github-plan",
+          provider: "remote-llm",
+          model: "test-remote",
+          explanation: "Incorrectly create a plan.",
+          action: {
+            actionId: "remote-github-plan",
+            type: "create_plan",
+            resourceIds: ["git"],
+            explanation: "Incorrectly create a plan."
+          }
+        };
+      }
+    });
+
+    await expect(model.decide(context)).rejects.toMatchObject({
+      detail: {
+        code: "MODEL_INVALID_DECISION",
+        message: expect.stringContaining("GitHub 只读检索流程")
+      }
+    });
+  });
+
   it("rejects a repeated successful catalog query", async () => {
     const model = new RemoteLlmModelRuntime({
       async requestDecision() {
@@ -191,7 +244,9 @@ describe("remote model runtime", () => {
         return {
           configured: true,
           endpointHost: "api.example.test",
-          model: "test-model"
+          model: "test-model",
+          providerId: "openai-compatible",
+          endpointMode: "endpoint"
         };
       },
       async testConnection() {
@@ -205,6 +260,19 @@ describe("remote model runtime", () => {
           provider: "remote-llm",
           model: "test-model"
         };
+        if (modelContext.state.phase === "task_planning") {
+          return {
+            ...actionBase,
+            decisionId: "remote-task-plan",
+            explanation: "Propose the first-round task plan.",
+            action: {
+              actionId: "remote-task-plan",
+              type: "propose_task_plan",
+              proposal: createLocalTaskPlanProposal(modelContext),
+              explanation: "Confirm the workflow before using tools."
+            }
+          };
+        }
         if (modelContext.state.phase === "routing") {
           return {
             ...actionBase,
@@ -297,6 +365,10 @@ describe("remote model runtime", () => {
       expect(predicate()).toBe(true);
     };
 
+    await runUntil(
+      () => runtime.getState().phase === "waiting_task_plan_confirmation"
+    );
+    runtime.dispatch({ type: "CONFIRM_TASK_PLAN", revision: 1 });
     await runUntil(() => runtime.getState().phase === "clarifying");
     runtime.dispatch({
       type: "ANSWER_CLARIFICATION",
@@ -328,7 +400,7 @@ describe("remote model runtime", () => {
     expect(runtime.getState()).toMatchObject({
       phase: "waiting_approval",
       revision: 1,
-      agentRun: { step: 4 }
+      agentRun: { step: 3 }
     });
     expect(runtime.getState().resources.map((resource) => resource.id)).toEqual([
       "python-312",

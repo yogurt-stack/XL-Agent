@@ -169,7 +169,19 @@
           ]
         },
         "catalogStatus": {
-          "const": "active"
+          "enum": [
+            "active",
+            "deprecated",
+            "revoked"
+          ]
+        },
+        "statusReason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "replacedBy": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$"
         },
         "verification": {
           "$ref": "#/$defs/verification"
@@ -232,7 +244,8 @@
         },
         "signatureEnforcement": {
           "enum": [
-            "planned",
+            "required",
+            "checksum-only",
             "not-applicable"
           ]
         }

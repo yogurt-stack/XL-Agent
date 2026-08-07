@@ -65,6 +65,8 @@ export function phaseLabel(phase: AgentPhase) {
     intake: "等待任务",
     routing: "路由判断",
     unsupported: "当前任务不受支持",
+    task_planning: "生成任务计划",
+    waiting_task_plan_confirmation: "等待任务计划确认",
     clarifying: "澄清需求",
     planning: "生成资源计划",
     waiting_approval: "等待用户确认",
@@ -74,6 +76,7 @@ export function phaseLabel(phase: AgentPhase) {
     exporting: "导出工作区",
     awaiting_export_retry: "等待导出重试",
     replanning: "重规划",
+    result: "查询结果",
     handoff: "工作区交接",
     cancelled: "任务已取消"
   };

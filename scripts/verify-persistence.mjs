@@ -157,6 +157,12 @@ function createArtifact(taskId = "task-persistence", revision = 2, overrides = {
     expectedSha256: artifactSha256,
     verificationStatus: "verified",
     verifiedAt: "2026-07-24T00:00:00.000Z",
+    signatureStatus: "not-applicable",
+    expectedPublisher: null,
+    actualPublisher: null,
+    certificateThumbprint: null,
+    signatureMessage: "not applicable",
+    signatureCheckedAt: "2026-07-24T00:00:00.000Z",
     ...overrides
   };
 }
@@ -287,11 +293,11 @@ try {
   });
   const freshSchema = await store.getSchemaInfo();
   assert(
-    freshSchema.version === 2 &&
+    freshSchema.version === 5 &&
       freshSchema.supportedVersion === TASK_STORE_SCHEMA_VERSION &&
-      freshSchema.migrations.length === 2 &&
-      freshSchema.migrations[1].name === "verified-download-artifacts",
-    "Fresh stores must apply and record SQLite schema v2"
+      freshSchema.migrations.length === 5 &&
+      freshSchema.migrations[4].name === "p3-demo-operations",
+    "Fresh stores must apply and record SQLite schema v5"
   );
 
   await store.saveSnapshot(exportSnapshot);
@@ -303,6 +309,26 @@ try {
   assert(
     (await store.hasValidApproval(exportSnapshot.taskId, 2)).valid,
     "Current revision approval must be active"
+  );
+  await store.saveSnapshot(createSnapshot({
+    task: "审批后被替换的任务内容"
+  }));
+  const tamperedApproval = await store.hasValidApproval(
+    exportSnapshot.taskId,
+    2
+  );
+  assert(
+    !tamperedApproval.valid && tamperedApproval.status === "plan-mismatch",
+    "Approval must be rejected when the persisted plan fingerprint changes"
+  );
+  await store.saveSnapshot(createSnapshot({
+    approvedRevision: null,
+    phase: "waiting_approval"
+  }));
+  await store.saveSnapshot(exportSnapshot);
+  assert(
+    (await store.hasValidApproval(exportSnapshot.taskId, 2)).valid,
+    "Explicit reapproval must pin the restored plan fingerprint"
   );
   await store.recordWorkspaceExport(firstExport);
 
@@ -381,9 +407,10 @@ try {
   });
   const migratedSchema = await migratedLegacyStore.getSchemaInfo();
   assert(
-    migratedSchema.version === 2 &&
-      migratedSchema.migrations.some((migration) => migration.version === 2),
-    "A v1 database must migrate forward to v2"
+    migratedSchema.version === 5 &&
+      migratedSchema.migrations.some((migration) => migration.version === 4) &&
+      migratedSchema.migrations.some((migration) => migration.version === 5),
+    "A v1 database must migrate forward to v5"
   );
   assert(
     (await migratedLegacyStore.getTaskState(exportSnapshot.taskId))?.taskId === exportSnapshot.taskId,
@@ -410,5 +437,5 @@ try {
 }
 
 console.log(
-  "Persistence passed: SQLite v2 artifacts, atomic downloads workspace, Manifest derivation, recovery and approval expiry verified"
+  "Persistence passed: SQLite v5 tasks/artifacts, atomic workspace export, recovery, catalog/plan-pinned approvals, demo reset and expiry verified"
 );

@@ -27,7 +27,7 @@ function toolCall(
 }
 
 describe("native OpenAI tool protocol", () => {
-  it("publishes strict action tools plus only the available runtime tools", () => {
+  it("publishes compatible closed schemas plus only the available runtime tools", () => {
     const tools = createOpenAiAgentTools([
       "read_system_profile",
       "controlled_download"
@@ -41,7 +41,7 @@ describe("native OpenAI tool protocol", () => {
     expect(
       tools.every(
         (tool) =>
-          tool.function.strict &&
+          !("strict" in tool.function) &&
           tool.function.parameters.additionalProperties === false
       )
     ).toBe(true);
@@ -69,6 +69,78 @@ describe("native OpenAI tool protocol", () => {
     });
   });
 
+  it("registers and parses propose_task_plan as a model action without exposing runtime tools", () => {
+    const tools = createOpenAiAgentTools([], ["propose_task_plan"]);
+    expect(tools.map((tool) => tool.function.name)).toEqual([
+      "propose_task_plan"
+    ]);
+
+    const decision = parseOpenAiToolDecision(
+      toolCall("propose_task_plan", {
+        proposal: {
+          objective: "查找名为 tau 的 GitHub 仓库。",
+          deliverables: ["GitHub 仓库候选列表"],
+          assumptions: ["tau 是仓库名称。"],
+          constraints: ["搜索阶段只读。"],
+          steps: [{
+            id: "search-tau",
+            title: "搜索仓库",
+            description: "按仓库名称调用 GitHub API。",
+            kind: "read_tool",
+            tool: "search_github_repositories",
+            dependsOn: [],
+            staticInput: { mode: "name", query: "tau", limit: 10 },
+            inputBindings: {},
+            expectedOutput: "带许可证的候选仓库",
+            risk: "read_only",
+            approval: { required: false, reason: null }
+          }],
+          confirmation: {
+            required: true,
+            reason: "工具调用前先确认处理流程。"
+          }
+        },
+        explanation: "先确认目标与只读边界。"
+      }),
+      "test-model",
+      ["search_github_repositories"],
+      ["propose_task_plan"]
+    );
+
+    expect(decision.action).toMatchObject({
+      type: "propose_task_plan",
+      proposal: {
+        objective: "查找名为 tau 的 GitHub 仓库。",
+        confirmation: { required: true },
+        steps: [{ tool: "search_github_repositories" }]
+      }
+    });
+  });
+
+  it("accepts provider metadata alongside the required tool_call fields", () => {
+    const message = toolCall("finish", {
+      summary: "完成。",
+      explanation: "连接测试完成。"
+    });
+    const decision = parseOpenAiToolDecision(
+      {
+        ...message,
+        tool_calls: message.tool_calls.map((call) => ({
+          ...call,
+          index: 0
+        }))
+      },
+      "deepseek-v4-flash",
+      []
+    );
+
+    expect(decision.action).toEqual({
+      actionId: "call-test",
+      type: "finish",
+      summary: "完成。"
+    });
+  });
+
   it("maps an allowed runtime tool and removes host-only explanation fields", () => {
     const decision = parseOpenAiToolDecision(
       toolCall("controlled_download", {
@@ -88,6 +160,68 @@ describe("native OpenAI tool protocol", () => {
         callId: "call-test",
         name: "controlled_download",
         input: { resourceId: "python-3.12" }
+      }
+    });
+  });
+
+  it("publishes and parses the bounded GitHub repository search tool", () => {
+    const tools = createOpenAiAgentTools(["search_github_repositories"]);
+    expect(
+      tools.find(
+        (tool) => tool.function.name === "search_github_repositories"
+      )
+    ).toBeDefined();
+
+    const decision = parseOpenAiToolDecision(
+      toolCall("search_github_repositories", {
+        mode: "discovery",
+        keywords: "typescript",
+        createdWithinDays: 30,
+        sort: "stars",
+        limit: 10,
+        purpose: "查找近期热门 TypeScript 项目。",
+        explanation: "用户明确要求 GitHub 开源项目榜单。"
+      }),
+      "test-model",
+      ["search_github_repositories"]
+    );
+
+    expect(decision.action).toEqual({
+      actionId: "call-test",
+      type: "call_tool",
+      purpose: "查找近期热门 TypeScript 项目。",
+      call: {
+        callId: "call-test",
+        name: "search_github_repositories",
+        input: {
+          mode: "discovery",
+          keywords: "typescript",
+          createdWithinDays: 30,
+          sort: "stars",
+          limit: 10
+        }
+      }
+    });
+  });
+
+  it("parses a repository-name GitHub search without discovery-only fields", () => {
+    const decision = parseOpenAiToolDecision(
+      toolCall("search_github_repositories", {
+        mode: "name",
+        query: "tau",
+        limit: 10,
+        purpose: "按仓库名查找 tau。",
+        explanation: "用户明确给出了仓库名称。"
+      }),
+      "test-model",
+      ["search_github_repositories"]
+    );
+
+    expect(decision.action).toMatchObject({
+      type: "call_tool",
+      call: {
+        name: "search_github_repositories",
+        input: { mode: "name", query: "tau", limit: 10 }
       }
     });
   });

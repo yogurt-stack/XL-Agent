@@ -70,10 +70,14 @@ function normalizedUrl(value: string) {
 export class TrustedCatalogSourceProvider implements SourceProvider {
   readonly id = "trusted-catalog";
 
+  constructor(
+    private readonly resources: TrustedResource[] = trustedCatalog
+  ) {}
+
   search(requirement: SourceRequirement) {
     const requestedIds = new Set(requirement.resourceIds ?? []);
     const query = requirement.query?.normalize("NFKC").toLowerCase().trim();
-    return trustedCatalog
+    return this.resources
       .filter((resource) => resource.catalogStatus === "active")
       .filter((resource) => {
         if (requestedIds.size > 0) return requestedIds.has(resource.id);
@@ -117,7 +121,7 @@ export class TrustedCatalogSourceProvider implements SourceProvider {
       return [];
     }
     const resourcesByUrl = new Map(
-      trustedCatalog
+      this.resources
         .filter((resource) => resource.catalogStatus === "active")
         .map((resource) => [normalizedUrl(resource.download.url), resource])
     );

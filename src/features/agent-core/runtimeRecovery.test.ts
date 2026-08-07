@@ -58,10 +58,29 @@ function createRuntimeHarness(
     return state;
   };
 
+  const runUntilTaskPlanCompleted = async (maxSteps = 20) => {
+    for (
+      let step = 0;
+      step < maxSteps && state.taskPlan?.status !== "completed";
+      step += 1
+    ) {
+      const job = queue.shift();
+      if (!job) {
+        throw new Error(
+          `Runtime stalled with TaskPlan ${state.taskPlan?.status ?? "missing"}.`
+        );
+      }
+      if (!job.cancelled) await job.task();
+    }
+    expect(state.taskPlan?.status).toBe("completed");
+    return state;
+  };
+
   return {
     runtime,
     getState: () => state,
-    runUntil
+    runUntil,
+    runUntilTaskPlanCompleted
   };
 }
 
@@ -70,6 +89,23 @@ async function runToDownloadFailure(
 ) {
   const harness = createRuntimeHarness(options);
   harness.runtime.dispatch({ type: "SUBMIT_TASK", task: "准备 Windows AI 环境" });
+  await harness.runUntil("waiting_task_plan_confirmation");
+  expect(harness.getState()).toMatchObject({
+    taskPlan: {
+      revision: 1,
+      status: "waiting_confirmation",
+      confirmation: { status: "pending" }
+    },
+    taskPlanValidation: { valid: true, checkedRevision: 1 },
+    agentRun: { toolResults: [] }
+  });
+  harness.runtime.dispatch({ type: "CONFIRM_TASK_PLAN", revision: 2 });
+  expect(harness.getState().phase).toBe("waiting_task_plan_confirmation");
+  harness.runtime.dispatch({ type: "CONFIRM_TASK_PLAN", revision: 1 });
+  expect(harness.getState().taskPlan).toMatchObject({
+    status: "waiting_user_input",
+    confirmation: { status: "confirmed", confirmedRevision: 1 }
+  });
   await harness.runUntil("clarifying");
   harness.runtime.dispatch({
     type: "ANSWER_CLARIFICATION",
@@ -104,13 +140,22 @@ async function recoverAndComplete(
   );
 
   harness.runtime.dispatch({ type: "RESOLVE_DOWNLOAD_FAILURE", action });
+  expect(harness.getState()).toMatchObject({
+    phase: "waiting_task_plan_confirmation",
+    taskPlan: {
+      revision: 2,
+      status: "waiting_confirmation",
+      confirmation: { status: "pending" }
+    }
+  });
+  harness.runtime.dispatch({ type: "CONFIRM_TASK_PLAN", revision: 2 });
   await harness.runUntil("waiting_approval");
   expect(harness.getState().revision).toBe(2);
   expect(harness.getState().approvedRevision).toBeNull();
 
   harness.runtime.dispatch({ type: "APPROVE_PLAN", revision: 2 });
   await harness.runUntil("handoff");
-  return harness.getState();
+  return harness.runUntilTaskPlanCompleted();
 }
 
 describe("agent runtime recovery", () => {
@@ -118,6 +163,13 @@ describe("agent runtime recovery", () => {
     const state = await recoverAndComplete("primary-retry");
 
     expect(state.workspace.ready).toBe(true);
+    expect(state.taskPlan).toMatchObject({
+      revision: 2,
+      status: "completed",
+      steps: expect.arrayContaining([
+        expect.objectContaining({ id: "handoff-workspace", status: "completed" })
+      ])
+    });
     expect(state.resources).toEqual(
       expect.arrayContaining([expect.objectContaining({ id: "sample-project", status: "verified" })])
     );
@@ -211,7 +263,7 @@ describe("agent runtime recovery", () => {
           fileName: `${resourceId}.download`,
           urlHost: new URL(resource.download.url).host,
           bytesWritten: 7,
-          sha256: resource.download.expectedSha256,
+          sha256: resource.download.expectedSha256!,
           tempFilePath: `/tmp/${resourceId}.download`,
           elapsedMs: 1
         }

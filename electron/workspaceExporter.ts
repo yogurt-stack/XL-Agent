@@ -17,7 +17,13 @@ import {
   type WorkspaceTemplateRegistry
 } from "../src/features/agent-core/workspaceTemplates";
 import type { WorkspaceGuide } from "../src/features/agent-core/domainSkills";
+import type {
+  GitHubRepositoryProvenance,
+  NpmPackageProvenance
+} from "../src/features/agent-core/types";
 import type { DownloadArtifactRecord } from "./downloadArtifacts";
+import type { LocalArtifactRecord } from "./localArtifacts";
+import { trustedCatalogMetadata } from "./trustedDownloadCatalog";
 
 export type WorkspaceFileRecord = {
   relativePath: string;
@@ -73,9 +79,24 @@ export type WorkspaceSnapshot = {
     attempts: number;
     replacedFrom?: string;
     failureReason?: string;
+    github?: GitHubRepositoryProvenance;
+    npm?: NpmPackageProvenance;
     download?: {
-      expectedSha256?: string;
+      expectedSha256?: string | null;
     };
+    verification?: {
+      signatureEnforcement?: string;
+    };
+  }>;
+  localArtifacts: Array<{
+    artifactId: string;
+    fileName: string;
+    displayPath: string;
+    bytesWritten: number;
+    sha256: string;
+    matchedResourceId: string | null;
+    verificationStatus: "local-verified" | "unverified";
+    importedAt: string;
   }>;
   agentRun: {
     toolResults: unknown[];
@@ -89,6 +110,7 @@ export type WorkspaceSnapshot = {
 export type WorkspaceExportOptions = {
   workspaceRoot: string;
   downloadArtifacts?: DownloadArtifactRecord[];
+  localArtifacts?: LocalArtifactRecord[];
   templateRegistry?: WorkspaceTemplateRegistry;
   workspaceGuide?: WorkspaceGuide;
   allowTestFixtures?: boolean;
@@ -105,6 +127,11 @@ type ManifestArtifact = {
   sourceHost: string;
   verificationStatus: DownloadArtifactRecord["verificationStatus"];
   verifiedAt: string;
+  signatureStatus: DownloadArtifactRecord["signatureStatus"];
+  expectedPublisher: string | null;
+  actualPublisher: string | null;
+  certificateThumbprint: string | null;
+  signatureCheckedAt: string | null;
 };
 
 type ResourceWorkspaceManifest = {
@@ -118,6 +145,10 @@ type ResourceWorkspaceManifest = {
   taskRequirements: unknown;
   planValidation: unknown;
   approvedRevision: number;
+  catalog: {
+    version: string;
+    sourceSha256: string;
+  };
   mode: "electron-controlled-export";
   generatedAt: string;
   resources: Array<{
@@ -135,7 +166,20 @@ type ResourceWorkspaceManifest = {
     selected: boolean;
     attempts: number;
     failureReason: string | null;
+    github: GitHubRepositoryProvenance | null;
+    npm: NpmPackageProvenance | null;
     artifact: ManifestArtifact | null;
+  }>;
+  localArtifacts: Array<{
+    artifactId: string;
+    fileName: string;
+    displayPath: string;
+    relativePath: string | null;
+    bytesWritten: number;
+    sha256: string;
+    matchedResourceId: string | null;
+    verificationStatus: "local-verified" | "unverified";
+    importedAt: string;
   }>;
   audit: {
     toolResults: unknown[];
@@ -331,6 +375,7 @@ async function copyVerifiedArtifacts(
     }
     if (
       artifact.verificationStatus !== "verified" &&
+      artifact.verificationStatus !== "local-verified" &&
       !(allowTestFixtures && artifact.verificationStatus === "test-fixture")
     ) {
       throw exportError(
@@ -348,7 +393,11 @@ async function copyVerifiedArtifacts(
       );
     }
     const relativePath = path.posix.join(
-      "downloads",
+      resource.github
+        ? "sources"
+        : resource.npm
+          ? "dependencies/npm"
+          : "downloads",
       `${sanitizeSegment(resource.id)}-${sanitizeFileName(artifact.fileName)}`
     );
     const stagingPath = path.join(stagingRoot, relativePath);
@@ -369,6 +418,17 @@ async function copyVerifiedArtifacts(
         false
       );
     }
+    if (
+      !fixtureMismatch &&
+      resource.verification?.signatureEnforcement === "required" &&
+      artifact.signatureStatus !== "valid"
+    ) {
+      throw exportError(
+        "WORKSPACE_EXPORT_ARTIFACT_INVALID",
+        `资源 ${resource.id} 尚未通过必需的 Authenticode 与发布者校验。`,
+        false
+      );
+    }
     const manifestArtifact: ManifestArtifact = {
       relativePath,
       fileName: artifact.fileName,
@@ -377,7 +437,12 @@ async function copyVerifiedArtifacts(
       expectedSha256: artifact.expectedSha256.toLowerCase(),
       sourceHost: artifact.sourceHost,
       verificationStatus: artifact.verificationStatus,
-      verifiedAt: artifact.verifiedAt
+      verifiedAt: artifact.verifiedAt,
+      signatureStatus: artifact.signatureStatus,
+      expectedPublisher: artifact.expectedPublisher,
+      actualPublisher: artifact.actualPublisher,
+      certificateThumbprint: artifact.certificateThumbprint,
+      signatureCheckedAt: artifact.signatureCheckedAt
     };
     manifestArtifacts.set(resource.id, manifestArtifact);
     fileRecords.push({
@@ -391,10 +456,79 @@ async function copyVerifiedArtifacts(
   return { manifestArtifacts, fileRecords };
 }
 
+async function copyAdditionalLocalArtifacts(
+  artifacts: LocalArtifactRecord[],
+  stagingRoot: string,
+  taskRoot: string
+) {
+  const manifestArtifacts: ResourceWorkspaceManifest["localArtifacts"] = [];
+  const fileRecords: WorkspaceFileRecord[] = [];
+  for (const artifact of artifacts) {
+    if (artifact.matchedResourceId) {
+      manifestArtifacts.push({
+        artifactId: artifact.artifactId,
+        fileName: artifact.fileName,
+        displayPath: artifact.displayPath,
+        relativePath: null,
+        bytesWritten: artifact.bytesWritten,
+        sha256: artifact.sha256,
+        matchedResourceId: artifact.matchedResourceId,
+        verificationStatus: artifact.verificationStatus,
+        importedAt: artifact.importedAt
+      });
+      continue;
+    }
+    const sourceInfo = await lstat(artifact.sourcePath);
+    if (!sourceInfo.isFile() || sourceInfo.isSymbolicLink()) {
+      throw exportError(
+        "WORKSPACE_EXPORT_ARTIFACT_INVALID",
+        `本地资源 ${artifact.displayPath} 不再是普通文件。`,
+        false
+      );
+    }
+    const relativePath = path.posix.join(
+      "local-resources",
+      `${sanitizeSegment(artifact.artifactId)}-${sanitizeFileName(artifact.fileName)}`
+    );
+    const stagingPath = path.join(stagingRoot, relativePath);
+    await mkdir(path.dirname(stagingPath), { recursive: true });
+    await copyFile(artifact.sourcePath, stagingPath);
+    const actual = await sha256File(stagingPath);
+    if (
+      actual.sha256.toLowerCase() !== artifact.sha256.toLowerCase() ||
+      actual.bytesWritten !== artifact.bytesWritten
+    ) {
+      throw exportError(
+        "WORKSPACE_EXPORT_ARTIFACT_INVALID",
+        `本地资源 ${artifact.displayPath} 在导出前发生变化。`,
+        false
+      );
+    }
+    manifestArtifacts.push({
+      artifactId: artifact.artifactId,
+      fileName: artifact.fileName,
+      displayPath: artifact.displayPath,
+      relativePath,
+      bytesWritten: actual.bytesWritten,
+      sha256: actual.sha256,
+      matchedResourceId: null,
+      verificationStatus: artifact.verificationStatus,
+      importedAt: artifact.importedAt
+    });
+    fileRecords.push({
+      relativePath,
+      absolutePath: path.join(taskRoot, relativePath),
+      ...actual
+    });
+  }
+  return { manifestArtifacts, fileRecords };
+}
+
 function createManifest(
   snapshot: WorkspaceSnapshot,
   generatedAt: string,
-  manifestArtifacts: Map<string, ManifestArtifact>
+  manifestArtifacts: Map<string, ManifestArtifact>,
+  localArtifacts: ResourceWorkspaceManifest["localArtifacts"]
 ): ResourceWorkspaceManifest {
   const resources = snapshot.resources.map((resource) => ({
     id: resource.id,
@@ -411,6 +545,8 @@ function createManifest(
     selected: resource.selected,
     attempts: resource.attempts,
     failureReason: resource.failureReason ?? null,
+    github: resource.github ?? null,
+    npm: resource.npm ?? null,
     artifact: manifestArtifacts.get(resource.id) ?? null
   }));
   const downloadFiles = [...manifestArtifacts.values()].map(
@@ -427,17 +563,31 @@ function createManifest(
     taskRequirements: snapshot.taskRequirements,
     planValidation: snapshot.planValidation,
     approvedRevision: snapshot.revision,
+    catalog: {
+      version: trustedCatalogMetadata.catalogVersion,
+      sourceSha256: trustedCatalogMetadata.sourceSha256
+    },
     mode: "electron-controlled-export",
     generatedAt,
     resources,
+    localArtifacts,
     audit: {
       toolResults: snapshot.agentRun.toolResults.map(sanitizeToolAudit),
       policyDecisions: snapshot.agentRun.policyAudit.map(sanitizePolicyAudit)
     },
     handoff: {
       ready: true,
-      files: [...documentFiles, ...downloadFiles],
-      nextAction: "先核对 Manifest revision 与 downloads/ 校验信息，再按 README.md 人工处理资源。",
+      files: [
+        ...documentFiles,
+        ...downloadFiles,
+        ...localArtifacts.flatMap((artifact) =>
+          artifact.relativePath ? [artifact.relativePath] : []
+        )
+      ],
+      nextAction:
+        snapshot.route === "github-project-discovery"
+          ? "先核对 Manifest 中的固定 commit、sources/ 归档与项目就绪度，再决定是否准备依赖。"
+          : "先核对 Manifest revision 与 downloads/ 校验信息，再按 README.md 人工处理资源。",
       missingItems: []
     }
   };
@@ -482,13 +632,22 @@ function createArtifacts(
       `${manifest.taskRequirements && typeof manifest.taskRequirements === "object" && "label" in manifest.taskRequirements ? String((manifest.taskRequirements as { label: unknown }).label) : "资源准备"}工作区`,
     summary:
       workspaceGuide?.summary ??
-      `任务“${manifest.task}”的资源已按 Manifest r${manifest.revision} 写入 downloads/。当前状态只代表资源已准备，不代表软件已安装。`,
+      (manifest.route === "github-project-discovery"
+        ? `任务“${manifest.task}”的固定 commit 源码归档已按 Manifest r${manifest.revision} 写入 sources/。当前状态只代表源码已准备，不代表项目可运行。`
+        : `任务“${manifest.task}”的资源已按 Manifest r${manifest.revision} 写入 downloads/。当前状态只代表资源已准备，不代表软件已安装。`),
     nextActions:
-      workspaceGuide?.nextActions ?? [
-        "核对 resource-manifest.json 中每个 artifact 的相对路径与 SHA256。",
-        "按实际需要人工运行安装程序或导入资源。",
-        "如需更换来源，返回 Agent 创建并审批新的 plan revision。"
-      ]
+      workspaceGuide?.nextActions ??
+      (manifest.route === "github-project-discovery"
+        ? [
+            "核对 resource-manifest.json 中的仓库、commit SHA、许可证与归档 SHA256。",
+            "阅读项目结构分析和 Agent B 就绪度结论，再决定是否准备锁文件依赖。",
+            "源码及依赖准备过程不会自动执行仓库脚本或安装命令。"
+          ]
+        : [
+            "核对 resource-manifest.json 中每个 artifact 的相对路径与 SHA256。",
+            "按实际需要人工运行安装程序或导入资源。",
+            "如需更换来源，返回 Agent 创建并审批新的 plan revision。"
+          ])
   };
   return new Map<string, string>([
     ["resource-manifest.json", template.renderManifest(context)],
@@ -612,10 +771,16 @@ export async function exportWorkspace(
       taskRoot,
       options.allowTestFixtures === true
     );
+    const copiedLocal = await copyAdditionalLocalArtifacts(
+      options.localArtifacts ?? [],
+      stagingRoot,
+      taskRoot
+    );
     const manifest = createManifest(
       snapshot,
       generatedAt,
-      copied.manifestArtifacts
+      copied.manifestArtifacts,
+      copiedLocal.manifestArtifacts
     );
     const artifacts = createArtifacts(
       manifest,
@@ -650,7 +815,11 @@ export async function exportWorkspace(
       rootPath: taskRoot,
       generatedAt,
       reusedExisting: false,
-      files: [...documentRecords, ...copied.fileRecords]
+      files: [
+        ...documentRecords,
+        ...copied.fileRecords,
+        ...copiedLocal.fileRecords
+      ]
     };
   } catch (error) {
     await rm(stagingRoot, { force: true, recursive: true });

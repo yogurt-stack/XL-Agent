@@ -33,7 +33,9 @@ function createViewState(
       summary,
       state,
       approvals: [],
-      workspaceExports: []
+      workspaceExports: [],
+      downloadArtifacts: [],
+      operationEvents: []
     },
     error: null,
     refresh: () => undefined,

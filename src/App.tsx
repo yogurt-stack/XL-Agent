@@ -19,14 +19,33 @@ export function App() {
     dispatch,
     modelConnectionState,
     persistenceState,
+    capabilities,
     testModelConnection,
     retryTaskLocally,
+    resetDemoData,
     readWorkspaceFile,
-    openWorkspace
+    openWorkspace,
+    selectLocalResources,
+    selectLocalRepository,
+    prepareGitHubPublish,
+    approveGitHubPublish,
+    selectWorkspaceRoot
   } = useAgentCore();
   const [activeView, setActiveView] = useState<AppView>("home");
   const historyState = useTaskHistory(activeView === "history");
   const mainPanelRef = useRef<HTMLElement>(null);
+  const previousHandoffReadyRef = useRef(false);
+
+  const handoffReady =
+    state.phase === "handoff" && state.workspace.ready;
+
+  useEffect(() => {
+    const becameReady = handoffReady && !previousHandoffReadyRef.current;
+    previousHandoffReadyRef.current = handoffReady;
+    if (becameReady && activeView === "execution") {
+      setActiveView("workspace");
+    }
+  }, [activeView, handoffReady]);
 
   useEffect(() => {
     const mainPanel = mainPanelRef.current;
@@ -40,13 +59,13 @@ export function App() {
       <Sidebar activeView={activeView} onViewChange={setActiveView} />
       <AgentTopBar modelConnection={modelConnectionState} state={state} />
       <main className="main-panel" ref={mainPanelRef}>
-        {activeView === "home" && <AgentHomeView dispatch={dispatch} state={state} onNavigate={setActiveView} />}
+        {activeView === "home" && <AgentHomeView capabilities={capabilities} dispatch={dispatch} state={state} onNavigate={setActiveView} onSelectLocalRepository={selectLocalRepository} />}
         {activeView === "clarification" && <ClarificationView dispatch={dispatch} state={state} onNavigate={setActiveView} onRetryLocally={retryTaskLocally} />}
-        {activeView === "plan" && <ResourcePlanView dispatch={dispatch} state={state} onNavigate={setActiveView} />}
+        {activeView === "plan" && <ResourcePlanView dispatch={dispatch} state={state} onNavigate={setActiveView} onSelectLocalResources={selectLocalResources} onSelectWorkspaceRoot={selectWorkspaceRoot} />}
         {activeView === "execution" && <ExecutionView dispatch={dispatch} state={state} onNavigate={setActiveView} modelConnection={modelConnectionState} />}
-        {activeView === "workspace" && <WorkspaceView dispatch={dispatch} onOpenWorkspace={openWorkspace} onReadFile={readWorkspaceFile} state={state} />}
+        {activeView === "workspace" && <WorkspaceView dispatch={dispatch} onApproveGitHubPublish={approveGitHubPublish} onNavigate={setActiveView} onOpenWorkspace={openWorkspace} onPrepareGitHubPublish={prepareGitHubPublish} onReadFile={readWorkspaceFile} onSelectWorkspaceRoot={selectWorkspaceRoot} state={state} />}
         {activeView === "history" && <TaskHistoryView historyState={historyState} />}
-        {activeView === "settings" && <SettingsView modelConnection={modelConnectionState} onTestConnection={testModelConnection} persistence={persistenceState} state={state} />}
+        {activeView === "settings" && <SettingsView capabilities={capabilities} modelConnection={modelConnectionState} onResetDemoData={resetDemoData} onTestConnection={testModelConnection} persistence={persistenceState} state={state} />}
       </main>
     </div>
   );

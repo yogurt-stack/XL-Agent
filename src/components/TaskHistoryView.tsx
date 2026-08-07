@@ -19,6 +19,9 @@ import type { TaskHistoryViewState } from "../features/task-history/useTaskHisto
 const knownPhases = new Set<AgentPhase>([
   "intake",
   "routing",
+  "unsupported",
+  "task_planning",
+  "waiting_task_plan_confirmation",
   "clarifying",
   "planning",
   "waiting_approval",
@@ -28,6 +31,7 @@ const knownPhases = new Set<AgentPhase>([
   "exporting",
   "awaiting_export_retry",
   "replanning",
+  "result",
   "handoff",
   "cancelled"
 ]);
@@ -36,6 +40,7 @@ const resourceStatusLabels: Record<ResourceStatus, string> = {
   pending: "待确认",
   queued: "等待下载",
   downloading: "下载中",
+  paused: "已暂停",
   downloaded: "待验证",
   verified: "已验证",
   failed: "失败",
@@ -48,6 +53,17 @@ const approvalStatusLabels = {
   expired: "已过期",
   revoked: "已撤销"
 } as const;
+
+const supplyChainEventLabels: Record<string, string> = {
+  "catalog-approval-pinned": "目录版本已固定",
+  "catalog-pin-rejected": "目录版本不匹配",
+  "plan-approval-pinned": "审批计划指纹已固定",
+  "plan-pin-rejected": "审批计划指纹不匹配",
+  "download-checkpointed": "下载断点已记录",
+  "download-resumed": "下载已断点续传",
+  "signature-verified": "制品签名已验证",
+  "signature-rejected": "制品签名被拒绝"
+};
 
 function safePhaseLabel(phase: string) {
   return knownPhases.has(phase as AgentPhase)
@@ -291,6 +307,7 @@ export function TaskHistoryView({
                             </span>
                             <small>批准：{formatDate(approval.approvedAt)}</small>
                             <small>到期：{formatDate(approval.expiresAt)}</small>
+                            <small>目录：{approval.catalogVersion} · {approval.catalogSourceSha256.slice(0, 12)}…</small>
                           </div>
                         ))}
                       </div>
@@ -370,6 +387,35 @@ export function TaskHistoryView({
                     ) : (
                       <EmptyDetail message="该快照没有运行日志。" />
                     )}
+                  </section>
+
+                  <section className="agent-panel">
+                    <div className="agent-panel-heading">
+                      <ShieldCheck size={17} />
+                      <h2>供应链与恢复审计</h2>
+                    </div>
+                    {detail.operationEvents.length ? (
+                      <div className="history-log-list">
+                        {detail.operationEvents.slice(0, 20).map((event) => (
+                          <div className={`history-log-${event.outcome === "success" ? "info" : "error"}`} key={event.eventId}>
+                            <time>{formatDate(event.createdAt)}</time>
+                            <span>{supplyChainEventLabels[event.eventType] ?? event.eventType}{event.resourceId ? ` · ${event.resourceId}` : ""}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <EmptyDetail message="该任务尚无 P1 供应链事件。" />
+                    )}
+                    {detail.downloadArtifacts.length ? (
+                      <div className="history-tool-list">
+                        {detail.downloadArtifacts.map((artifact) => (
+                          <div key={`${artifact.taskId}-${artifact.revision}-${artifact.resourceId}`}>
+                            <span>{artifact.resourceId} · {artifact.actualPublisher ?? artifact.expectedPublisher ?? "签名不适用"}</span>
+                            <em className={artifact.signatureStatus === "valid" || artifact.signatureStatus === "not-applicable" ? "trace-success" : artifact.signatureStatus === "pending" ? "trace-cancelled" : "trace-error"}>{artifact.signatureStatus}</em>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
                   </section>
                 </div>
               </>

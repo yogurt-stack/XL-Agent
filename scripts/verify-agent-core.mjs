@@ -44,12 +44,63 @@ const { createResourceManifest } = require(path.join(outputDir, "manifest.js"));
 const { trustedCatalog, windows11Profile } = require(path.join(outputDir, "catalog.js"));
 const { deriveTaskRequirements } = require(path.join(outputDir, "taskRequirements.js"));
 const { validatePlannedResources, validatePlanResourceIds } = require(path.join(outputDir, "planValidation.js"));
+const {
+  createTaskPlan,
+  defaultTaskPlanToolPolicies,
+  prepareTaskPlanForConfirmation,
+  validateTaskPlan
+} = require(path.join(outputDir, "taskPlan.js"));
+const { createLocalTaskPlanProposal } = require(path.join(outputDir, "taskPlanTemplates.js"));
 
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
 };
 
 const issueCodes = (result) => new Set(result.issues.map((item) => item.code));
+const confirmTaskPlanState = (state) => {
+  const availableTools = [
+    "read_system_profile",
+    "search_trusted_catalog",
+    "search_github_repositories",
+    "controlled_download",
+    "export_workspace"
+  ];
+  const validationContext = {
+    tools: defaultTaskPlanToolPolicies.filter((policy) =>
+      availableTools.includes(policy.name)
+    ),
+    requireInitialConfirmation: true
+  };
+  const createdAt = "2026-07-31T00:00:00.000Z";
+  const draft = createTaskPlan({
+    planId: `verify-plan-${state.taskId}`.slice(0, 80),
+    taskId: state.taskId,
+    proposal: createLocalTaskPlanProposal({
+      state,
+      step: state.agentRun.step,
+      maxSteps: state.agentRun.maxSteps,
+      availableTools,
+      toolResults: state.agentRun.toolResults
+    }),
+    createdBy: "local-rule",
+    createdAt
+  });
+  const validation = validateTaskPlan(draft, validationContext);
+  const proposed = transition(state, {
+    type: "TASK_PLAN_PROPOSED",
+    plan: prepareTaskPlanForConfirmation(
+      draft,
+      validationContext,
+      createdAt
+    ),
+    validation
+  });
+  return transition(proposed, {
+    type: "TASK_PLAN_CONFIRMED",
+    revision: 1,
+    confirmedAt: "2026-07-31T00:01:00.000Z"
+  });
+};
 const pythonRequirementState = {
   task: "准备 Python 机器学习环境",
   answers: { "python-scope": "仅 Python AI" }
@@ -216,6 +267,9 @@ const runUntil = async (phase) => {
 };
 
 send({ type: "SUBMIT_TASK", task: "准备 Windows AI 环境" });
+await runUntil("waiting_task_plan_confirmation");
+assert(state.agentRun.toolResults.length === 0, "Task Plan confirmation must precede all tool calls");
+send({ type: "CONFIRM_TASK_PLAN", revision: 1 });
 await runUntil("clarifying");
 send({ type: "ANSWER_CLARIFICATION", questionId: "primary-workload", answer: "全栈 AI 应用" });
 send({ type: "ANSWER_CLARIFICATION", questionId: "mirror-policy", answer: "允许备用镜像" });
@@ -223,7 +277,11 @@ await runUntil("waiting_approval");
 assert(state.phase === "waiting_approval" && state.revision === 1, "Initial plan must await approval");
 
 send({ type: "TOGGLE_RESOURCE", resourceId: "python-312", selected: false });
-assert(state.phase === "replanning", "Cancelling a required resource must trigger replanning");
+assert(
+  state.phase === "waiting_task_plan_confirmation" && state.taskPlan?.revision === 2,
+  "Cancelling a required resource must create a newly confirmable TaskPlan revision"
+);
+send({ type: "CONFIRM_TASK_PLAN", revision: state.taskPlan.revision });
 await runUntil("waiting_approval");
 assert(state.phase === "waiting_approval" && state.revision === 2, "Replacement plan must await approval");
 assert(state.resources.some((resource) => resource.id === "miniforge-py312"), "Mirror policy must select the trusted fallback");
@@ -270,6 +328,11 @@ assert(
 await runUntil("awaiting_failure_action");
 assert(state.revision === 2, "A download failure must not create a new revision before user action");
 send({ type: "RESOLVE_DOWNLOAD_FAILURE", action: "trusted-mirror" });
+assert(
+  state.phase === "waiting_task_plan_confirmation" && state.taskPlan?.revision === 3,
+  "Failure recovery must create a newly confirmable TaskPlan revision"
+);
+send({ type: "CONFIRM_TASK_PLAN", revision: state.taskPlan.revision });
 await runUntil("waiting_approval");
 assert(state.revision === 3, "Injected download failure must create a new approval revision");
 assert(state.resources.some((resource) => resource.id === "sample-project-mirror"), "Download failure must select the project mirror");
@@ -277,11 +340,15 @@ assert(state.resources.some((resource) => resource.id === "sample-project-mirror
 send({ type: "APPROVE_PLAN", revision: state.revision });
 await runUntil("verifying");
 send({ type: "VERIFY_RESOURCES", versionMismatchResourceId: "sample-project-mirror" });
-assert(state.phase === "replanning", "Version mismatch must trigger replanning");
+assert(
+  state.phase === "waiting_task_plan_confirmation" && state.taskPlan?.revision === 4,
+  "Version mismatch must trigger a newly confirmable TaskPlan revision"
+);
 assert(
   state.requestedReplanStrategy === "primary-retry",
   "A failed fallback without its own fallback must retry the current primary source"
 );
+send({ type: "CONFIRM_TASK_PLAN", revision: state.taskPlan.revision });
 await runUntil("waiting_approval");
 assert(state.phase === "waiting_approval" && state.revision === 4, "Version replacement must await approval");
 
@@ -296,6 +363,7 @@ const directSend = (event) => {
 };
 directSend({ type: "SUBMIT_TASK", task: "准备 Windows AI 环境" });
 directSend(new FixedWindowsRouter().route(primaryOnlyState));
+primaryOnlyState = confirmTaskPlanState(primaryOnlyState);
 directSend({ type: "ANSWER_CLARIFICATION", questionId: "primary-workload", answer: "Python AI 开发" });
 directSend({ type: "SKIP_CLARIFICATION", questionId: "mirror-policy" });
 directSend({ type: "PLAN_GENERATED" });
@@ -414,7 +482,9 @@ const configuredConnection = new ModelConnectionController(
     getConnectionInfo: async () => ({
       configured: true,
       endpointHost: "models.example.test",
-      model: "remote-test"
+      model: "remote-test",
+      providerId: "openai-compatible",
+      endpointMode: "endpoint"
     }),
     testConnection: async () => ({ ok: true })
   },
@@ -438,7 +508,9 @@ const failedConnection = new ModelConnectionController(
     getConnectionInfo: async () => ({
       configured: true,
       endpointHost: "models.example.test",
-      model: "remote-test"
+      model: "remote-test",
+      providerId: "openai-compatible",
+      endpointMode: "endpoint"
     }),
     testConnection: async () => ({
       ok: false,
@@ -460,7 +532,9 @@ const fallbackConnection = new ModelConnectionController({
   getConnectionInfo: async () => ({
     configured: true,
     endpointHost: "models.example.test",
-    model: "remote-test"
+    model: "remote-test",
+    providerId: "openai-compatible",
+    endpointMode: "endpoint"
   }),
   testConnection: async () => ({ ok: true })
 });
@@ -528,6 +602,8 @@ const runModelUntil = async (phase) => {
 };
 
 modelRuntime.dispatch({ type: "SUBMIT_TASK", task: "为 React 和 Node.js 准备全栈 AI 环境" });
+await runModelUntil("waiting_task_plan_confirmation");
+modelRuntime.dispatch({ type: "CONFIRM_TASK_PLAN", revision: 1 });
 await runModelUntil("clarifying");
 assert(modelState.clarifications[0]?.id === "fullstack-scope", "Runtime must show the full-stack clarification");
 modelRuntime.dispatch({
@@ -537,9 +613,9 @@ modelRuntime.dispatch({
 });
 await runModelUntil("waiting_approval");
 assert(modelState.resources.some((resource) => resource.id === "node-lts"), "Runtime plan must include Node.js");
-assert(modelState.agentRun.step === 3, "Deterministic routing plus planning must produce three model decisions");
+assert(modelState.agentRun.step === 2, "DAG-owned clarifications and read tools must leave only two model decisions");
 assert(modelState.agentRun.toolResults.length === 2, "Runtime must record both read-only tool results");
-assert(modelState.agentRun.policyAudit.length === 3, "Runtime must audit every model action");
+assert(modelState.agentRun.policyAudit.length === 4, "Runtime must audit every model and executor action");
 
 modelRuntime.dispatch({ type: "APPROVE_PLAN", revision: modelState.revision });
 await runModelUntil("awaiting_failure_action");
@@ -553,25 +629,32 @@ const retryRequestedState = transition(modelState, {
   action: "primary-retry"
 });
 assert(
-  retryRequestedState.phase === "replanning" && retryRequestedState.requestedReplanStrategy === "primary-retry",
+  retryRequestedState.phase === "waiting_task_plan_confirmation" &&
+    retryRequestedState.taskPlan?.revision === 2 &&
+    retryRequestedState.requestedReplanStrategy === "primary-retry",
   "Retrying the original source must lock replanning to primary-retry"
 );
+const confirmedRetryState = transition(retryRequestedState, {
+  type: "TASK_PLAN_CONFIRMED",
+  revision: retryRequestedState.taskPlan.revision,
+  confirmedAt: "2026-08-01T00:00:00.000Z"
+});
 const retryDecision = await localModel.decide({
-  state: retryRequestedState,
-  step: retryRequestedState.agentRun.step,
-  maxSteps: retryRequestedState.agentRun.maxSteps,
+  state: confirmedRetryState,
+  step: confirmedRetryState.agentRun.step,
+  maxSteps: confirmedRetryState.agentRun.maxSteps,
   availableTools: ["read_system_profile", "search_trusted_catalog", "simulate_download"],
-  toolResults: retryRequestedState.agentRun.toolResults
+  toolResults: confirmedRetryState.agentRun.toolResults
 });
 assert(
   retryDecision.action.type === "create_replan" && retryDecision.action.strategy === "primary-retry",
   "The model must follow the user's primary source retry choice"
 );
 assert(
-  new DefaultAgentPolicy().evaluate(retryDecision.action, retryRequestedState).outcome === "require_approval",
+  new DefaultAgentPolicy().evaluate(retryDecision.action, confirmedRetryState).outcome === "require_approval",
   "A primary source retry plan must still require approval"
 );
-const retryPlanState = transition(retryRequestedState, {
+const retryPlanState = transition(confirmedRetryState, {
   type: "MODEL_REPLAN_PROPOSED",
   strategy: "primary-retry",
   explanation: "Retry the approved primary source."
@@ -593,6 +676,14 @@ assert(
   "Agent B delegation must preserve an incomplete handoff"
 );
 modelRuntime.dispatch({ type: "RESOLVE_DOWNLOAD_FAILURE", action: "trusted-mirror" });
+assert(
+  modelState.phase === "waiting_task_plan_confirmation" && modelState.taskPlan?.revision === 2,
+  "Model recovery must wait for the revised TaskPlan confirmation"
+);
+modelRuntime.dispatch({
+  type: "CONFIRM_TASK_PLAN",
+  revision: modelState.taskPlan.revision
+});
 await runModelUntil("waiting_approval");
 assert(modelState.revision === 2, "Download failure must still create a second approval revision");
 assert(
@@ -668,6 +759,8 @@ const runAmbiguousUntil = async (phase) => {
 };
 
 ambiguousRuntime.dispatch({ type: "SUBMIT_TASK", task: "帮我准备开发环境" });
+await runAmbiguousUntil("waiting_task_plan_confirmation");
+ambiguousRuntime.dispatch({ type: "CONFIRM_TASK_PLAN", revision: 1 });
 await runAmbiguousUntil("clarifying");
 assert(ambiguousState.clarifications[0]?.id === "primary-workload", "Generic task must ask its workload first");
 ambiguousRuntime.dispatch({
@@ -683,7 +776,7 @@ ambiguousRuntime.dispatch({
   answer: "仅 Python AI"
 });
 await runAmbiguousUntil("waiting_approval");
-assert(ambiguousState.agentRun.step === 4, "Ambiguous task must finish planning within four model steps after deterministic routing");
+assert(ambiguousState.agentRun.step === 3, "DAG-owned read tools must let the ambiguous task finish within three model decisions");
 
 const limitState = createInitialAgentState();
 const limitRuntime = new AgentRuntime({

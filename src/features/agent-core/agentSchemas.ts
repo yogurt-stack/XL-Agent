@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { taskPlanProposalSchema } from "./taskPlan";
 import type {
   AgentAction,
   AgentToolCall,
@@ -10,6 +11,32 @@ const resourceIdSchema = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,79}$/i);
 const identifierSchema = z.string().trim().min(1).max(160);
 const descriptionSchema = z.string().trim().min(1).max(4000);
 const taskIdSchema = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,127}$/i);
+const githubDiscoverySearchInputSchema = z.object({
+  mode: z.literal("discovery"),
+  keywords: z.string().trim().max(200),
+  createdWithinDays: z.union([
+    z.literal(7),
+    z.literal(30),
+    z.literal(90)
+  ]),
+  sort: z.enum(["stars", "updated", "forks"]),
+  limit: z.number().int().min(1).max(10)
+}).strict();
+const githubSearchInputSchema = z.union([
+  githubDiscoverySearchInputSchema,
+  z.object({
+    mode: z.literal("name"),
+    query: z.string().trim().min(1).max(100),
+    limit: z.number().int().min(1).max(10)
+  }).strict(),
+  z.object({
+    mode: z.literal("exact"),
+    fullName: z.string().regex(
+      /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/
+    ),
+    limit: z.literal(1)
+  }).strict()
+]);
 
 export const agentToolCallSchema = z.discriminatedUnion("name", [
   z.object({
@@ -24,6 +51,11 @@ export const agentToolCallSchema = z.discriminatedUnion("name", [
       query: z.string().trim().max(4000),
       resourceIds: z.array(resourceIdSchema).max(100).optional()
     }).strict()
+  }).strict(),
+  z.object({
+    callId: identifierSchema,
+    name: z.literal("search_github_repositories"),
+    input: githubSearchInputSchema
   }).strict(),
   z.object({
     callId: identifierSchema,
@@ -46,6 +78,12 @@ export const agentToolCallSchema = z.discriminatedUnion("name", [
 ]);
 
 export const agentActionSchema = z.discriminatedUnion("type", [
+  z.object({
+    actionId: identifierSchema,
+    type: z.literal("propose_task_plan"),
+    proposal: taskPlanProposalSchema,
+    explanation: descriptionSchema
+  }).strict(),
   z.object({
     actionId: identifierSchema,
     type: z.literal("ask_clarification"),
@@ -94,6 +132,10 @@ export const agentUserEventSchema = z.discriminatedUnion("type", [
     task: z.string().trim().min(1).max(4000)
   }).strict(),
   z.object({
+    type: z.literal("CONFIRM_TASK_PLAN"),
+    revision: z.number().int().positive()
+  }).strict(),
+  z.object({
     type: z.literal("ANSWER_CLARIFICATION"),
     questionId: z.string().trim().min(1).max(120),
     answer: z.string().trim().min(1).max(4000)
@@ -101,6 +143,19 @@ export const agentUserEventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("SKIP_CLARIFICATION"),
     questionId: z.string().trim().min(1).max(120)
+  }).strict(),
+  z.object({
+    type: z.literal("PREPARE_GITHUB_REPOSITORY"),
+    fullName: z.string().regex(
+      /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/
+    )
+  }).strict(),
+  z.object({
+    type: z.literal("TOGGLE_NODE_DEPENDENCIES"),
+    selected: z.boolean()
+  }).strict(),
+  z.object({
+    type: z.literal("PREPARE_NODE_DEPENDENCIES")
   }).strict(),
   z.object({
     type: z.literal("TOGGLE_RESOURCE"),
@@ -112,8 +167,19 @@ export const agentUserEventSchema = z.discriminatedUnion("type", [
     revision: z.number().int().positive()
   }).strict(),
   z.object({
+    type: z.literal("PAUSE_DOWNLOAD"),
+    resourceId: resourceIdSchema
+  }).strict(),
+  z.object({
+    type: z.literal("RESUME_DOWNLOAD"),
+    resourceId: resourceIdSchema
+  }).strict(),
+  z.object({
     type: z.literal("RESOLVE_DOWNLOAD_FAILURE"),
     action: z.enum(["trusted-mirror", "primary-retry", "delegate-agent-b"])
+  }).strict(),
+  z.object({
+    type: z.literal("RUN_AGENT_B")
   }).strict(),
   z.object({
     type: z.literal("RETRY_WORKSPACE_EXPORT")
