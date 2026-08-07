@@ -70,6 +70,11 @@ try {
     .fill("准备 Python 机器学习环境");
   await page.getByRole("button", { name: "开始任务" }).click();
   await page
+    .getByRole("heading", { name: "先确认 Agent 对任务的理解" })
+    .waitFor({ timeout: 45_000 });
+  await page.getByText("Task Plan r1", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "确认流程并继续" }).click();
+  await page
     .getByRole("heading", {
       name: "Python AI 环境是否需要同时准备前端工具链"
     })
@@ -94,6 +99,11 @@ try {
     .getByRole("button", { name: "重试原来源" })
     .click();
   await page
+    .getByRole("heading", { name: "先确认 Agent 对任务的理解" })
+    .waitFor({ timeout: 45_000 });
+  await page.getByText("Task Plan r2", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "确认流程并继续" }).click();
+  await page
     .getByText("替代计划 r2 已生成")
     .waitFor({ timeout: 45_000 });
   await page.getByRole("button", { name: "查看并确认" }).click();
@@ -105,7 +115,9 @@ try {
   await page
     .getByText("工作区交接", { exact: true })
     .waitFor({ timeout: 60_000 });
-  await page.getByRole("button", { name: "工作区" }).click();
+  await page
+    .getByRole("button", { name: "工作区", exact: true })
+    .click();
   await page
     .getByRole("heading", { name: "交接包已就绪" })
     .waitFor({ timeout: 45_000 });

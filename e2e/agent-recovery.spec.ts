@@ -188,7 +188,7 @@ async function confirmReplacementTaskPlan() {
 
 async function openCompletedWorkspace() {
   await expect(page.getByRole("heading", { name: "交接包已就绪" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "工作区" }))
+  await expect(page.getByRole("button", { name: "工作区", exact: true }))
     .toHaveAttribute("aria-current", "page");
   await expect(page.getByText("已验证并真实落盘")).toBeVisible();
   await expectMainPanelAtTop("ready workspace");
