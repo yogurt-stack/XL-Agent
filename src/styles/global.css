@@ -1678,6 +1678,32 @@ textarea:focus-visible {
   gap: 8px;
 }
 
+.clarification-freeform {
+  display: grid;
+  gap: 9px;
+}
+
+.clarification-freeform label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.clarification-freeform textarea {
+  min-height: 108px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgb(9 17 29 / 72%);
+  color: #edf5fd;
+  font: inherit;
+  line-height: 1.5;
+  padding: 11px 12px;
+}
+
+.clarification-freeform .btn {
+  justify-self: end;
+}
+
 .option-button {
   display: flex;
   min-height: 48px;
@@ -2344,6 +2370,85 @@ textarea:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.local-environment-tool-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.local-environment-tool-card {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) minmax(150px, auto);
+  align-items: center;
+  gap: 11px;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 8px;
+  background: rgb(24 34 50 / 86%);
+  padding: 11px 13px;
+}
+
+.local-environment-tool-icon {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid rgb(33 196 217 / 24%);
+  border-radius: 7px;
+  background: rgb(33 196 217 / 8%);
+  color: #80e1ec;
+}
+
+.local-environment-tool-card > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.local-environment-tool-card > div > strong {
+  color: #e7f0fa;
+  font-size: 13px;
+}
+
+.local-environment-tool-card code {
+  width: fit-content;
+  border-radius: 4px;
+  background: rgb(255 255 255 / 5%);
+  color: #9db0c7;
+  padding: 2px 6px;
+  font-size: 10px;
+}
+
+.local-environment-tool-card small {
+  color: var(--subtle);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.local-environment-tool-card > span:last-child {
+  display: grid;
+  justify-items: end;
+  gap: 4px;
+  text-align: right;
+}
+
+.local-environment-tool-card > span:last-child strong {
+  color: #dff9fc;
+  font-size: 12px;
+}
+
+.local-environment-tool-card em {
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 750;
+}
+
+.environment-status-available { color: #73ddb0; }
+.environment-status-not_found { color: #f0b76e; }
+.environment-status-not_applicable { color: #91a1b5; }
+.environment-status-error { color: #ef8794; }
 
 .github-repository-list {
   display: grid;
@@ -4024,6 +4129,16 @@ textarea:focus-visible {
 
   .github-results-summary span:nth-child(n + 3) {
     border-top: 1px solid rgb(255 255 255 / 7%);
+  }
+
+  .local-environment-tool-card {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+
+  .local-environment-tool-card > span:last-child {
+    grid-column: 2;
+    justify-items: start;
+    text-align: left;
   }
 
   .github-results-footer {

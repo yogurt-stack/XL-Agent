@@ -240,6 +240,8 @@ function getAgentRuntimeHost() {
           githubRepositorySearchClient.search(input),
         inspectGitHubRepository: (fullName) =>
           githubRepositorySearchClient.inspectRepository(fullName),
+        inspectGitHubRepositoryForAnalysis: (fullName) =>
+          githubRepositorySearchClient.inspectRepositoryForAnalysis(fullName),
         githubPublisher,
         workspaceRoot: getWorkspaceRoot(),
         performDownload: performTrustedDownload,

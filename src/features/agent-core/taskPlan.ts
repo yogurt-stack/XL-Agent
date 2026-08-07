@@ -31,12 +31,30 @@ const inputBindingSchema = z.object({
   required: z.boolean()
 }).strict();
 
+const stepExecutionSchema = z.discriminatedUnion("mode", [
+  z.object({
+    mode: z.literal("deterministic")
+  }).strict(),
+  z.object({
+    mode: z.literal("agent_loop"),
+    allowedTools: z.array(z.string().trim().regex(toolNamePattern)).min(1).max(30),
+    maxRisk: z.literal("read_only"),
+    allowParallelReads: z.boolean(),
+    maxTurns: z.number().int().min(1).max(20),
+    maxToolCalls: z.number().int().min(1).max(100),
+    maxRepeatedCalls: z.number().int().min(1).max(5),
+    maxWallTimeMs: z.number().int().min(1_000).max(900_000),
+    completionCriteria: z.array(textSchema).min(1).max(20)
+  }).strict()
+]);
+
 const stepBaseShape = {
   id: identifierSchema,
   title: z.string().trim().min(1).max(200),
   description: textSchema,
   kind: z.enum([
     "read_tool",
+    "analysis",
     "user_decision",
     "resource_plan",
     "write_tool",
@@ -61,6 +79,7 @@ const stepBaseShape = {
 
 export const taskPlanStepProposalSchema = z.object({
   ...stepBaseShape,
+  execution: stepExecutionSchema.optional(),
   approval: z.object({
     required: z.boolean(),
     reason: textSchema.nullable()
@@ -81,6 +100,7 @@ export const taskPlanProposalSchema = z.object({
 
 const taskPlanStepSchema = z.object({
   ...stepBaseShape,
+  execution: stepExecutionSchema,
   approval: z.object({
     required: z.boolean(),
     reason: textSchema.nullable(),
@@ -109,7 +129,7 @@ const taskPlanStepSchema = z.object({
 }).strict();
 
 export const taskPlanSchema = z.object({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(2),
   planId: identifierSchema,
   taskId: z.string().trim().regex(/^[a-z0-9][a-z0-9._-]{0,127}$/i),
   revision: z.number().int().positive(),
@@ -120,6 +140,79 @@ export const taskPlanSchema = z.object({
   assumptions: z.array(textSchema).max(50),
   constraints: z.array(textSchema).max(50),
   steps: z.array(taskPlanStepSchema).min(1).max(100),
+  status: z.enum([
+    "draft",
+    "waiting_confirmation",
+    "executing",
+    "waiting_user_input",
+    "waiting_approval",
+    "replanning",
+    "completed",
+    "failed",
+    "cancelled"
+  ]),
+  confirmation: z.object({
+    required: z.boolean(),
+    reason: textSchema.nullable(),
+    status: z.enum(["not_required", "pending", "confirmed"]),
+    confirmedAt: nullableTimestampSchema,
+    confirmedRevision: z.number().int().positive().nullable()
+  }).strict(),
+  createdBy: z.enum(["local-rule", "remote-llm", "user"]),
+  createdAt: timestampSchema,
+  updatedAt: timestampSchema
+}).strict();
+
+/** TaskPlan v1 is accepted only at persistence/import boundaries. */
+const legacyTaskPlanStepSchema = z.object({
+  ...stepBaseShape,
+  kind: z.enum([
+    "read_tool",
+    "user_decision",
+    "resource_plan",
+    "write_tool",
+    "verification",
+    "handoff"
+  ]),
+  approval: z.object({
+    required: z.boolean(),
+    reason: textSchema.nullable(),
+    status: z.enum(["not_required", "pending", "approved"]),
+    approvedAt: nullableTimestampSchema,
+    approvedRevision: z.number().int().positive().nullable()
+  }).strict(),
+  status: z.enum([
+    "pending",
+    "running",
+    "waiting_user_input",
+    "waiting_approval",
+    "completed",
+    "failed",
+    "skipped",
+    "blocked"
+  ]),
+  result: z.object({
+    reference: z.string().trim().min(1).max(500),
+    summary: textSchema,
+    output: z.json().optional()
+  }).strict().nullable(),
+  error: textSchema.nullable(),
+  startedAt: nullableTimestampSchema,
+  completedAt: nullableTimestampSchema
+}).strict();
+
+const legacyTaskPlanSchema = z.object({
+  schemaVersion: z.literal(1),
+  planId: identifierSchema,
+  taskId: z.string().trim().regex(/^[a-z0-9][a-z0-9._-]{0,127}$/i),
+  revision: z.number().int().positive(),
+  previousRevision: z.number().int().positive().nullable(),
+  revisionReason: textSchema,
+  objective: textSchema,
+  deliverables: z.array(textSchema).min(1).max(50),
+  assumptions: z.array(textSchema).max(50),
+  constraints: z.array(textSchema).max(50),
+  steps: z.array(legacyTaskPlanStepSchema).min(1).max(100),
   status: z.enum([
     "draft",
     "waiting_confirmation",
@@ -218,37 +311,92 @@ export const defaultTaskPlanToolPolicies: readonly TaskPlanToolPolicy[] = [
     name: "read_system_profile",
     allowedStepKinds: ["read_tool"],
     risk: "read_only",
-    approvalRequired: false
+    approvalRequired: false,
+    agentLoopAllowed: true
+  },
+  {
+    name: "inspect_local_development_environment",
+    allowedStepKinds: ["read_tool"],
+    risk: "read_only",
+    approvalRequired: false,
+    agentLoopAllowed: true
+  },
+  {
+    name: "list_local_repository_tree",
+    allowedStepKinds: ["read_tool"],
+    risk: "read_only",
+    approvalRequired: false,
+    agentLoopAllowed: true
+  },
+  {
+    name: "read_local_repository_file",
+    allowedStepKinds: ["read_tool"],
+    risk: "read_only",
+    approvalRequired: false,
+    agentLoopAllowed: true
+  },
+  {
+    name: "inspect_project_requirements",
+    allowedStepKinds: ["read_tool"],
+    risk: "read_only",
+    approvalRequired: false,
+    agentLoopAllowed: true
+  },
+  {
+    name: "list_github_repository_tree",
+    allowedStepKinds: ["read_tool"],
+    risk: "read_only",
+    approvalRequired: false,
+    agentLoopAllowed: true
+  },
+  {
+    name: "read_github_repository_file",
+    allowedStepKinds: ["read_tool"],
+    risk: "read_only",
+    approvalRequired: false,
+    agentLoopAllowed: true
+  },
+  {
+    name: "inspect_github_project_requirements",
+    allowedStepKinds: ["read_tool"],
+    risk: "read_only",
+    approvalRequired: false,
+    agentLoopAllowed: true
   },
   {
     name: "search_trusted_catalog",
     allowedStepKinds: ["read_tool"],
     risk: "read_only",
-    approvalRequired: false
+    approvalRequired: false,
+    agentLoopAllowed: true
   },
   {
     name: "search_github_repositories",
     allowedStepKinds: ["read_tool"],
     risk: "read_only",
-    approvalRequired: false
+    approvalRequired: false,
+    agentLoopAllowed: true
   },
   {
     name: "simulate_download",
     allowedStepKinds: ["read_tool", "verification"],
     risk: "read_only",
-    approvalRequired: false
+    approvalRequired: false,
+    agentLoopAllowed: false
   },
   {
     name: "controlled_download",
     allowedStepKinds: ["write_tool"],
     risk: "local_write",
-    approvalRequired: true
+    approvalRequired: true,
+    agentLoopAllowed: false
   },
   {
     name: "export_workspace",
     allowedStepKinds: ["write_tool"],
     risk: "local_write",
-    approvalRequired: true
+    approvalRequired: true,
+    agentLoopAllowed: false
   }
 ];
 
@@ -262,6 +410,9 @@ function initializeStep(
 ): TaskPlanStep {
   return {
     ...clone(proposal),
+    execution: clone(
+      proposal.execution ?? { mode: "deterministic" as const }
+    ),
     approval: {
       ...proposal.approval,
       status: proposal.approval.required ? "pending" : "not_required",
@@ -281,14 +432,24 @@ export function parseTaskPlanProposal(value: unknown): TaskPlanProposal {
 }
 
 export function parseTaskPlan(value: unknown): TaskPlan {
-  return taskPlanSchema.parse(value) as TaskPlan;
+  const current = taskPlanSchema.safeParse(value);
+  if (current.success) return current.data as TaskPlan;
+  const legacy = legacyTaskPlanSchema.parse(value);
+  return taskPlanSchema.parse({
+    ...legacy,
+    schemaVersion: 2,
+    steps: legacy.steps.map((step) => ({
+      ...step,
+      execution: { mode: "deterministic" as const }
+    }))
+  }) as TaskPlan;
 }
 
 export function createTaskPlan(input: CreateTaskPlanInput): TaskPlan {
   const proposal = parseTaskPlanProposal(input.proposal);
   const createdAt = timestampSchema.parse(input.createdAt);
   return taskPlanSchema.parse({
-    schemaVersion: 1,
+    schemaVersion: 2,
     planId: input.planId,
     taskId: input.taskId,
     revision: 1,
@@ -595,6 +756,64 @@ export function validateTaskPlan(
             { stepId: step.id }
           )
         );
+      }
+    }
+
+    const executionMode = step.execution?.mode ?? "deterministic";
+    if (step.kind === "analysis" && executionMode !== "agent_loop") {
+      issues.push(
+        validationIssue(
+          "AGENT_LOOP_EXECUTION_REQUIRED",
+          `分析步骤 ${step.id} 必须声明 agent_loop 执行配置。`,
+          { stepId: step.id }
+        )
+      );
+    }
+    if (executionMode === "agent_loop" && step.kind !== "analysis") {
+      issues.push(
+        validationIssue(
+          "AGENT_LOOP_STEP_KIND_INVALID",
+          `只有 analysis 步骤可以启用 agent_loop；步骤 ${step.id} 当前为 ${step.kind}。`,
+          { stepId: step.id }
+        )
+      );
+    }
+    if (step.execution?.mode === "agent_loop") {
+      const uniqueLoopTools = new Set(step.execution.allowedTools);
+      if (uniqueLoopTools.size !== step.execution.allowedTools.length) {
+        issues.push(
+          validationIssue(
+            "AGENT_LOOP_TOOL_DUPLICATE",
+            `分析步骤 ${step.id} 的能力范围不能重复注册同一工具。`,
+            { stepId: step.id }
+          )
+        );
+      }
+      for (const toolName of uniqueLoopTools) {
+        const loopToolPolicy = tools.get(toolName);
+        if (!loopToolPolicy) {
+          issues.push(
+            validationIssue(
+              "AGENT_LOOP_TOOL_NOT_ALLOWED",
+              `分析步骤 ${step.id} 的能力范围包含未注册工具 ${toolName}。`,
+              { stepId: step.id, tool: toolName }
+            )
+          );
+          continue;
+        }
+        if (
+          loopToolPolicy.risk !== "read_only" ||
+          loopToolPolicy.approvalRequired ||
+          !loopToolPolicy.agentLoopAllowed
+        ) {
+          issues.push(
+            validationIssue(
+              "AGENT_LOOP_TOOL_RISK_INVALID",
+              `分析步骤 ${step.id} 只能授权已显式注册为 Agent Loop 安全能力的无审批只读工具；${toolName} 不符合要求。`,
+              { stepId: step.id, tool: toolName }
+            )
+          );
+        }
       }
     }
 
@@ -984,7 +1203,7 @@ export function requestTaskPlanStepInput(
   };
 }
 
-/** 暂停正在运行的资源规划步骤，以接收模型发现的补充输入。 */
+/** 暂停正在运行的资源规划或分析步骤，以接收模型发现的补充输入。 */
 export function suspendTaskPlanStepForInput(
   plan: TaskPlan,
   stepId: string,
@@ -1003,7 +1222,10 @@ export function suspendTaskPlanStepForInput(
       `任务计划中不存在步骤 ${stepId}。`
     );
   }
-  if (step.status !== "running" || step.kind !== "resource_plan") {
+  if (
+    step.status !== "running" ||
+    (step.kind !== "resource_plan" && step.kind !== "analysis")
+  ) {
     throw new TaskPlanOperationError(
       "STEP_STATUS_INVALID",
       `步骤 ${stepId} 当前不能暂停等待补充输入。`
@@ -1021,7 +1243,7 @@ export function suspendTaskPlanStepForInput(
   };
 }
 
-/** 用户补充输入后恢复先前暂停的资源规划步骤。 */
+/** 用户补充输入后恢复先前暂停的资源规划或分析步骤。 */
 export function resumeTaskPlanStepAfterInput(
   plan: TaskPlan,
   stepId: string,
@@ -1040,7 +1262,10 @@ export function resumeTaskPlanStepAfterInput(
       `任务计划中不存在步骤 ${stepId}。`
     );
   }
-  if (step.status !== "waiting_user_input" || step.kind !== "resource_plan") {
+  if (
+    step.status !== "waiting_user_input" ||
+    (step.kind !== "resource_plan" && step.kind !== "analysis")
+  ) {
     throw new TaskPlanOperationError(
       "STEP_INPUT_NOT_PENDING",
       `步骤 ${stepId} 当前没有等待模型补充输入。`
@@ -1230,6 +1455,7 @@ function sameStepDefinition(
     staticInput: step.staticInput,
     inputBindings: step.inputBindings,
     expectedOutput: step.expectedOutput,
+    execution: step.execution ?? { mode: "deterministic" },
     risk: step.risk,
     approval: {
       required: step.approval.required,
@@ -1289,7 +1515,7 @@ export function reviseTaskPlan(
     );
   }
   return taskPlanSchema.parse({
-    schemaVersion: 1,
+    schemaVersion: 2,
     planId: plan.planId,
     taskId: plan.taskId,
     revision,
@@ -1329,7 +1555,7 @@ export function extendCompletedTaskPlan(
   const reason = textSchema.parse(input.reason);
   const revision = plan.revision + 1;
   return taskPlanSchema.parse({
-    schemaVersion: 1,
+    schemaVersion: 2,
     planId: plan.planId,
     taskId: plan.taskId,
     revision,

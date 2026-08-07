@@ -6,7 +6,12 @@ import type {
   RouteDecision,
   TaskRequirements
 } from "./types";
-import { taskPlanSchema } from "./taskPlan";
+import {
+  defaultTaskPlanToolPolicies,
+  parseTaskPlan,
+  taskPlanSchema,
+  validateTaskPlan
+} from "./taskPlan";
 
 const phases = new Set<AgentPhase>([
   "intake",
@@ -85,6 +90,31 @@ function isLocalRepositorySummary(value: unknown) {
   );
 }
 
+function isGitHubRepositoryAnalysisSummary(value: unknown) {
+  if (value === null) return true;
+  if (!isRecord(value) || !isRecord(value.analysis)) return false;
+  return (
+    typeof value.repositoryHandleId === "string" &&
+    value.repositoryHandleId.startsWith("github-repo-") &&
+    typeof value.fullName === "string" &&
+    /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(value.fullName) &&
+    typeof value.displayName === "string" &&
+    typeof value.defaultBranch === "string" &&
+    typeof value.commitSha === "string" &&
+    /^[a-f0-9]{40,64}$/iu.test(value.commitSha) &&
+    typeof value.treeSha === "string" &&
+    /^[a-f0-9]{40,64}$/iu.test(value.treeSha) &&
+    Number.isSafeInteger(value.trackedFileCount) &&
+    Number(value.trackedFileCount) >= 0 &&
+    typeof value.treeTruncated === "boolean" &&
+    typeof value.inspectedAt === "string" &&
+    isStringArray(value.analysis.ecosystems) &&
+    isStringArray(value.analysis.manifests) &&
+    isStringArray(value.analysis.lockfiles) &&
+    isStringArray(value.analysis.runtimeHints)
+  );
+}
+
 function isGitHubPublishState(value: unknown) {
   if (!isRecord(value)) return false;
   if (
@@ -130,6 +160,179 @@ function isTaskPlanValidation(value: unknown) {
     Array.isArray(value.topologicalOrder) &&
     isStringArray(value.topologicalOrder)
   );
+}
+
+const agentLoopStatuses = new Set([
+  "running",
+  "completed",
+  "waiting_user_input",
+  "plan_revision_proposed",
+  "stopped",
+  "aborted",
+  "failed"
+]);
+
+const agentLoopToolNames = new Set([
+  "read_system_profile",
+  "inspect_local_development_environment",
+  "list_local_repository_tree",
+  "read_local_repository_file",
+  "inspect_project_requirements",
+  "list_github_repository_tree",
+  "read_github_repository_file",
+  "inspect_github_project_requirements",
+  "search_trusted_catalog",
+  "search_github_repositories",
+  "simulate_download",
+  "controlled_download",
+  "export_workspace"
+]);
+
+function isAgentLoopUsage(value: unknown) {
+  return isRecord(value) &&
+    ["turns", "toolCalls", "executedToolCalls", "elapsedMs"].every(
+      (key) =>
+        Number.isSafeInteger(value[key]) &&
+        (value[key] as number) >= 0
+    ) &&
+    (value.executedToolCalls as number) <= (value.toolCalls as number);
+}
+
+function isAgentLoopAction(
+  value: unknown
+): value is Record<string, unknown> & { type: string } {
+  if (!isRecord(value) || typeof value.type !== "string") return false;
+  if (value.type === "tool_calls") {
+    return Array.isArray(value.calls) &&
+      value.calls.length > 0 &&
+      value.calls.length <= 8 &&
+      value.calls.every(
+        (call) =>
+          isRecord(call) &&
+          typeof call.callId === "string" &&
+          call.callId.length > 0 &&
+          typeof call.name === "string" &&
+          agentLoopToolNames.has(call.name) &&
+          call.risk === "read_only"
+      );
+  }
+  if (value.type === "complete_step") {
+    return typeof value.summary === "string" &&
+      value.summary.length <= 4_000 &&
+      (value.evidence === undefined || Array.isArray(value.evidence));
+  }
+  if (value.type === "ask_clarification") {
+    return typeof value.questionId === "string" &&
+      value.questionId.length <= 120 &&
+      typeof value.question === "string" &&
+      typeof value.reason === "string" &&
+      typeof value.required === "boolean" &&
+      (value.options === undefined || isStringArray(value.options));
+  }
+  return value.type === "propose_plan_revision" &&
+    typeof value.reason === "string" &&
+    isRecord(value.proposal);
+}
+
+function isAgentLoopMessage(value: unknown) {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.role !== "string") {
+    return false;
+  }
+  if (value.role === "user") {
+    return typeof value.content === "string" && typeof value.createdAt === "string";
+  }
+  if (value.role === "assistant") {
+    return typeof value.turnId === "string" &&
+      typeof value.rationaleSummary === "string" &&
+      typeof value.createdAt === "string" &&
+      isAgentLoopAction(value.action) &&
+      (
+        value.completionValidation === undefined ||
+        (
+          isRecord(value.completionValidation) &&
+          (
+            value.completionValidation.status === "accepted" ||
+            (
+              value.completionValidation.status === "rejected" &&
+              typeof value.completionValidation.code === "string" &&
+              typeof value.completionValidation.message === "string"
+            )
+          )
+        )
+      );
+  }
+  return value.role === "toolResult" &&
+    typeof value.callId === "string" &&
+    value.callId.length > 0 &&
+    typeof value.tool === "string" &&
+    agentLoopToolNames.has(value.tool) &&
+    ["success", "error", "blocked", "cancelled"].includes(
+      String(value.status)
+    ) &&
+    typeof value.startedAt === "string" &&
+    typeof value.finishedAt === "string";
+}
+
+function isAgentLoopRunRecord(value: unknown) {
+  if (
+    !isRecord(value) ||
+    typeof value.runId !== "string" ||
+    typeof value.planId !== "string" ||
+    !Number.isSafeInteger(value.planRevision) ||
+    typeof value.stepId !== "string" ||
+    typeof value.status !== "string" ||
+    !agentLoopStatuses.has(value.status) ||
+    !Array.isArray(value.transcript) ||
+    value.transcript.length > 500 ||
+    !value.transcript.every(isAgentLoopMessage) ||
+    !Array.isArray(value.events) ||
+    value.events.length > 1_000 ||
+    typeof value.startedAt !== "string" ||
+    (value.finishedAt !== null && typeof value.finishedAt !== "string") ||
+    !(value.usage === null || isAgentLoopUsage(value.usage))
+  ) return false;
+
+  let previousSequence = 0;
+  for (const event of value.events) {
+    if (
+      !isRecord(event) ||
+      event.runId !== value.runId ||
+      (event.stepId !== undefined && event.stepId !== value.stepId) ||
+      !Number.isSafeInteger(event.sequence) ||
+      (event.sequence as number) <= previousSequence ||
+      typeof event.at !== "string" ||
+      typeof event.type !== "string"
+    ) return false;
+    previousSequence = event.sequence as number;
+  }
+
+  if (value.outcome === null) {
+    return value.status === "running" || value.status === "failed";
+  }
+  if (
+    !isRecord(value.outcome) ||
+    value.outcome.runId !== value.runId ||
+    value.outcome.status !== value.status ||
+    !Array.isArray(value.outcome.transcript) ||
+    !isAgentLoopUsage(value.outcome.usage) ||
+    JSON.stringify(value.outcome.transcript) !== JSON.stringify(value.transcript) ||
+    JSON.stringify(value.outcome.usage) !== JSON.stringify(value.usage)
+  ) return false;
+  if (
+    value.status === "completed" ||
+    value.status === "waiting_user_input" ||
+    value.status === "plan_revision_proposed"
+  ) {
+    return isAgentLoopAction(value.outcome.action) &&
+      value.outcome.action.type === (
+        value.status === "completed"
+          ? "complete_step"
+          : value.status === "waiting_user_input"
+            ? "ask_clarification"
+            : "propose_plan_revision"
+      );
+  }
+  return true;
 }
 
 export function isRestorableAgentState(value: unknown): value is AgentState {
@@ -205,6 +408,7 @@ export function isRestorableAgentState(value: unknown): value is AgentState {
     !Array.isArray(value.resources) ||
     !Array.isArray(value.localArtifacts) ||
     !isLocalRepositorySummary(value.localRepository) ||
+    !isGitHubRepositoryAnalysisSummary(value.githubRepository) ||
     !isGitHubPublishState(value.githubPublish) ||
     !Array.isArray(value.logs) ||
     !Array.isArray(value.clarifications) ||
@@ -212,6 +416,8 @@ export function isRestorableAgentState(value: unknown): value is AgentState {
     !Array.isArray(value.agentRun.decisions) ||
     !Array.isArray(value.agentRun.toolResults) ||
     !Array.isArray(value.agentRun.policyAudit) ||
+    !(value.agentRun.agentLoop === null ||
+      isAgentLoopRunRecord(value.agentRun.agentLoop)) ||
     !isRecord(value.agentB) ||
     (value.agentB.status !== "idle" &&
       value.agentB.status !== "running" &&
@@ -298,17 +504,27 @@ export function normalizeRestorableAgentState(
   const legacyWorkspace = isRecord(candidateRecord.workspace)
     ? candidateRecord.workspace
     : {};
+  const legacyAgentRun = isRecord(candidateRecord.agentRun)
+    ? candidateRecord.agentRun
+    : {};
+  let normalizedTaskPlan: AgentState["taskPlan"] = null;
+  let normalizedTaskPlanValidation: AgentState["taskPlanValidation"] = null;
+  if (candidateRecord.taskPlan !== null && candidateRecord.taskPlan !== undefined) {
+    try {
+      normalizedTaskPlan = parseTaskPlan(candidateRecord.taskPlan);
+      normalizedTaskPlanValidation = validateTaskPlan(normalizedTaskPlan, {
+        tools: defaultTaskPlanToolPolicies,
+        requireInitialConfirmation: true
+      });
+      if (!normalizedTaskPlanValidation.valid) return null;
+    } catch {
+      return null;
+    }
+  }
   candidate = {
     ...candidateRecord,
-    taskPlan: Object.prototype.hasOwnProperty.call(candidateRecord, "taskPlan")
-      ? candidateRecord.taskPlan
-      : null,
-    taskPlanValidation: Object.prototype.hasOwnProperty.call(
-      candidateRecord,
-      "taskPlanValidation"
-    )
-      ? candidateRecord.taskPlanValidation
-      : null,
+    taskPlan: normalizedTaskPlan,
+    taskPlanValidation: normalizedTaskPlanValidation,
     localArtifacts: Array.isArray(candidateRecord.localArtifacts)
       ? candidateRecord.localArtifacts
       : [],
@@ -317,6 +533,12 @@ export function normalizeRestorableAgentState(
       "localRepository"
     )
       ? candidateRecord.localRepository
+      : null,
+    githubRepository: Object.prototype.hasOwnProperty.call(
+      candidateRecord,
+      "githubRepository"
+    )
+      ? candidateRecord.githubRepository
       : null,
     githubPublish: isRecord(candidateRecord.githubPublish)
       ? candidateRecord.githubPublish
@@ -339,7 +561,16 @@ export function normalizeRestorableAgentState(
         legacyWorkspace.overallStatus === "partially_ready" ||
         legacyWorkspace.overallStatus === "failed"
           ? legacyWorkspace.overallStatus
-          : "preparing"
+        : "preparing"
+    },
+    agentRun: {
+      ...legacyAgentRun,
+      agentLoop: Object.prototype.hasOwnProperty.call(
+        legacyAgentRun,
+        "agentLoop"
+      )
+        ? legacyAgentRun.agentLoop
+        : null
     },
     agentB: isRecord(candidateRecord.agentB)
       ? candidateRecord.agentB

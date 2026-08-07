@@ -64,7 +64,7 @@ export class ExtensibleAgentRouter implements AgentRouter {
         goal.text
       )
     };
-    const skill = this.skills.match(skillGoal);
+    const skill = this.skills.match(skillGoal, state);
 
     if (skill) {
       const decision: RouteDecision = {

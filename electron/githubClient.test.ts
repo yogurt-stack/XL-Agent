@@ -365,4 +365,75 @@ describe("GitHubRepositorySearchClient", () => {
       }
     });
   });
+
+  it("pins a public repository for analysis and only reads blobs from the fixed tree", async () => {
+    const packageJson = JSON.stringify({ engines: { node: ">=20" } });
+    const fetchRequest: GitHubFetch = async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/repos/openai/example") {
+        return new Response(JSON.stringify({
+          full_name: "openai/example",
+          html_url: "https://github.com/openai/example",
+          description: "Example",
+          default_branch: "main",
+          size: 100,
+          private: false,
+          fork: false,
+          archived: false,
+          license: null
+        }), { status: 200 });
+      }
+      if (url.pathname === "/repos/openai/example/commits/main") {
+        return new Response(JSON.stringify({
+          sha: "a".repeat(40),
+          commit: { tree: { sha: "b".repeat(40) } }
+        }), { status: 200 });
+      }
+      if (url.pathname === `/repos/openai/example/git/trees/${"b".repeat(40)}`) {
+        return new Response(JSON.stringify({
+          truncated: false,
+          tree: [{
+            path: "package.json",
+            type: "blob",
+            sha: "c".repeat(40),
+            size: Buffer.byteLength(packageJson)
+          }]
+        }), { status: 200 });
+      }
+      if (url.pathname === `/repos/openai/example/git/blobs/${"c".repeat(40)}`) {
+        return new Response(JSON.stringify({
+          encoding: "base64",
+          content: Buffer.from(packageJson).toString("base64"),
+          size: Buffer.byteLength(packageJson)
+        }), { status: 200 });
+      }
+      return new Response("not found", { status: 404 });
+    };
+    const client = new GitHubRepositorySearchClient(
+      {},
+      fetchRequest,
+      () => new Date("2026-08-07T00:00:00.000Z")
+    );
+
+    const result = await client.inspectRepositoryForAnalysis("openai/example");
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.inspection.summary).toMatchObject({
+      fullName: "openai/example",
+      commitSha: "a".repeat(40),
+      treeSha: "b".repeat(40),
+      trackedFileCount: 1,
+      treeTruncated: false
+    });
+    expect(result.inspection.summary.repositoryHandleId).toMatch(
+      /^github-repo-[a-f0-9]{32}$/u
+    );
+    expect(
+      (await result.inspection.readBlob("c".repeat(40))).toString("utf8")
+    ).toBe(packageJson);
+    await expect(
+      result.inspection.readBlob("d".repeat(40))
+    ).rejects.toThrow("不属于当前固定 GitHub Tree");
+  });
 });

@@ -8,7 +8,13 @@ const manifestNames = new Set([
   "pyproject.toml",
   "requirements.txt",
   "cargo.toml",
-  "go.mod"
+  "go.mod",
+  "cmakelists.txt",
+  "cmakepresets.json",
+  "vcpkg.json",
+  "conanfile.txt",
+  "conanfile.py",
+  "meson.build"
 ]);
 
 const lockfileNames = new Set([
@@ -59,7 +65,17 @@ export function analyzeProjectPaths(
       ? ["python" as const]
       : []),
     ...(names.has("cargo.toml") ? ["rust" as const] : []),
-    ...(names.has("go.mod") ? ["go" as const] : [])
+    ...(names.has("go.mod") ? ["go" as const] : []),
+    ...(
+      names.has("cmakelists.txt") ||
+      names.has("cmakepresets.json") ||
+      names.has("vcpkg.json") ||
+      names.has("conanfile.txt") ||
+      names.has("conanfile.py") ||
+      names.has("meson.build")
+        ? ["cpp" as const]
+        : []
+    )
   ];
   if (ecosystems.length === 0) ecosystems.push("unknown");
 
@@ -74,6 +90,7 @@ export function analyzeProjectPaths(
           python: ["Python（具体版本需读取 pyproject.toml）"],
           rust: ["Rust toolchain"],
           go: ["Go toolchain"],
+          cpp: ["C/C++ toolchain（具体编译器、CMake、Qt 与库版本需读取项目文件）"],
           unknown: ["未识别到受支持的结构化项目清单"]
         })[ecosystem]
     ),

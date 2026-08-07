@@ -55,6 +55,13 @@ import {
   isGitHubRepositorySearchOutput,
   latestGitHubRepositorySearchResult
 } from "../features/agent-core/githubSearch";
+import {
+  isLocalDevelopmentEnvironmentOutput,
+  latestLocalDevelopmentEnvironmentResult
+} from "../features/agent-core/developmentEnvironment";
+import {
+  isProjectCompatibilityAssessment
+} from "../features/agent-core/projectCompatibility";
 import type { AgentState, AgentUserEvent, ResourceCapability, ResourceStatus } from "../features/agent-core/types";
 
 type Dispatch = (event: AgentUserEvent) => Promise<AgentState>;
@@ -360,6 +367,9 @@ function GitHubRepositoryResults({
   const [preparingRepository, setPreparingRepository] = useState<string | null>(
     null
   );
+  const [analyzingRepository, setAnalyzingRepository] = useState<string | null>(
+    null
+  );
   const [preparationError, setPreparationError] = useState<string | null>(null);
   const result = latestGitHubRepositorySearchResult(state);
   const output =
@@ -519,10 +529,51 @@ function GitHubRepositoryResults({
                   </div>
                 )}
                 <div className="github-repository-actions">
-                  <span>将先固定默认分支 commit，再进入目录选择与下载审批。</span>
+                  <span>可只读分析环境要求，或固定 commit 后进入下载审批。</span>
+                  <button
+                    className="btn btn-secondary btn-small"
+                    disabled={
+                      preparingRepository !== null || analyzingRepository !== null
+                    }
+                    type="button"
+                    onClick={async () => {
+                      setPreparationError(null);
+                      setAnalyzingRepository(repository.fullName);
+                      try {
+                        const nextState = await dispatch({
+                          type: "ANALYZE_GITHUB_REPOSITORY",
+                          fullName: repository.fullName
+                        });
+                        if (
+                          nextState.githubRepository?.fullName.toLowerCase() ===
+                          repository.fullName.toLowerCase()
+                        ) {
+                          onNavigate("clarification");
+                        } else {
+                          setPreparationError(
+                            `未能为 ${repository.fullName} 建立固定 commit 的只读分析会话。`
+                          );
+                        }
+                      } catch (error) {
+                        setPreparationError(
+                          error instanceof Error
+                            ? error.message
+                            : `固定 ${repository.fullName} 的分析版本失败。`
+                        );
+                      } finally {
+                        setAnalyzingRepository(null);
+                      }
+                    }}
+                  >
+                    {analyzingRepository === repository.fullName
+                      ? "正在固定…"
+                      : "分析环境"}
+                  </button>
                   <button
                     className="btn btn-primary btn-small"
-                    disabled={preparingRepository !== null}
+                    disabled={
+                      preparingRepository !== null || analyzingRepository !== null
+                    }
                     type="button"
                     onClick={async () => {
                       setPreparationError(null);
@@ -595,6 +646,234 @@ function GitHubRepositoryResults({
   );
 }
 
+function LocalDevelopmentEnvironmentResults({
+  state,
+  dispatch,
+  onNavigate
+}: {
+  state: AgentState;
+  dispatch: Dispatch;
+  onNavigate: Navigate;
+}) {
+  const compatibilityAssessment =
+    state.routeDecision?.skillId ===
+    "local-environment-compatibility-assessment";
+  const assessmentSummary = state.taskPlan?.steps.find(
+    (step) => step.kind === "analysis"
+  )?.result?.summary;
+  const result = latestLocalDevelopmentEnvironmentResult(state);
+  const output =
+    result?.status === "success" &&
+    isLocalDevelopmentEnvironmentOutput(result.output)
+      ? result.output
+      : null;
+
+  if (!output) {
+    return (
+      <section className="agent-view clarification-view">
+        <section className="failure-resolution-panel" role="alert">
+          <div className="failure-resolution-heading">
+            <span><AlertTriangle size={19} /></span>
+            <div>
+              <small>本地环境只读工具</small>
+              <h2>开发环境盘点未完成</h2>
+            </div>
+          </div>
+          <p>{result?.error?.message ?? "没有收到可展示的本机版本清单。"}</p>
+          <div className="failure-actions">
+            <button
+              className="btn btn-primary"
+              type="button"
+              onClick={() => {
+                void dispatch({ type: "RESET" });
+                onNavigate("home");
+              }}
+            >
+              返回任务入口
+            </button>
+          </div>
+        </section>
+      </section>
+    );
+  }
+
+  const available = output.tools.filter(
+    (tool) => tool.status === "available"
+  ).length;
+  const unavailable = output.tools.filter(
+    (tool) => tool.status === "not_found"
+  ).length;
+  const statusLabels = {
+    available: "可用",
+    not_found: "未找到",
+    not_applicable: "不适用",
+    error: "检测失败"
+  } as const;
+  const platformLabels = {
+    darwin: "macOS",
+    linux: "Linux",
+    win32: "Windows",
+    unknown: "未知系统"
+  } as const;
+
+  return (
+    <section className="agent-view local-environment-results-view">
+      <div className="agent-page-heading">
+        <div>
+          <span>{compatibilityAssessment ? "Agent Loop 兼容性评估" : "本地环境只读盘点"}</span>
+          <h1>{compatibilityAssessment ? "本地环境匹配结果" : "开发工具版本清单"}</h1>
+        </div>
+        <p>未执行下载、安装、升级或本地写入</p>
+      </div>
+      {compatibilityAssessment && assessmentSummary ? (
+        <section className="github-results-summary" aria-label="Agent 兼容性结论">
+          <span>Agent 结论<strong>{assessmentSummary}</strong></span>
+        </section>
+      ) : null}
+      <section className="github-results-summary" aria-label="环境盘点摘要">
+        <span>宿主系统<strong>{platformLabels[output.host.platform]} · {output.host.architecture}</strong></span>
+        <span>检测入口<strong>{output.tools.length} 个</strong></span>
+        <span>可用<strong>{available} 个</strong></span>
+        <span>未找到<strong>{unavailable} 个</strong></span>
+      </section>
+      <ol className="local-environment-tool-list">
+        {output.tools.map((tool) => (
+          <li className="local-environment-tool-card" key={tool.id}>
+            <span className="local-environment-tool-icon">
+              <TerminalSquare size={17} />
+            </span>
+            <div>
+              <strong>{tool.name}</strong>
+              <code>{tool.command}</code>
+              {tool.detail ? <small>{tool.detail}</small> : null}
+            </div>
+            <span>
+              <strong>{tool.version ?? "—"}</strong>
+              <em className={`environment-status-${tool.status}`}>
+                {statusLabels[tool.status]}
+              </em>
+            </span>
+          </li>
+        ))}
+      </ol>
+      <footer className="github-results-footer">
+        <span>
+          固定命令白名单 · 获取于 {formatRepositoryDate(output.collectedAt)}
+        </span>
+        <button
+          className="btn btn-primary"
+          type="button"
+          onClick={() => {
+            void dispatch({ type: "RESET" });
+            onNavigate("home");
+          }}
+        >
+          开始新任务
+        </button>
+      </footer>
+    </section>
+  );
+}
+
+function LocalProjectCompatibilityResults({
+  state,
+  dispatch,
+  onNavigate
+}: {
+  state: AgentState;
+  dispatch: Dispatch;
+  onNavigate: Navigate;
+}) {
+  const githubMode = state.routeDecision?.skillId ===
+    "github-project-environment-compatibility";
+  const step = state.taskPlan?.steps.find((candidate) =>
+    candidate.id === (githubMode
+      ? "analyze-github-project-environment"
+      : "analyze-local-project-environment")
+  );
+  const envelope = step?.result?.output;
+  const rawAssessment = typeof envelope === "object" && envelope !== null &&
+      "result" in envelope
+    ? (envelope as { result?: unknown }).result
+    : null;
+  const assessment = isProjectCompatibilityAssessment(rawAssessment)
+    ? rawAssessment
+    : null;
+  if (!assessment) {
+    return (
+      <section className="agent-view clarification-view">
+        <section className="failure-resolution-panel" role="alert">
+          <div className="failure-resolution-heading">
+            <span><AlertTriangle size={19} /></span>
+            <div><small>{githubMode ? "GitHub API 只读工具" : "本地项目只读工具"}</small><h2>项目环境报告未完成</h2></div>
+          </div>
+          <p>没有收到通过事实校验的固定仓库兼容性报告。</p>
+        </section>
+      </section>
+    );
+  }
+  const counts = {
+    satisfied: assessment.assessment.filter((item) => item.status === "satisfied").length,
+    missing: assessment.assessment.filter((item) => item.status === "missing").length,
+    unresolved: assessment.assessment.filter((item) => item.status === "unresolved").length
+  };
+  const statusLabels = {
+    satisfied: "已满足",
+    missing: "缺少/不匹配",
+    unresolved: "待确认"
+  } as const;
+  return (
+    <section className="agent-view local-environment-results-view">
+      <div className="agent-page-heading">
+        <div><span>{githubMode ? "GitHub 固定 commit/tree" : "固定仓库"} · 只读 Agent Loop</span><h1>项目环境兼容性报告</h1></div>
+        <p>{githubMode ? "未下载仓库、执行代码、安装或本地写入" : "未执行仓库代码、安装、下载或本地写入"}</p>
+      </div>
+      <section className="github-results-summary" aria-label="项目环境兼容性摘要">
+        <span>仓库<strong>{assessment.repository.displayName}</strong></span>
+        <span>固定 commit<strong>{assessment.repository.commitSha.slice(0, 12)}</strong></span>
+        <span>已满足<strong>{counts.satisfied} 项</strong></span>
+        <span>缺少<strong>{counts.missing} 项</strong></span>
+        <span>待确认<strong>{counts.unresolved} 项</strong></span>
+      </section>
+      <ol className="local-environment-tool-list">
+        {assessment.requirements.map((requirement) => {
+          const result = assessment.assessment.find(
+            (candidate) => candidate.requirementId === requirement.id
+          );
+          return (
+            <li className="local-environment-tool-card" key={requirement.id}>
+              <span className="local-environment-tool-icon"><FileCode2 size={17} /></span>
+              <div>
+                <strong>{requirement.name} {requirement.constraint ?? ""}</strong>
+                <code>{requirement.sourcePath}</code>
+                <small>{requirement.evidence}</small>
+              </div>
+              <span>
+                <strong>{result?.localEvidenceToolId ?? "—"}</strong>
+                <em className={`environment-status-${result?.status === "satisfied" ? "available" : result?.status === "missing" ? "not_found" : "not_applicable"}`}>
+                  {result ? statusLabels[result.status] : "待确认"}
+                </em>
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+      {assessment.unresolved.length > 0 ? (
+        <section className="github-results-summary" aria-label="无法确认项">
+          <span>无法确认<strong>{assessment.unresolved.join("；")}</strong></span>
+        </section>
+      ) : null}
+      <footer className="github-results-footer">
+        <span>{githubMode ? "GitHub 固定 Tree/Blob" : "固定 HEAD"} 白名单证据 · 仓库内容按不可信数据处理</span>
+        <button className="btn btn-primary" type="button" onClick={() => {
+          void dispatch({ type: "RESET" });
+          onNavigate("home");
+        }}>开始新任务</button>
+      </footer>
+    </section>
+  );
+}
+
 function TaskPlanConfirmationCard({
   state,
   dispatch,
@@ -612,6 +891,7 @@ function TaskPlanConfirmationCard({
   const valid =
     state.taskPlanValidation?.valid === true &&
     state.taskPlanValidation.checkedRevision === plan.revision;
+  const hasWriteStep = plan.steps.some((step) => step.risk !== "read_only");
   const riskLabels = {
     read_only: "只读",
     local_write: "本地写入",
@@ -634,7 +914,12 @@ function TaskPlanConfirmationCard({
         </div>
         <div className="task-plan-boundary" role="note">
           <ShieldCheck size={17} />
-          <span><strong>确认的是处理流程，不是执行权限。</strong>下载、导出与其他写入步骤仍会在执行前单独审批。</span>
+          <span>
+            <strong>确认的是处理流程，不是执行权限。</strong>
+            {hasWriteStep
+              ? "下载、导出与其他写入步骤仍会在执行前单独审批。"
+              : "当前计划全部为只读步骤，不包含下载、安装、导出或其他写入。"}
+          </span>
         </div>
         <div className="task-plan-columns">
           <div><strong>交付物</strong><ul>{plan.deliverables.map((item) => <li key={item}>{item}</li>)}</ul></div>
@@ -792,6 +1077,34 @@ export function ClarificationView({
       return <TaskPlanConfirmationCard dispatch={dispatch} onNavigate={onNavigate} state={state} />;
     }
     if (state.phase === "result") {
+      if (
+        [
+          "local-project-environment-compatibility",
+          "github-project-environment-compatibility"
+        ].includes(state.routeDecision?.skillId ?? "")
+      ) {
+        return (
+          <LocalProjectCompatibilityResults
+            dispatch={dispatch}
+            onNavigate={onNavigate}
+            state={state}
+          />
+        );
+      }
+      if (
+        [
+          "local-development-environment-inspection",
+          "local-environment-compatibility-assessment"
+        ].includes(state.routeDecision?.skillId ?? "")
+      ) {
+        return (
+          <LocalDevelopmentEnvironmentResults
+            dispatch={dispatch}
+            onNavigate={onNavigate}
+            state={state}
+          />
+        );
+      }
       return (
         <GitHubRepositoryResults
           dispatch={dispatch}
@@ -895,7 +1208,42 @@ export function ClarificationView({
         </section>
       );
     }
-    return <WaitingPanel title={state.phase === "task_planning" ? "正在生成任务计划" : state.phase === "planning" ? "正在生成资源计划" : "正在路由任务"} copy={state.phase === "task_planning" ? "Agent 正在拆解目标、步骤依赖与权限边界；确认前不会调用工具。" : "Agent 正在读取系统画像并决定下一项动作。"} />;
+    const localEnvironmentInspection =
+      [
+        "local-development-environment-inspection",
+        "local-environment-compatibility-assessment",
+        "local-project-environment-compatibility",
+        "github-project-environment-compatibility"
+      ].includes(state.routeDecision?.skillId ?? "");
+    return (
+      <WaitingPanel
+        title={state.phase === "task_planning"
+          ? "正在生成任务计划"
+          : state.phase === "planning" && localEnvironmentInspection
+            ? [
+                "local-project-environment-compatibility",
+                "github-project-environment-compatibility"
+              ].includes(state.routeDecision?.skillId ?? "")
+              ? "Agent 正在理解仓库并对比本机环境"
+              : state.routeDecision?.skillId ===
+                  "local-environment-compatibility-assessment"
+                ? "Agent 正在调查并评估本机环境"
+                : "正在盘点本机开发环境"
+            : state.phase === "planning"
+              ? "正在生成资源计划"
+              : "正在路由任务"}
+        copy={state.phase === "task_planning"
+          ? "Agent 正在拆解目标、步骤依赖与权限边界；确认前不会调用工具。"
+          : localEnvironmentInspection
+            ? [
+                "local-project-environment-compatibility",
+                "github-project-environment-compatibility"
+              ].includes(state.routeDecision?.skillId ?? "")
+              ? "只读取固定 HEAD 的白名单项目证据并执行固定版本查询；不运行仓库代码。"
+              : "只执行固定白名单中的版本查询，不下载或修改本机环境。"
+            : "Agent 正在读取系统画像并决定下一项动作。"}
+      />
+    );
   }
   return (
     <section className="agent-view clarification-view">
@@ -903,9 +1251,38 @@ export function ClarificationView({
       <section className="clarification-card">
         <div className="clarification-reason"><ClipboardCheck size={17} /><span>询问原因：{question.reason}</span></div>
         <h2>{question.prompt}</h2>
-        <div className="clarification-options">
-          {question.options.map((option) => <button key={option} className="option-button" type="button" onClick={() => dispatch({ type: "ANSWER_CLARIFICATION", questionId: question.id, answer: option })}>{option}<ChevronRight size={16} /></button>)}
-        </div>
+        {question.options.length > 0 ? (
+          <div className="clarification-options">
+            {question.options.map((option) => <button key={option} className="option-button" type="button" onClick={() => dispatch({ type: "ANSWER_CLARIFICATION", questionId: question.id, answer: option })}>{option}<ChevronRight size={16} /></button>)}
+          </div>
+        ) : (
+          <form
+            className="clarification-freeform"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const answer = String(
+                new FormData(event.currentTarget).get("answer") ?? ""
+              ).trim();
+              if (!answer) return;
+              dispatch({
+                type: "ANSWER_CLARIFICATION",
+                questionId: question.id,
+                answer
+              });
+            }}
+          >
+            <label htmlFor={`clarification-${question.id}`}>补充信息</label>
+            <textarea
+              id={`clarification-${question.id}`}
+              name="answer"
+              maxLength={4000}
+              required
+            />
+            <button className="btn btn-primary" type="submit">
+              提交回答<ChevronRight size={16} />
+            </button>
+          </form>
+        )}
         {!question.required && <button className="btn btn-ghost" type="button" onClick={() => dispatch({ type: "SKIP_CLARIFICATION", questionId: question.id })}>跳过此非必填问题</button>}
       </section>
     </section>
@@ -1474,6 +1851,28 @@ export function WorkspaceView({
               <strong>权限边界</strong>
               源目录路径不进入 Renderer、SQLite 或 Manifest；本次只读会话不含发布权限
             </span>
+          </div>
+          <div className="failure-actions">
+            <button
+              className="btn btn-primary"
+              type="button"
+              onClick={async () => {
+                const next = await dispatch({
+                  type: "SUBMIT_TASK",
+                  task: `分析当前项目 ${state.localRepository?.displayName ?? ""} 的运行与构建要求，对比本机环境，列出已满足、缺少和无法确认的条件`
+                });
+                if (next.phase === "routing") onNavigate("clarification");
+              }}
+            >
+              <BrainCircuit size={16} />分析项目环境
+            </button>
+            <button
+              className="btn btn-ghost"
+              type="button"
+              onClick={() => onNavigate("home")}
+            >
+              自定义仓库任务
+            </button>
           </div>
         </section>
       ) : null}

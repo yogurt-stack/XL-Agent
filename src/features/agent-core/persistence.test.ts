@@ -29,6 +29,32 @@ function createPersistableState() {
   return transition(state, { type: "APPROVE_PLAN", revision: 1 });
 }
 
+function createRunningCompatibilityLoopState() {
+  let state = createInitialAgentState();
+  state = transition(state, {
+    type: "SUBMIT_TASK",
+    task: "检查 PyTorch 本机环境匹配程度",
+    taskId: "task-agent-loop-persistence"
+  });
+  state = transition(state, new ExtensibleAgentRouter().route(state)!);
+  state = confirmTaskPlanForTest(state);
+  const step = state.taskPlan?.steps[0];
+  if (!state.taskPlan || !step) throw new Error("Compatibility Task Plan missing.");
+  state = transition(state, {
+    type: "TASK_PLAN_STEP_STARTED",
+    stepId: step.id,
+    startedAt: "2026-08-07T00:00:00.000Z"
+  });
+  return transition(state, {
+    type: "AGENT_LOOP_STARTED",
+    runId: "persisted-agent-loop",
+    planId: state.taskPlan!.planId,
+    planRevision: state.taskPlan!.revision,
+    stepId: step.id,
+    startedAt: "2026-08-07T00:00:01.000Z"
+  });
+}
+
 describe("persisted AgentState validation", () => {
   it("accepts a complete in-progress state", () => {
     expect(isRestorableAgentState(createPersistableState())).toBe(true);
@@ -88,5 +114,51 @@ describe("persisted AgentState validation", () => {
     delete legacy.routeDecision;
 
     expect(normalizeRestorableAgentState(legacy)).toBeNull();
+  });
+
+  it("rejects negative Agent Loop usage restored from persistence", () => {
+    const state = createRunningCompatibilityLoopState();
+    const agentLoop = state.agentRun.agentLoop!;
+    const tampered = {
+      ...state,
+      agentRun: {
+        ...state.agentRun,
+        agentLoop: {
+          ...agentLoop,
+          usage: {
+            turns: -1,
+            toolCalls: 0,
+            executedToolCalls: 0,
+            elapsedMs: 0
+          }
+        }
+      }
+    };
+
+    expect(normalizeRestorableAgentState(tampered)).toBeNull();
+  });
+
+  it("revalidates persisted TaskPlan capability envelopes", () => {
+    const state = createRunningCompatibilityLoopState();
+    const plan = state.taskPlan!;
+    const tampered = {
+      ...state,
+      taskPlan: {
+        ...plan,
+        steps: plan.steps.map((step, index) =>
+          index === 0 && step.execution.mode === "agent_loop"
+            ? {
+                ...step,
+                execution: {
+                  ...step.execution,
+                  allowedTools: ["controlled_download"]
+                }
+              }
+            : step
+        )
+      }
+    };
+
+    expect(normalizeRestorableAgentState(tampered)).toBeNull();
   });
 });

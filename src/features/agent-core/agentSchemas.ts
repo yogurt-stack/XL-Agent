@@ -11,6 +11,24 @@ const resourceIdSchema = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,79}$/i);
 const identifierSchema = z.string().trim().min(1).max(160);
 const descriptionSchema = z.string().trim().min(1).max(4000);
 const taskIdSchema = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,127}$/i);
+const localRepositoryHandleSchema = z.string().regex(
+  /^local-repo-[a-z0-9-]{1,120}$/i
+);
+const githubRepositoryHandleSchema = z.string().regex(
+  /^github-repo-[a-z0-9-]{1,120}$/i
+);
+const repositoryRelativePathSchema = z.string().trim().min(1).max(1024)
+  .refine(
+    (value) => {
+      const normalized = value.replace(/\\/gu, "/");
+      return !normalized.startsWith("/") &&
+        !normalized.split("/").some((part) =>
+          part === "" || part === "." || part === ".." || part === ".git"
+        ) &&
+        !/[\u0000-\u001f\u007f]/u.test(normalized);
+    },
+    "必须是安全的仓库相对路径"
+  );
 const githubDiscoverySearchInputSchema = z.object({
   mode: z.literal("discovery"),
   keywords: z.string().trim().max(200),
@@ -43,6 +61,59 @@ export const agentToolCallSchema = z.discriminatedUnion("name", [
     callId: identifierSchema,
     name: z.literal("read_system_profile"),
     input: z.object({}).strict()
+  }).strict(),
+  z.object({
+    callId: identifierSchema,
+    name: z.literal("inspect_local_development_environment"),
+    input: z.object({}).strict()
+  }).strict(),
+  z.object({
+    callId: identifierSchema,
+    name: z.literal("list_local_repository_tree"),
+    input: z.object({
+      repositoryHandleId: localRepositoryHandleSchema,
+      pathPrefix: repositoryRelativePathSchema.optional(),
+      maxEntries: z.number().int().min(1).max(500).optional()
+    }).strict()
+  }).strict(),
+  z.object({
+    callId: identifierSchema,
+    name: z.literal("read_local_repository_file"),
+    input: z.object({
+      repositoryHandleId: localRepositoryHandleSchema,
+      relativePath: repositoryRelativePathSchema
+    }).strict()
+  }).strict(),
+  z.object({
+    callId: identifierSchema,
+    name: z.literal("inspect_project_requirements"),
+    input: z.object({
+      repositoryHandleId: localRepositoryHandleSchema
+    }).strict()
+  }).strict(),
+  z.object({
+    callId: identifierSchema,
+    name: z.literal("list_github_repository_tree"),
+    input: z.object({
+      repositoryHandleId: githubRepositoryHandleSchema,
+      pathPrefix: repositoryRelativePathSchema.optional(),
+      maxEntries: z.number().int().min(1).max(500).optional()
+    }).strict()
+  }).strict(),
+  z.object({
+    callId: identifierSchema,
+    name: z.literal("read_github_repository_file"),
+    input: z.object({
+      repositoryHandleId: githubRepositoryHandleSchema,
+      relativePath: repositoryRelativePathSchema
+    }).strict()
+  }).strict(),
+  z.object({
+    callId: identifierSchema,
+    name: z.literal("inspect_github_project_requirements"),
+    input: z.object({
+      repositoryHandleId: githubRepositoryHandleSchema
+    }).strict()
   }).strict(),
   z.object({
     callId: identifierSchema,
@@ -146,6 +217,12 @@ export const agentUserEventSchema = z.discriminatedUnion("type", [
   }).strict(),
   z.object({
     type: z.literal("PREPARE_GITHUB_REPOSITORY"),
+    fullName: z.string().regex(
+      /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/
+    )
+  }).strict(),
+  z.object({
+    type: z.literal("ANALYZE_GITHUB_REPOSITORY"),
     fullName: z.string().regex(
       /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/
     )

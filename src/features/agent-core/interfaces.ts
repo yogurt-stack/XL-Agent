@@ -9,6 +9,11 @@ import type {
   TaskRequirements,
   ToolResult
 } from "./types";
+import type {
+  AgentAssistantTurn,
+  AgentTurnContext
+} from "./agentLoop";
+import type { AgentToolName, TaskPlanProposal } from "./types";
 
 /**
  * 将当前 Agent 上下文交给模型适配器，并返回一项结构化决策。
@@ -16,14 +21,33 @@ import type {
  */
 export interface ModelRuntime {
   decide(context: ModelContext): Promise<ModelDecision>;
+  generateTurn?(
+    context: AgentTurnContext<AgentToolName, unknown, TaskPlanProposal>,
+    signal: AbortSignal
+  ): Promise<AgentAssistantTurn<AgentToolName, unknown, TaskPlanProposal>>;
 }
 
 export interface RemoteModelTransport {
   requestDecision(context: ModelContext): Promise<unknown>;
+  requestTurn?(
+    context: AgentTurnContext<AgentToolName, unknown, TaskPlanProposal>,
+    signal: AbortSignal
+  ): Promise<AgentAssistantTurn<AgentToolName, unknown, TaskPlanProposal>>;
 }
 
+export type AgentToolExecutionOptions = {
+  /** Cancels the underlying operation when the Task Plan authorization expires. */
+  signal?: AbortSignal;
+  /** Absolute wall-clock deadline inherited from the bounded Agent Loop. */
+  deadlineAt?: number;
+};
+
 export interface AgentToolExecutor {
-  execute(call: AgentToolCall, state: AgentState): Promise<ToolResult>;
+  execute(
+    call: AgentToolCall,
+    state: AgentState,
+    options?: AgentToolExecutionOptions
+  ): Promise<ToolResult>;
 }
 
 export interface AgentPolicy {
