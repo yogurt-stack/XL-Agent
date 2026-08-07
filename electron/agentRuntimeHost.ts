@@ -46,7 +46,11 @@ import type {
 import type { ControlledDownloadOptions } from "./downloadClient";
 import type { DownloadTaskProgress } from "./downloadTasks";
 import type { RemoteModelClient } from "./modelClient";
-import type { GitHubRepositoryInspectionResult } from "./githubClient";
+import type {
+  GitHubRepositoryAnalysisInspection,
+  GitHubRepositoryAnalysisInspectionResult,
+  GitHubRepositoryInspectionResult
+} from "./githubClient";
 import {
   toModelConnectionError as toMainModelConnectionError
 } from "./modelClient";
@@ -62,9 +66,12 @@ import {
   toWorkspaceExportError
 } from "./workspaceExporter";
 import { readHostSystemProfile } from "./systemProfile";
+import { inspectLocalDevelopmentEnvironment } from "./localDevelopmentEnvironment";
 import { LocalXunleiAdapter } from "./xunleiAdapter";
 import type { LocalArtifactRecord } from "./localArtifacts";
 import type { LocalRepositoryInspection } from "./localRepository";
+import { createLocalRepositoryAgentTools } from "./localRepositoryAgentTools";
+import { createGitHubRepositoryAgentTools } from "./githubRepositoryAgentTools";
 import {
   GitHubPublisher,
   githubPublishPlanSha256
@@ -81,6 +88,9 @@ export type AgentRuntimeHostOptions = {
   inspectGitHubRepository: (
     fullName: string
   ) => Promise<GitHubRepositoryInspectionResult>;
+  inspectGitHubRepositoryForAnalysis: (
+    fullName: string
+  ) => Promise<GitHubRepositoryAnalysisInspectionResult>;
   githubPublisher?: GitHubPublisher;
   workspaceRoot: string;
   performDownload: (
@@ -138,6 +148,10 @@ export class AgentRuntimeHost {
   private readonly localRepositorySessions = new Map<
     string,
     LocalRepositoryInspection
+  >();
+  private readonly githubRepositorySessions = new Map<
+    string,
+    GitHubRepositoryAnalysisInspection
   >();
   private readonly githubPublisher: GitHubPublisher;
   private readonly githubPublishApprovalGate = new SingleFlightGate();
@@ -199,7 +213,9 @@ export class AgentRuntimeHost {
 
     const localModel = new LocalRuleModelRuntime();
     const remoteModel = new RemoteLlmModelRuntime({
-      requestDecision: (context) => this.options.modelClient.requestDecision(context)
+      requestDecision: (context) => this.options.modelClient.requestDecision(context),
+      requestTurn: (context, signal) =>
+        this.options.modelClient.requestTurn(context, signal)
     });
     const fallbackModel = new FallbackModelRuntime(remoteModel, localModel, {
       shouldAttemptPrimary: () => this.modelConnection.shouldAttemptRemote(),
@@ -210,12 +226,26 @@ export class AgentRuntimeHost {
       }
     });
 
+    const localRepositoryTools = createLocalRepositoryAgentTools(
+      (repositoryHandleId) =>
+        this.localRepositorySessions.get(repositoryHandleId) ?? null
+    );
+    const githubRepositoryTools = createGitHubRepositoryAgentTools(
+      (repositoryHandleId) =>
+        this.githubRepositorySessions.get(repositoryHandleId) ?? null
+    );
+
     const tools = new InMemoryAgentToolExecutor(
       () => createSystemProfileToolOutput(readHostSystemProfile()),
       (request) => this.runControlledDownload(request),
       (request) => this.runWorkspaceExport(request),
       this.sourceProviders.get("trusted-catalog") ?? undefined,
-      this.options.githubRepositorySearch
+      this.options.githubRepositorySearch,
+      (executionOptions) => inspectLocalDevelopmentEnvironment({
+        signal: executionOptions?.signal
+      }),
+      localRepositoryTools,
+      githubRepositoryTools
     );
 
     this.runtime = new AgentRuntime({
@@ -360,6 +390,7 @@ export class AgentRuntimeHost {
       ) {
         throw new Error("只能准备当前 GitHub 查询结果中明确选择的仓库。");
       }
+      const sourceTaskId = state.taskId;
       const inspection = await this.options.inspectGitHubRepository(
         selected.fullName
       );
@@ -367,6 +398,25 @@ export class AgentRuntimeHost {
         throw new Error(
           `${inspection.error.code}: ${inspection.error.message}`
         );
+      }
+      const currentState = this.runtime.getState();
+      const currentResult = latestGitHubRepositorySearchResult(currentState);
+      const currentOutput =
+        currentResult?.status === "success" &&
+        isGitHubRepositorySearchOutput(currentResult.output)
+          ? currentResult.output
+          : null;
+      const stillSelected = currentOutput?.repositories.some(
+        (repository) =>
+          repository.fullName.toLowerCase() === selected.fullName.toLowerCase()
+      );
+      if (
+        currentState.taskId !== sourceTaskId ||
+        currentState.phase !== "result" ||
+        currentState.routeDecision?.skillId !== "github-project-discovery" ||
+        !stillSelected
+      ) {
+        throw new Error("固定 GitHub commit 期间任务上下文已变化，请重新选择仓库。");
       }
       this.runtime.reportExternalEvent({
         type: "GITHUB_ACQUISITION_PREPARED",
@@ -383,7 +433,74 @@ export class AgentRuntimeHost {
       });
       return this.getSnapshot();
     }
+    if (event.type === "ANALYZE_GITHUB_REPOSITORY") {
+      const searchResult = latestGitHubRepositorySearchResult(state);
+      const output =
+        searchResult?.status === "success" &&
+        isGitHubRepositorySearchOutput(searchResult.output)
+          ? searchResult.output
+          : null;
+      const selected = output?.repositories.find(
+        (repository) =>
+          repository.fullName.toLowerCase() === event.fullName.toLowerCase()
+      );
+      if (
+        state.phase !== "result" ||
+        state.routeDecision?.skillId !== "github-project-discovery" ||
+        !selected
+      ) {
+        throw new Error("只能分析当前 GitHub 查询结果中明确选择的仓库。");
+      }
+      const sourceTaskId = state.taskId;
+      const inspectionResult =
+        await this.options.inspectGitHubRepositoryForAnalysis(selected.fullName);
+      if (!inspectionResult.ok) {
+        throw new Error(
+          `${inspectionResult.error.code}: ${inspectionResult.error.message}`
+        );
+      }
+      const currentState = this.runtime.getState();
+      const currentResult = latestGitHubRepositorySearchResult(currentState);
+      const currentOutput =
+        currentResult?.status === "success" &&
+        isGitHubRepositorySearchOutput(currentResult.output)
+          ? currentResult.output
+          : null;
+      const stillSelected = currentOutput?.repositories.some(
+        (repository) =>
+          repository.fullName.toLowerCase() === selected.fullName.toLowerCase()
+      );
+      if (
+        currentState.taskId !== sourceTaskId ||
+        currentState.phase !== "result" ||
+        currentState.routeDecision?.skillId !== "github-project-discovery" ||
+        !stillSelected
+      ) {
+        throw new Error("固定 GitHub commit 期间任务上下文已变化，请重新选择仓库。");
+      }
+      this.githubRepositorySessions.clear();
+      this.localRepositorySessions.clear();
+      this.githubRepositorySessions.set(
+        inspectionResult.inspection.summary.repositoryHandleId,
+        inspectionResult.inspection
+      );
+      this.runtime.reportExternalEvent({
+        type: "GITHUB_REPOSITORY_ANALYSIS_ATTACHED",
+        taskId:
+          this.options.createTaskId?.() ??
+          `github-analysis-task-${Date.now()}-${inspectionResult.inspection.summary.commitSha.slice(0, 8)}`,
+        repository: inspectionResult.inspection.summary
+      });
+      return this.getSnapshot();
+    }
     this.runtime.dispatch(event);
+    if (
+      event.type === "RESET" &&
+      this.runtime.getState().taskId === "unassigned"
+    ) {
+      this.localRepositorySessions.clear();
+      this.githubRepositorySessions.clear();
+    }
     if (
       event.type === "RUN_AGENT_B" &&
       !this.canRunAgentB(this.runtime.getState())
@@ -408,11 +525,38 @@ export class AgentRuntimeHost {
     ) {
       throw new Error("GitHub 发布正在执行，不能重置模型任务。");
     }
-    const task = this.runtime.getState().task.trim();
+    const currentState = this.runtime.getState();
+    const task = currentState.task.trim();
+    const attachedRepository = currentState.localRepository &&
+        this.localRepositorySessions.has(
+          currentState.localRepository.repositoryHandleId
+        )
+      ? currentState.localRepository
+      : null;
+    const attachedGitHubRepository = currentState.githubRepository &&
+        this.githubRepositorySessions.has(
+          currentState.githubRepository.repositoryHandleId
+        )
+      ? currentState.githubRepository
+      : null;
     this.modelConnection.useLocalModel(
       "远程规划未在安全步数内生成计划，本次重试已切换本地规则模型。"
     );
     this.runtime.dispatch({ type: "RESET" });
+    if (attachedRepository) {
+      this.runtime.reportExternalEvent({
+        type: "LOCAL_REPOSITORY_IMPORTED",
+        taskId: `local-repo-retry-${Date.now()}`,
+        repository: attachedRepository
+      });
+    }
+    if (attachedGitHubRepository) {
+      this.runtime.reportExternalEvent({
+        type: "GITHUB_REPOSITORY_ANALYSIS_ATTACHED",
+        taskId: `github-repo-retry-${Date.now()}`,
+        repository: attachedGitHubRepository
+      });
+    }
     if (task) this.runtime.dispatch({ type: "SUBMIT_TASK", task });
     return this.getSnapshot();
   }
@@ -547,6 +691,7 @@ export class AgentRuntimeHost {
       throw new Error("当前存在运行中的写入或检查任务，不能导入本地仓库。");
     }
     this.localRepositorySessions.clear();
+    this.githubRepositorySessions.clear();
     this.localRepositorySessions.set(
       inspection.summary.repositoryHandleId,
       inspection
@@ -778,6 +923,10 @@ export class AgentRuntimeHost {
     if (state.phase === "intake" || state.taskId === "unassigned" || !state.task) return;
     const shouldGenerateManifest =
       !this.suppressNextManifestGeneration &&
+      ![
+        "local-development-environment-inspection",
+        "local-environment-compatibility-assessment"
+      ].includes(state.routeDecision?.skillId ?? "") &&
       (state.routeDecision?.skillId !== "github-project-discovery" ||
         state.phase === "handoff");
     this.suppressNextManifestGeneration = false;

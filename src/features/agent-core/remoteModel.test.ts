@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DefaultAgentPolicy,
   InMemoryAgentToolExecutor
@@ -17,8 +17,14 @@ import {
   RemoteLlmModelRuntime
 } from "./remoteModel";
 import { AgentRuntime } from "./runtime";
-import type { AgentScheduler } from "./interfaces";
-import type { ModelContext, ToolResult } from "./types";
+import type { AgentScheduler, ModelRuntime } from "./interfaces";
+import type { AgentTurnContext } from "./agentLoop";
+import type {
+  AgentToolName,
+  ModelContext,
+  TaskPlanProposal,
+  ToolResult
+} from "./types";
 
 function successfulToolResult(
   tool: ToolResult["tool"],
@@ -409,5 +415,60 @@ describe("remote model runtime", () => {
       "node-lts",
       "sample-project"
     ]);
+  });
+
+  it("does not treat caller cancellation as a remote failure or invoke fallback", async () => {
+    const aborted = new DOMException("Aborted", "AbortError");
+    const primaryGenerate = vi.fn(async () => {
+      throw aborted;
+    });
+    const fallbackGenerate = vi.fn(async () => ({
+      turnId: "fallback-turn",
+      rationaleSummary: "fallback",
+      action: {
+        type: "ask_clarification" as const,
+        questionId: "fallback-question",
+        question: "fallback?",
+        reason: "fallback",
+        required: false
+      }
+    }));
+    const onPrimaryFailure = vi.fn();
+    const model = new FallbackModelRuntime(
+      {
+        decide: async () => {
+          throw new Error("not used");
+        },
+        generateTurn: primaryGenerate
+      } satisfies ModelRuntime,
+      {
+        decide: async () => {
+          throw new Error("not used");
+        },
+        generateTurn: fallbackGenerate
+      } satisfies ModelRuntime,
+      { onPrimaryFailure }
+    );
+    const turnContext: AgentTurnContext<
+      AgentToolName,
+      unknown,
+      TaskPlanProposal
+    > = {
+      runId: "cancelled-turn",
+      objective: "cancelled",
+      turn: 1,
+      transcript: [],
+      availableTools: [],
+      completionContract: {},
+      remainingBudget: { turns: 1, toolCalls: 0, wallTimeMs: 1_000 }
+    };
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      model.generateTurn!(turnContext, controller.signal)
+    ).rejects.toBe(aborted);
+    expect(onPrimaryFailure).not.toHaveBeenCalled();
+    expect(fallbackGenerate).not.toHaveBeenCalled();
   });
 });

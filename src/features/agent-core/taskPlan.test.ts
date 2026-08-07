@@ -61,6 +61,7 @@ function step(
     inputBindings: overrides.inputBindings ?? {},
     expectedOutput: overrides.expectedOutput ?? `${overrides.id} 的结构化结果`,
     risk: overrides.risk ?? "read_only",
+    execution: overrides.execution,
     approval: overrides.approval ?? {
       required: false,
       reason: null
@@ -197,7 +198,7 @@ describe("TaskPlan domain core", () => {
     const result = validation(plan);
 
     expect(plan).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       planId: "task-plan-tau",
       taskId: "task-tau",
       revision: 1,
@@ -211,6 +212,11 @@ describe("TaskPlan domain core", () => {
     });
     expect(plan.steps.every((candidate) => candidate.status === "pending"))
       .toBe(true);
+    expect(
+      plan.steps.every(
+        (candidate) => candidate.execution.mode === "deterministic"
+      )
+    ).toBe(true);
     expect(result).toEqual({
       valid: true,
       checkedRevision: 1,
@@ -223,6 +229,196 @@ describe("TaskPlan domain core", () => {
       ]
     });
     expect(parseTaskPlan(plan)).toEqual(plan);
+  });
+
+  it("migrates persisted TaskPlan v1 steps to deterministic v2 execution", () => {
+    const current = createTauPlan();
+    const legacy = {
+      ...structuredClone(current),
+      schemaVersion: 1,
+      steps: current.steps.map(({ execution: _execution, ...candidate }) =>
+        structuredClone(candidate)
+      )
+    };
+
+    const migrated = parseTaskPlan(legacy);
+
+    expect(migrated).toMatchObject({
+      schemaVersion: 2,
+      planId: current.planId,
+      revision: current.revision
+    });
+    expect(
+      migrated.steps.map((candidate) => candidate.execution)
+    ).toEqual(
+      current.steps.map(() => ({ mode: "deterministic" }))
+    );
+    expect(validation(migrated).valid).toBe(true);
+  });
+
+  it("accepts a read-only analysis step with a bounded agent loop", () => {
+    const proposal: TaskPlanProposal = {
+      objective: "评估本机开发环境与 PyTorch 的兼容性。",
+      deliverables: ["已具备、缺失和待确认条件的兼容性结论"],
+      assumptions: [],
+      constraints: ["仅允许读取本机环境，不安装或下载任何资源。"],
+      steps: [
+        step({
+          id: "assess-local-environment",
+          kind: "analysis",
+          tool: null,
+          expectedOutput: "带证据的本机环境兼容性结论",
+          execution: {
+            mode: "agent_loop",
+            allowedTools: ["inspect_local_development_environment"],
+            maxRisk: "read_only",
+            allowParallelReads: false,
+            maxTurns: 6,
+            maxToolCalls: 8,
+            maxRepeatedCalls: 2,
+            maxWallTimeMs: 120_000,
+            completionCriteria: [
+              "至少调用一次本机开发环境检查工具。",
+              "明确列出已具备、缺失和待确认的条件。"
+            ]
+          }
+        })
+      ],
+      confirmation: {
+        required: true,
+        reason: "执行只读环境检查前确认分析范围。"
+      }
+    };
+
+    const plan = createTaskPlan({
+      planId: "task-plan-local-compatibility",
+      taskId: "task-local-compatibility",
+      proposal,
+      createdBy: "remote-llm",
+      createdAt: timestamps.created
+    });
+
+    expect(validation(plan)).toEqual({
+      valid: true,
+      checkedRevision: 1,
+      issues: [],
+      topologicalOrder: ["assess-local-environment"]
+    });
+    expect(plan.steps[0]).toMatchObject({
+      kind: "analysis",
+      tool: null,
+      execution: {
+        mode: "agent_loop",
+        allowedTools: ["inspect_local_development_environment"],
+        maxRisk: "read_only"
+      }
+    });
+  });
+
+  it("rejects agent loops outside analysis steps or with write capabilities", () => {
+    const invalidKindProposal = tauProposal();
+    invalidKindProposal.steps = [
+      step({
+        id: "read-with-agent-loop",
+        execution: {
+          mode: "agent_loop",
+          allowedTools: ["inspect_local_development_environment"],
+          maxRisk: "read_only",
+          allowParallelReads: false,
+          maxTurns: 4,
+          maxToolCalls: 4,
+          maxRepeatedCalls: 2,
+          maxWallTimeMs: 60_000,
+          completionCriteria: ["返回本机环境信息。"]
+        }
+      })
+    ];
+    const invalidKind = validation(createTaskPlan({
+      planId: "task-plan-invalid-agent-loop-kind",
+      taskId: "task-invalid-agent-loop-kind",
+      proposal: invalidKindProposal,
+      createdBy: "remote-llm",
+      createdAt: timestamps.created
+    }));
+
+    const unsafeCapabilityProposal = tauProposal();
+    unsafeCapabilityProposal.steps = [
+      step({
+        id: "unsafe-analysis",
+        kind: "analysis",
+        tool: null,
+        execution: {
+          mode: "agent_loop",
+          allowedTools: ["controlled_download"],
+          maxRisk: "read_only",
+          allowParallelReads: false,
+          maxTurns: 4,
+          maxToolCalls: 4,
+          maxRepeatedCalls: 2,
+          maxWallTimeMs: 60_000,
+          completionCriteria: ["完成兼容性分析。"]
+        }
+      })
+    ];
+    const unsafeCapability = validation(createTaskPlan({
+      planId: "task-plan-unsafe-agent-loop-tool",
+      taskId: "task-unsafe-agent-loop-tool",
+      proposal: unsafeCapabilityProposal,
+      createdBy: "remote-llm",
+      createdAt: timestamps.created
+    }));
+
+    expect(invalidKind.issues).toContainEqual(
+      expect.objectContaining({
+        code: "AGENT_LOOP_STEP_KIND_INVALID",
+        stepId: "read-with-agent-loop"
+      })
+    );
+    expect(unsafeCapability.issues).toContainEqual(
+      expect.objectContaining({
+        code: "AGENT_LOOP_TOOL_RISK_INVALID",
+        stepId: "unsafe-analysis",
+        tool: "controlled_download"
+      })
+    );
+  });
+
+  it("rejects duplicate tools in an agent loop capability envelope", () => {
+    const proposal = tauProposal();
+    proposal.steps = [
+      step({
+        id: "duplicate-loop-tool",
+        kind: "analysis",
+        tool: null,
+        execution: {
+          mode: "agent_loop",
+          allowedTools: [
+            "inspect_local_development_environment",
+            "inspect_local_development_environment"
+          ],
+          maxRisk: "read_only",
+          allowParallelReads: false,
+          maxTurns: 4,
+          maxToolCalls: 4,
+          maxRepeatedCalls: 1,
+          maxWallTimeMs: 60_000,
+          completionCriteria: ["返回本机环境信息。"]
+        }
+      })
+    ];
+
+    const result = validation(createTaskPlan({
+      planId: "task-plan-duplicate-loop-tool",
+      taskId: "task-duplicate-loop-tool",
+      proposal,
+      createdBy: "remote-llm",
+      createdAt: timestamps.created
+    }));
+
+    expect(result.issues).toContainEqual(expect.objectContaining({
+      code: "AGENT_LOOP_TOOL_DUPLICATE",
+      stepId: "duplicate-loop-tool"
+    }));
   });
 
   it("rejects user decisions that the host cannot render", () => {

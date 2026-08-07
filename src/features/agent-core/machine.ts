@@ -368,6 +368,7 @@ export function createInitialAgentState(): AgentState {
     resources: [],
     localArtifacts: [],
     localRepository: null,
+    githubRepository: null,
     githubPublish: {
       status: "idle",
       plan: null,
@@ -399,7 +400,8 @@ export function createInitialAgentState(): AgentState {
       status: "idle",
       decisions: [],
       toolResults: [],
-      policyAudit: []
+      policyAudit: [],
+      agentLoop: null
     },
     agentB: {
       status: "idle",
@@ -450,7 +452,7 @@ function resolveTaskPlanClarification(
       }
     });
   }
-  if (step.kind === "resource_plan") {
+  if (step.kind === "resource_plan" || step.kind === "analysis") {
     return resumeTaskPlanStepAfterInput(plan, step.id, resolvedAt);
   }
   return plan;
@@ -492,6 +494,7 @@ function proposalFromTaskPlan(plan: NonNullable<AgentState["taskPlan"]>) {
       staticInput: structuredClone(step.staticInput),
       inputBindings: structuredClone(step.inputBindings),
       expectedOutput: step.expectedOutput,
+      execution: structuredClone(step.execution),
       risk: step.risk,
       approval: {
         required: step.approval.required,
@@ -526,7 +529,11 @@ function reviseTaskPlanForRecovery(
       .filter(
         (step) =>
           step.status === "completed" &&
-          (step.kind === "user_decision" || step.kind === "read_tool")
+          (
+            step.kind === "user_decision" ||
+            step.kind === "read_tool" ||
+            step.kind === "analysis"
+          )
       )
       .map((step) => step.id);
     const draft = reviseTaskPlan(replanning, {
@@ -712,6 +719,8 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
           taskId: event.taskId ?? `local-task-${state.logs.length + 1}`,
           task,
           phase: "routing",
+          localRepository: state.localRepository,
+          githubRepository: state.githubRepository,
           agentRun: { ...initialState.agentRun, status: "thinking" },
           workspace: {
             ready: false,
@@ -724,7 +733,42 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
           }
         },
         "info",
-        "收到任务，正在依据 Windows 11 x64 系统画像执行路由判断。"
+        state.localRepository
+          ? `收到任务，并继续绑定本地仓库 ${state.localRepository.displayName} 的固定 HEAD；正在执行路由判断。`
+          : state.githubRepository
+            ? `收到任务，并继续绑定 GitHub 仓库 ${state.githubRepository.fullName} 的固定 commit；正在执行路由判断。`
+          : "收到任务，正在依据 Windows 11 x64 系统画像执行路由判断。"
+      );
+    }
+
+    case "GITHUB_REPOSITORY_ANALYSIS_ATTACHED": {
+      const fromSearchResult =
+        state.phase === "result" &&
+        state.routeDecision?.skillId === "github-project-discovery";
+      const fromLocalRetry =
+        state.phase === "intake" && state.taskId === "unassigned";
+      if (!fromSearchResult && !fromLocalRetry) {
+        return state;
+      }
+      const initialState = createInitialAgentState();
+      const repository = event.repository;
+      return withLog(
+        {
+          ...initialState,
+          taskId: event.taskId,
+          task:
+            `分析 GitHub 仓库 ${repository.fullName} 的运行与构建要求，` +
+            "对比本机环境，列出已满足、缺少和无法确认的条件",
+          phase: "routing",
+          githubRepository: repository,
+          agentRun: { ...initialState.agentRun, status: "thinking" },
+          workspace: {
+            ...initialState.workspace,
+            nextAction: "等待 GitHub 固定 commit 项目分析路由。"
+          }
+        },
+        "success",
+        `已将 GitHub 仓库 ${repository.fullName} 固定到 commit ${repository.commitSha.slice(0, 12)}；开始只读环境分析。`
       );
     }
 
@@ -959,6 +1003,37 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         `Task Plan r${event.plan.revision} 已通过结构与权限校验，等待用户确认。`
       );
 
+    case "TASK_PLAN_REVISION_PROPOSED":
+      if (
+        !state.taskPlan ||
+        event.plan.taskId !== state.taskId ||
+        event.plan.planId !== state.taskPlan.planId ||
+        event.plan.previousRevision !== state.taskPlan.revision ||
+        event.plan.revision !== state.taskPlan.revision + 1 ||
+        event.validation.checkedRevision !== event.plan.revision ||
+        !event.validation.valid ||
+        event.plan.status !== "waiting_confirmation"
+      ) {
+        return state;
+      }
+      return withLog(
+        {
+          ...state,
+          phase: "waiting_task_plan_confirmation",
+          taskPlan: event.plan,
+          taskPlanValidation: event.validation,
+          approvedRevision: null,
+          agentRun: { ...state.agentRun, status: "waiting_approval" },
+          workspace: {
+            ...state.workspace,
+            nextAction:
+              `Agent Loop 提出了 Task Plan r${event.plan.revision}；确认前不会执行新增能力。`
+          }
+        },
+        "info",
+        `Agent Loop 提议新的 Task Plan r${event.plan.revision}：${event.reason}`
+      );
+
     case "TASK_PLAN_CONFIRMED": {
       if (
         state.phase !== "waiting_task_plan_confirmation" ||
@@ -995,6 +1070,18 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
             event.confirmedAt
           )
         : taskPlan;
+      const localEnvironmentInspection =
+        [
+          "local-development-environment-inspection",
+          "local-environment-compatibility-assessment",
+          "local-project-environment-compatibility",
+          "github-project-environment-compatibility"
+        ].includes(state.routeDecision?.skillId ?? "");
+      const confirmedPlanIsReadOnly = taskPlan.steps.every(
+        (step) => step.risk === "read_only" && !step.approval.required
+      );
+      const readOnlyLocalEnvironmentPlan =
+        localEnvironmentInspection && confirmedPlanIsReadOnly;
       return withLog(
         {
           ...state,
@@ -1008,7 +1095,8 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
           taskPlan: confirmedTaskPlan,
           agentRun: {
             ...state.agentRun,
-            status: requiresClarification ? "idle" : "thinking"
+            status: requiresClarification ? "idle" : "thinking",
+            agentLoop: null
           },
           workspace: {
             ...state.workspace,
@@ -1018,11 +1106,23 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
                 ? "Task Plan 已确认，等待当前资源 revision 的独立审批。"
               : requiresClarification
               ? "按已确认的 Task Plan 完成关键需求澄清。"
-              : "按已确认的 Task Plan 进入只读工具与资源规划阶段。"
+              : readOnlyLocalEnvironmentPlan
+                ? [
+                    "local-project-environment-compatibility",
+                    "github-project-environment-compatibility"
+                  ].includes(state.routeDecision?.skillId ?? "")
+                  ? "按已确认的能力范围读取固定仓库要求，并与本机环境进行只读对比。"
+                  : state.routeDecision?.skillId ===
+                      "local-environment-compatibility-assessment"
+                    ? "按已确认的能力范围启动只读 Agent Loop，调查并评估本机环境。"
+                    : "按已确认的 Task Plan 执行一次本机开发环境只读盘点。"
+                : "按已确认的 Task Plan 进入只读工具与资源规划阶段。"
           }
         },
         "info",
-        `用户已确认 Task Plan r${event.revision}；下载、导出等写入步骤仍需后续独立审批。`
+        readOnlyLocalEnvironmentPlan
+          ? `用户已确认 Task Plan r${event.revision}；该计划仅包含受限只读调查，不会下载或写入本地。`
+          : `用户已确认 Task Plan r${event.revision}；下载、导出等写入步骤仍需后续独立审批。`
       );
     }
 
@@ -1399,6 +1499,225 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         },
         event.result.status === "success" ? "success" : "error",
         `工具 ${event.result.tool} ${event.result.status === "success" ? "执行完成" : "执行失败"}。`
+      );
+    }
+
+    case "AGENT_LOOP_STARTED": {
+      const plannedStep = state.taskPlan?.steps.find(
+        (step) => step.id === event.stepId
+      );
+      if (
+        state.taskPlan?.planId !== event.planId ||
+        state.taskPlan.revision !== event.planRevision ||
+        state.taskPlan.status !== "executing" ||
+        state.taskPlan.confirmation.status !== "confirmed" ||
+        state.taskPlan.confirmation.confirmedRevision !== event.planRevision ||
+        plannedStep?.status !== "running" ||
+        plannedStep.kind !== "analysis" ||
+        plannedStep.execution.mode !== "agent_loop"
+      ) {
+        return state;
+      }
+      const existing = state.agentRun.agentLoop;
+      const sameIdentity =
+        existing?.runId === event.runId &&
+        existing.planId === event.planId &&
+        existing.planRevision === event.planRevision &&
+        existing.stepId === event.stepId;
+      const resumed =
+        sameIdentity &&
+        existing?.status === "waiting_user_input" &&
+        existing.outcome?.status === "waiting_user_input" &&
+        existing.usage !== null
+          ? existing
+          : null;
+      if (sameIdentity && !resumed) return state;
+      return withLog(
+        {
+          ...state,
+          agentRun: {
+            ...state.agentRun,
+            status: "thinking",
+            agentLoop: resumed
+              ? {
+                  ...resumed,
+                  status: "running",
+                  outcome: null,
+                  finishedAt: null
+                }
+              : {
+                  runId: event.runId,
+                  planId: event.planId,
+                  planRevision: event.planRevision,
+                  stepId: event.stepId,
+                  status: "running",
+                  transcript: [],
+                  events: [],
+                  usage: null,
+                  outcome: null,
+                  startedAt: event.startedAt,
+                  finishedAt: null
+                }
+          }
+        },
+        "info",
+        `Agent Loop 已开始执行 Task Plan 步骤 ${event.stepId}。`
+      );
+    }
+
+    case "AGENT_LOOP_EVENT_RECORDED": {
+      const activeLoop = state.agentRun.agentLoop;
+      const previousEvent = activeLoop?.events[activeLoop.events.length - 1];
+      if (
+        !activeLoop ||
+        activeLoop.status !== "running" ||
+        activeLoop.runId !== event.event.runId ||
+        event.event.stepId !== activeLoop.stepId ||
+        state.taskPlan?.planId !== activeLoop.planId ||
+        state.taskPlan.revision !== activeLoop.planRevision ||
+        !Number.isSafeInteger(event.event.sequence) ||
+        event.event.sequence <= 0 ||
+        (previousEvent !== undefined &&
+          event.event.sequence <= previousEvent.sequence)
+      ) return state;
+      const status = event.event.type === "tool_call_started"
+        ? "waiting_tool" as const
+        : event.event.type === "model_turn_started"
+          ? "thinking" as const
+          : state.agentRun.status;
+      return {
+        ...state,
+        agentRun: {
+          ...state.agentRun,
+          status,
+          agentLoop: {
+            ...activeLoop,
+            events: [...activeLoop.events, event.event]
+          }
+        }
+      };
+    }
+
+    case "AGENT_LOOP_SETTLED": {
+      const activeLoop = state.agentRun.agentLoop;
+      if (
+        !activeLoop ||
+        activeLoop.status !== "running" ||
+        activeLoop.runId !== event.result.runId ||
+        activeLoop.stepId !== event.stepId ||
+        state.taskPlan?.planId !== activeLoop.planId ||
+        state.taskPlan.revision !== activeLoop.planRevision
+      ) return state;
+      const failed = ["failed", "stopped", "aborted"].includes(
+        event.result.status
+      );
+      return withLog(
+        {
+          ...state,
+          agentRun: {
+            ...state.agentRun,
+            status: failed
+              ? "failed"
+              : event.result.status === "waiting_user_input"
+                ? "idle"
+                : event.result.status === "plan_revision_proposed"
+                  ? "waiting_approval"
+                  : "thinking",
+            agentLoop: {
+              ...activeLoop,
+              status: event.result.status,
+              transcript: [...event.result.transcript],
+              usage: { ...event.result.usage },
+              outcome: structuredClone(event.result),
+              finishedAt: event.settledAt
+            }
+          }
+        },
+        failed ? "error" : "success",
+        event.result.status === "completed"
+          ? `Agent Loop 已完成步骤 ${event.stepId}。`
+          : `Agent Loop 步骤 ${event.stepId} 结束：${event.result.status}。`
+      );
+    }
+
+    case "AGENT_LOOP_INPUT_REQUESTED": {
+      const activeLoop = state.agentRun.agentLoop;
+      if (
+        !activeLoop ||
+        activeLoop.status !== "running" ||
+        activeLoop.runId !== event.result.runId ||
+        activeLoop.stepId !== event.stepId ||
+        state.taskPlan?.planId !== activeLoop.planId ||
+        state.taskPlan.revision !== activeLoop.planRevision
+      ) return state;
+      let taskPlan;
+      try {
+        taskPlan = suspendTaskPlanStepForInput(
+          state.taskPlan,
+          event.stepId,
+          event.requestedAt
+        );
+      } catch {
+        return state;
+      }
+      const question = event.result.action;
+      return withLog(
+        {
+          ...state,
+          phase: "clarifying",
+          route: state.route ?? "ai-development-environment",
+          taskPlan,
+          clarifications: [{
+            id: question.questionId,
+            prompt: question.question,
+            reason: question.reason,
+            required: question.required,
+            options: question.options ?? []
+          }],
+          clarificationIndex: 0,
+          agentRun: {
+            ...state.agentRun,
+            status: "idle",
+            agentLoop: {
+              ...activeLoop,
+              status: "waiting_user_input",
+              transcript: [...event.result.transcript],
+              usage: { ...event.result.usage },
+              outcome: structuredClone(event.result),
+              finishedAt: event.requestedAt
+            }
+          }
+        },
+        "info",
+        `Agent Loop 正在等待用户回答：${question.question}`
+      );
+    }
+
+    case "AGENT_LOOP_RECOVERY_REJECTED": {
+      const activeLoop = state.agentRun.agentLoop;
+      if (
+        !activeLoop ||
+        activeLoop.runId !== event.runId ||
+        activeLoop.stepId !== event.stepId ||
+        state.taskPlan?.planId !== activeLoop.planId ||
+        state.taskPlan.revision !== activeLoop.planRevision
+      ) return state;
+      return withLog(
+        {
+          ...state,
+          agentRun: {
+            ...state.agentRun,
+            status: "failed",
+            agentLoop: {
+              ...activeLoop,
+              status: "failed",
+              outcome: null,
+              finishedAt: event.rejectedAt
+            }
+          }
+        },
+        "error",
+        event.reason
       );
     }
 

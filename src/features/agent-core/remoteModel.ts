@@ -1,12 +1,20 @@
 import type { ModelRuntime, RemoteModelTransport } from "./interfaces";
+import type {
+  AgentAssistantTurn,
+  AgentTurnContext
+} from "./agentLoop";
 import { parseModelDecision } from "./agentSchemas";
 import { ModelConnectionRequestError } from "./modelConnection";
 import {
   githubSearchInputFromState,
   sameGitHubSearchInput
 } from "./githubSearch";
-import type { ModelContext, ModelDecision } from "./types";
-import type { AgentToolName } from "./types";
+import type {
+  AgentToolName,
+  ModelContext,
+  ModelDecision,
+  TaskPlanProposal
+} from "./types";
 import {
   createTaskPlan,
   defaultTaskPlanToolPolicies,
@@ -53,6 +61,20 @@ export function parseRemoteDecision(value: unknown): ModelDecision {
 /** 通过注入的安全传输调用远程 LLM，并校验其结构化输出。 */
 export class RemoteLlmModelRuntime implements ModelRuntime {
   constructor(private readonly transport: RemoteModelTransport) {}
+
+  async generateTurn(
+    context: AgentTurnContext<AgentToolName, unknown, TaskPlanProposal>,
+    signal: AbortSignal
+  ): Promise<AgentAssistantTurn<AgentToolName, unknown, TaskPlanProposal>> {
+    if (!this.transport.requestTurn) {
+      throw new ModelConnectionRequestError({
+        code: "MODEL_INVALID_DECISION",
+        message: "当前远程模型传输层尚未实现 Agent Loop turn 协议。",
+        retriable: false
+      });
+    }
+    return this.transport.requestTurn(context, signal);
+  }
 
   async decide(context: ModelContext): Promise<ModelDecision> {
     const decision = parseRemoteDecision(
@@ -116,6 +138,29 @@ export class RemoteLlmModelRuntime implements ModelRuntime {
         });
       }
     }
+    if (
+      [
+        "local-development-environment-inspection",
+        "local-environment-compatibility-assessment"
+      ].includes(context.state.routeDecision?.skillId ?? "")
+    ) {
+      const hasInspectionResult = context.toolResults.some(
+        (result) =>
+          result.tool === "inspect_local_development_environment"
+      );
+      const allowedInspectionAction =
+        (!hasInspectionResult &&
+          action.type === "call_tool" &&
+          action.call.name === "inspect_local_development_environment") ||
+        (hasInspectionResult && action.type === "finish");
+      if (!allowedInspectionAction) {
+        throw new ModelConnectionRequestError({
+          code: "MODEL_INVALID_DECISION",
+          message: "远程模型尝试越过本地环境只读盘点流程，已切换本地规则模型。",
+          retriable: true
+        });
+      }
+    }
     const proposedResourceIds =
       action.type === "create_plan"
         ? action.resourceIds
@@ -139,6 +184,7 @@ export class RemoteLlmModelRuntime implements ModelRuntime {
     const readOnlyToolName =
       action.type === "call_tool" &&
       (action.call.name === "read_system_profile" ||
+        action.call.name === "inspect_local_development_environment" ||
         action.call.name === "search_trusted_catalog" ||
         action.call.name === "search_github_repositories")
         ? action.call.name
@@ -201,6 +247,36 @@ export class FallbackModelRuntime implements ModelRuntime {
     } catch (error) {
       this.observer.onPrimaryFailure?.(error);
       return this.fallback.decide(context);
+    }
+  }
+
+  async generateTurn(
+    context: AgentTurnContext<AgentToolName, unknown, TaskPlanProposal>,
+    signal: AbortSignal
+  ): Promise<AgentAssistantTurn<AgentToolName, unknown, TaskPlanProposal>> {
+    const fallbackTurn = () => {
+      if (!this.fallback.generateTurn) {
+        throw new ModelConnectionRequestError({
+          code: "MODEL_INVALID_DECISION",
+          message: "本地回退模型不支持 Agent Loop turn 协议。",
+          retriable: false
+        });
+      }
+      return this.fallback.generateTurn(context, signal);
+    };
+    if (
+      this.observer.shouldAttemptPrimary &&
+      !this.observer.shouldAttemptPrimary()
+    ) {
+      return fallbackTurn();
+    }
+    if (!this.primary.generateTurn) return fallbackTurn();
+    try {
+      return await this.primary.generateTurn(context, signal);
+    } catch (error) {
+      if (signal.aborted) throw error;
+      this.observer.onPrimaryFailure?.(error);
+      return fallbackTurn();
     }
   }
 }

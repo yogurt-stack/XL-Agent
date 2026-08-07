@@ -30,12 +30,14 @@ describe("native OpenAI tool protocol", () => {
   it("publishes compatible closed schemas plus only the available runtime tools", () => {
     const tools = createOpenAiAgentTools([
       "read_system_profile",
+      "inspect_local_development_environment",
       "controlled_download"
     ]);
     const names = tools.map((tool) => tool.function.name);
 
     expect(names).toContain("create_plan");
     expect(names).toContain("read_system_profile");
+    expect(names).toContain("inspect_local_development_environment");
     expect(names).toContain("controlled_download");
     expect(names).not.toContain("simulate_download");
     expect(
@@ -45,6 +47,58 @@ describe("native OpenAI tool protocol", () => {
           tool.function.parameters.additionalProperties === false
       )
     ).toBe(true);
+  });
+
+  it("parses the local development environment inspection without command input", () => {
+    const decision = parseOpenAiToolDecision(
+      toolCall("inspect_local_development_environment", {
+        purpose: "查询本机开发工具版本。",
+        explanation: "用户只要求只读盘点。"
+      }),
+      "test-model",
+      ["inspect_local_development_environment"]
+    );
+
+    expect(decision.action).toMatchObject({
+      type: "call_tool",
+      call: {
+        name: "inspect_local_development_environment",
+        input: {}
+      }
+    });
+  });
+
+  it("maps fixed local repository evidence calls without accepting filesystem paths", () => {
+    const decision = parseOpenAiToolDecision(
+      toolCall("read_local_repository_file", {
+        repositoryHandleId: "local-repo-fixture",
+        relativePath: "README.md",
+        purpose: "读取项目要求证据。",
+        explanation: "该文件来自固定 HEAD 白名单。"
+      }),
+      "test-model",
+      ["read_local_repository_file"]
+    );
+    expect(decision.action).toMatchObject({
+      type: "call_tool",
+      call: {
+        name: "read_local_repository_file",
+        input: {
+          repositoryHandleId: "local-repo-fixture",
+          relativePath: "README.md"
+        }
+      }
+    });
+    expect(() => parseOpenAiToolDecision(
+      toolCall("read_local_repository_file", {
+        repositoryHandleId: "local-repo-fixture",
+        relativePath: "../.env",
+        purpose: "读取文件。",
+        explanation: "测试非法路径。"
+      }),
+      "test-model",
+      ["read_local_repository_file"]
+    )).toThrow(ModelToolProtocolError);
   });
 
   it("maps exactly one native action tool_call to ModelDecision", () => {

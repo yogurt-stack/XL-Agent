@@ -4,6 +4,7 @@ import type {
   GitHubRepositorySearchInput,
   GitHubRepositorySearchOutput,
   GitHubRepositorySearchResult,
+  GitHubRepositoryAnalysisSummary,
   GitHubRepositorySummary,
   PlannedResource
 } from "../src/features/agent-core/types";
@@ -115,6 +116,23 @@ export type GitHubRepositoryInspectionResult =
       resource: PlannedResource;
       dependencyResources: PlannedResource[];
     }
+  | {
+      ok: false;
+      error: { code: string; message: string; retriable: boolean };
+    };
+
+export type GitHubRepositoryAnalysisInspection = {
+  summary: GitHubRepositoryAnalysisSummary;
+  files: Array<{
+    relativePath: string;
+    objectId: string;
+    bytes: number;
+  }>;
+  readBlob: (objectId: string, signal?: AbortSignal) => Promise<Buffer>;
+};
+
+export type GitHubRepositoryAnalysisInspectionResult =
+  | { ok: true; inspection: GitHubRepositoryAnalysisInspection }
   | {
       ok: false;
       error: { code: string; message: string; retriable: boolean };
@@ -258,7 +276,7 @@ function failure(
   code: string,
   message: string,
   retriable: boolean
-): GitHubRepositorySearchResult {
+): { ok: false; error: { code: string; message: string; retriable: boolean } } {
   return { ok: false, error: { code, message, retriable } };
 }
 
@@ -695,6 +713,206 @@ export class GitHubRepositorySearchClient {
       rateLimit: rateLimitFrom(response)
     };
     return { ok: true, output };
+  }
+
+  async inspectRepositoryForAnalysis(
+    fullName: string
+  ): Promise<GitHubRepositoryAnalysisInspectionResult> {
+    if (
+      !/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/.test(fullName)
+    ) {
+      return failure(
+        "GITHUB_REPOSITORY_INVALID",
+        "GitHub 仓库标识不合法。",
+        false
+      );
+    }
+    const [owner, repository] = fullName.split("/");
+    const token = this.environment.XL_AGENT_GITHUB_TOKEN?.trim() || null;
+    const headers = {
+      accept: "application/vnd.github+json",
+      "x-github-api-version": githubApiVersion,
+      "user-agent": "xunlei-ai-task-agent",
+      ...(token ? { authorization: `Bearer ${token}` } : {})
+    };
+    const request = async (url: URL, signal?: AbortSignal) => {
+      try {
+        const timeout = AbortSignal.timeout(15000);
+        return await this.fetchRequest(url, {
+          method: "GET",
+          headers,
+          signal: signal ? AbortSignal.any([signal, timeout]) : timeout
+        });
+      } catch {
+        return null;
+      }
+    };
+    const detailResponse = await request(new URL(
+      `/repos/${owner}/${repository}`,
+      "https://api.github.com"
+    ));
+    if (!detailResponse) {
+      return failure(
+        "GITHUB_NETWORK_ERROR",
+        "无法读取 GitHub 仓库详情，请检查网络后重试。",
+        true
+      );
+    }
+    if (!detailResponse.ok) {
+      return failure(
+        "GITHUB_REPOSITORY_UNAVAILABLE",
+        await safeGitHubMessage(detailResponse, token) ??
+          `GitHub 仓库详情请求失败：HTTP ${detailResponse.status}。`,
+        detailResponse.status === 408 || detailResponse.status >= 500
+      );
+    }
+    let detailPayload: unknown = null;
+    try {
+      detailPayload = await detailResponse.json();
+    } catch {
+      detailPayload = null;
+    }
+    const detail = githubRepositoryDetailSchema.safeParse(detailPayload);
+    if (
+      !detail.success ||
+      detail.data.full_name.toLowerCase() !== fullName.toLowerCase() ||
+      detail.data.private
+    ) {
+      return failure(
+        "GITHUB_REPOSITORY_NOT_PUBLIC",
+        "环境分析只能读取公开 GitHub 仓库。",
+        false
+      );
+    }
+    const commitResponse = await request(new URL(
+      `/repos/${owner}/${repository}/commits/${encodeURIComponent(
+        detail.data.default_branch
+      )}`,
+      "https://api.github.com"
+    ));
+    if (!commitResponse?.ok) {
+      return failure(
+        "GITHUB_COMMIT_UNAVAILABLE",
+        "无法把仓库默认分支解析为固定 commit SHA。",
+        true
+      );
+    }
+    let commitPayload: unknown = null;
+    try {
+      commitPayload = await commitResponse.json();
+    } catch {
+      commitPayload = null;
+    }
+    const commit = githubCommitSchema.safeParse(commitPayload);
+    if (!commit.success) {
+      return failure(
+        "GITHUB_INVALID_RESPONSE",
+        "GitHub Commit API 响应不符合预期协议。",
+        true
+      );
+    }
+    const treeSha = commit.data.commit.tree.sha.toLowerCase();
+    const treeUrl = new URL(
+      `/repos/${owner}/${repository}/git/trees/${treeSha}`,
+      "https://api.github.com"
+    );
+    treeUrl.searchParams.set("recursive", "1");
+    const treeResponse = await request(treeUrl);
+    if (!treeResponse?.ok) {
+      return failure(
+        "GITHUB_TREE_UNAVAILABLE",
+        "无法读取固定 commit 对应的 GitHub Tree。",
+        true
+      );
+    }
+    let treePayload: unknown = null;
+    try {
+      treePayload = await treeResponse.json();
+    } catch {
+      treePayload = null;
+    }
+    const tree = githubTreeSchema.safeParse(treePayload);
+    if (!tree.success) {
+      return failure(
+        "GITHUB_INVALID_RESPONSE",
+        "GitHub Tree API 响应不符合预期协议。",
+        true
+      );
+    }
+    const files = tree.data.tree
+      .filter((entry) =>
+        entry.type === "blob" &&
+        typeof entry.size === "number" &&
+        entry.path.length > 0 &&
+        entry.path.length <= 1024 &&
+        !entry.path.startsWith("/") &&
+        !entry.path.split("/").some((part) =>
+          part === "" || part === "." || part === ".." || part === ".git"
+        ) &&
+        !/[\u0000-\u001f\u007f]/u.test(entry.path)
+      )
+      .map((entry) => ({
+        relativePath: entry.path.normalize("NFC"),
+        objectId: entry.sha.toLowerCase(),
+        bytes: entry.size ?? 0
+      }));
+    const commitSha = commit.data.sha.toLowerCase();
+    const analysis = analyzeProjectPaths(
+      files.map((file) => file.relativePath),
+      tree.data.truncated
+    );
+    const repositoryHandleId = `github-repo-${createHash("sha256")
+      .update(`${detail.data.full_name.toLowerCase()}\0${commitSha}\0${treeSha}`)
+      .digest("hex")
+      .slice(0, 32)}`;
+    const allowedBlobIds = new Set(files.map((file) => file.objectId));
+    const inspection: GitHubRepositoryAnalysisInspection = {
+      summary: {
+        repositoryHandleId,
+        fullName: detail.data.full_name,
+        displayName: detail.data.full_name,
+        defaultBranch: detail.data.default_branch,
+        commitSha,
+        treeSha,
+        trackedFileCount: files.length,
+        treeTruncated: tree.data.truncated,
+        inspectedAt: this.now().toISOString(),
+        analysis
+      },
+      files,
+      readBlob: async (objectId, signal) => {
+        const normalizedObjectId = objectId.toLowerCase();
+        if (!allowedBlobIds.has(normalizedObjectId)) {
+          throw new Error("请求的 blob 不属于当前固定 GitHub Tree。");
+        }
+        const response = await request(new URL(
+          `/repos/${owner}/${repository}/git/blobs/${normalizedObjectId}`,
+          "https://api.github.com"
+        ), signal);
+        if (!response?.ok) {
+          throw new Error("GitHub Blob API 读取失败。");
+        }
+        let payload: unknown = null;
+        try {
+          payload = await response.json();
+        } catch {
+          payload = null;
+        }
+        const blob = githubBlobSchema.safeParse(payload);
+        if (!blob.success) {
+          throw new Error("GitHub Blob API 响应不符合预期协议。");
+        }
+        const content = Buffer.from(blob.data.content, "base64");
+        if (
+          blob.data.size > 256 * 1024 ||
+          content.byteLength !== blob.data.size
+        ) {
+          throw new Error("GitHub Blob 超过只读证据上限或字节数不一致。");
+        }
+        return content;
+      }
+    };
+    return { ok: true, inspection };
   }
 
   async inspectRepository(

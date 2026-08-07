@@ -1,3 +1,10 @@
+import type {
+  AgentLoopEvent,
+  AgentLoopMessage,
+  AgentLoopResult,
+  AgentLoopUsage
+} from "./agentLoop";
+
 export type AgentPhase =
   | "intake"
   | "routing"
@@ -146,6 +153,7 @@ export type TaskPlanStatus =
 
 export type TaskPlanStepKind =
   | "read_tool"
+  | "analysis"
   | "user_decision"
   | "resource_plan"
   | "write_tool"
@@ -188,6 +196,28 @@ export type TaskPlanStepResult = {
   output?: unknown;
 };
 
+/**
+ * How a TaskPlan step is executed. Existing plans omit this field and retain
+ * the deterministic executor behavior. Agent-loop execution is deliberately
+ * limited to a read-only capability envelope; any broader action must be
+ * proposed as a new TaskPlan revision.
+ */
+export type TaskPlanStepExecution =
+  | {
+      mode: "deterministic";
+    }
+  | {
+      mode: "agent_loop";
+      allowedTools: AgentToolName[];
+      maxRisk: "read_only";
+      allowParallelReads: boolean;
+      maxTurns: number;
+      maxToolCalls: number;
+      maxRepeatedCalls: number;
+      maxWallTimeMs: number;
+      completionCriteria: string[];
+    };
+
 export type TaskPlanStepProposal = {
   id: string;
   title: string;
@@ -203,6 +233,8 @@ export type TaskPlanStepProposal = {
     required: boolean;
     reason: string | null;
   };
+  /** Omitted by legacy plans and deterministic steps. */
+  execution?: TaskPlanStepExecution;
 };
 
 export type TaskPlanProposal = {
@@ -217,7 +249,8 @@ export type TaskPlanProposal = {
   };
 };
 
-export type TaskPlanStep = TaskPlanStepProposal & {
+export type TaskPlanStep = Omit<TaskPlanStepProposal, "execution"> & {
+  execution: TaskPlanStepExecution;
   status: TaskPlanStepStatus;
   approval: TaskPlanStepApproval;
   result: TaskPlanStepResult | null;
@@ -235,7 +268,7 @@ export type TaskPlanConfirmation = {
 };
 
 export type TaskPlan = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   planId: string;
   taskId: string;
   revision: number;
@@ -258,6 +291,8 @@ export type TaskPlanToolPolicy = {
   allowedStepKinds: TaskPlanStepKind[];
   risk: TaskPlanRisk;
   approvalRequired: boolean;
+  /** Explicit opt-in; read_only alone is not enough to enter AgentLoop. */
+  agentLoopAllowed: boolean;
 };
 
 export type TaskPlanValidationIssueCode =
@@ -276,6 +311,11 @@ export type TaskPlanValidationIssueCode =
   | "TOOL_NOT_ALLOWED"
   | "TOOL_KIND_MISMATCH"
   | "TOOL_RISK_MISMATCH"
+  | "AGENT_LOOP_EXECUTION_REQUIRED"
+  | "AGENT_LOOP_STEP_KIND_INVALID"
+  | "AGENT_LOOP_TOOL_NOT_ALLOWED"
+  | "AGENT_LOOP_TOOL_DUPLICATE"
+  | "AGENT_LOOP_TOOL_RISK_INVALID"
   | "APPROVAL_REQUIRED"
   | "APPROVAL_REASON_REQUIRED"
   | "APPROVAL_REVISION_MISMATCH"
@@ -354,6 +394,7 @@ export type GitHubProjectEcosystem =
   | "python"
   | "rust"
   | "go"
+  | "cpp"
   | "unknown";
 
 export type GitHubProjectAnalysis = {
@@ -402,6 +443,19 @@ export type LocalRepositorySummary = {
   trackedFileCount: number;
   hasSubmodules: boolean;
   hasSymlinks: boolean;
+  inspectedAt: string;
+  analysis: GitHubProjectAnalysis;
+};
+
+export type GitHubRepositoryAnalysisSummary = {
+  repositoryHandleId: string;
+  fullName: string;
+  displayName: string;
+  defaultBranch: string;
+  commitSha: string;
+  treeSha: string;
+  trackedFileCount: number;
+  treeTruncated: boolean;
   inspectedAt: string;
   analysis: GitHubProjectAnalysis;
 };
@@ -611,6 +665,7 @@ export type AgentState = {
   resources: PlannedResource[];
   localArtifacts: LocalArtifactSummary[];
   localRepository: LocalRepositorySummary | null;
+  githubRepository: GitHubRepositoryAnalysisSummary | null;
   githubPublish: GitHubPublishState;
   replanReason: ReplanReason | null;
   requestedReplanStrategy: ReplanStrategy | null;
@@ -627,6 +682,13 @@ export type AgentState = {
 
 export type AgentToolName =
   | "read_system_profile"
+  | "inspect_local_development_environment"
+  | "list_local_repository_tree"
+  | "read_local_repository_file"
+  | "inspect_project_requirements"
+  | "list_github_repository_tree"
+  | "read_github_repository_file"
+  | "inspect_github_project_requirements"
   | "search_trusted_catalog"
   | "search_github_repositories"
   | "simulate_download"
@@ -724,11 +786,225 @@ export type GitHubRepositorySearchResult =
   | { ok: true; output: GitHubRepositorySearchOutput }
   | { ok: false; error: GitHubRepositorySearchError };
 
+export type DevelopmentEnvironmentToolId =
+  | "node"
+  | "npm"
+  | "python3"
+  | "python"
+  | "py"
+  | "pip3"
+  | "pip"
+  | "git"
+  | "cmake"
+  | "qt"
+  | "occt"
+  | "cuda-compiler"
+  | "nvidia-gpu";
+
+export type DevelopmentEnvironmentToolStatus =
+  | "available"
+  | "not_found"
+  | "not_applicable"
+  | "error";
+
+export type DevelopmentEnvironmentToolVersion = {
+  id: DevelopmentEnvironmentToolId;
+  name: string;
+  command: string;
+  status: DevelopmentEnvironmentToolStatus;
+  version: string | null;
+  detail: string | null;
+};
+
+export type LocalDevelopmentEnvironmentOutput = {
+  host: {
+    platform: HostPlatform;
+    architecture: HostArchitecture;
+  };
+  tools: DevelopmentEnvironmentToolVersion[];
+  collectedAt: string;
+  source: "electron-main-fixed-command-allowlist" | "in-memory-fallback";
+  boundary: "read-only-fixed-command-allowlist";
+};
+
+export type LocalRepositoryTreeOutput = {
+  repository: {
+    repositoryHandleId: string;
+    displayName: string;
+    commitSha: string;
+  };
+  pathPrefix: string;
+  entries: Array<{
+    relativePath: string;
+    objectId: string;
+    bytes: number;
+  }>;
+  totalMatchingEntries: number;
+  truncated: boolean;
+  boundary: "fixed-head-tracked-files-only";
+};
+
+export type LocalRepositoryFileOutput = {
+  repository: {
+    repositoryHandleId: string;
+    commitSha: string;
+  };
+  relativePath: string;
+  objectId: string;
+  content: string;
+  bytes: number;
+  truncated: boolean;
+  trust: "untrusted-repository-content";
+  boundary: "fixed-head-text-evidence-only";
+};
+
+export type GitHubRepositoryTreeOutput = {
+  repository: {
+    repositoryHandleId: string;
+    displayName: string;
+    commitSha: string;
+  };
+  pathPrefix: string;
+  entries: Array<{
+    relativePath: string;
+    objectId: string;
+    bytes: number;
+  }>;
+  totalMatchingEntries: number;
+  truncated: boolean;
+  boundary: "fixed-commit-github-blobs-only";
+};
+
+export type GitHubRepositoryFileOutput = {
+  repository: {
+    repositoryHandleId: string;
+    commitSha: string;
+  };
+  relativePath: string;
+  objectId: string;
+  content: string;
+  bytes: number;
+  truncated: boolean;
+  trust: "untrusted-repository-content";
+  boundary: "fixed-commit-github-text-evidence-only";
+};
+
+export type ProjectRequirementKind =
+  | "runtime"
+  | "tool"
+  | "framework"
+  | "library"
+  | "package-manager"
+  | "operating-system";
+
+export type ProjectRequirement = {
+  id: string;
+  kind: ProjectRequirementKind;
+  name: string;
+  constraint: string | null;
+  sourcePath: string;
+  evidence: string;
+  confidence: "explicit" | "inferred";
+};
+
+export type ProjectRequirementsOutput = {
+  repository: {
+    repositoryHandleId: string;
+    displayName: string;
+    commitSha: string;
+  };
+  inspectedFiles: Array<{
+    relativePath: string;
+    objectId: string;
+    bytesRead: number;
+    truncated: boolean;
+  }>;
+  requirements: ProjectRequirement[];
+  unresolved: string[];
+  warnings: string[];
+  trust: "untrusted-repository-content";
+  boundary: "fixed-head-known-project-files-only";
+};
+
+export type ProjectCompatibilityAssessment = {
+  repository: ProjectRequirementsOutput["repository"];
+  overallCompatibility: "compatible" | "incompatible" | "partial" | "unresolved";
+  requirements: ProjectRequirement[];
+  observedTools: Array<{
+    toolId: DevelopmentEnvironmentToolId;
+    status: DevelopmentEnvironmentToolStatus;
+    observedVersion: string | null;
+    observedDetail: string | null;
+  }>;
+  assessment: Array<{
+    requirementId: string;
+    status: "satisfied" | "missing" | "unresolved";
+    localEvidenceToolId: DevelopmentEnvironmentToolId | null;
+    reason: string;
+  }>;
+  unresolved: string[];
+  proposedNextActions: string[];
+  boundary: "read-only-evidence-comparison";
+};
+
 export type AgentToolCall =
   | {
       callId: string;
       name: "read_system_profile";
       input: Record<never, never>;
+    }
+  | {
+      callId: string;
+      name: "inspect_local_development_environment";
+      input: Record<never, never>;
+    }
+  | {
+      callId: string;
+      name: "list_local_repository_tree";
+      input: {
+        repositoryHandleId: string;
+        pathPrefix?: string;
+        maxEntries?: number;
+      };
+    }
+  | {
+      callId: string;
+      name: "read_local_repository_file";
+      input: {
+        repositoryHandleId: string;
+        relativePath: string;
+      };
+    }
+  | {
+      callId: string;
+      name: "inspect_project_requirements";
+      input: {
+        repositoryHandleId: string;
+      };
+    }
+  | {
+      callId: string;
+      name: "list_github_repository_tree";
+      input: {
+        repositoryHandleId: string;
+        pathPrefix?: string;
+        maxEntries?: number;
+      };
+    }
+  | {
+      callId: string;
+      name: "read_github_repository_file";
+      input: {
+        repositoryHandleId: string;
+        relativePath: string;
+      };
+    }
+  | {
+      callId: string;
+      name: "inspect_github_project_requirements";
+      input: {
+        repositoryHandleId: string;
+      };
     }
   | {
       callId: string;
@@ -915,6 +1191,28 @@ export type AgentRunState = {
   decisions: ModelDecision[];
   toolResults: ToolResult[];
   policyAudit: PolicyAuditEntry[];
+  agentLoop: AgentLoopRunRecord | null;
+};
+
+export type AgentLoopRunRecord = {
+  runId: string;
+  planId: string;
+  planRevision: number;
+  stepId: string;
+  status:
+    | "running"
+    | "completed"
+    | "waiting_user_input"
+    | "plan_revision_proposed"
+    | "stopped"
+    | "aborted"
+    | "failed";
+  transcript: AgentLoopMessage<AgentToolName, unknown, TaskPlanProposal>[];
+  events: AgentLoopEvent<AgentToolName>[];
+  usage: AgentLoopUsage | null;
+  outcome: AgentLoopResult<AgentToolName, unknown, TaskPlanProposal> | null;
+  startedAt: string;
+  finishedAt: string | null;
 };
 
 export type AgentEvent =
@@ -924,6 +1222,12 @@ export type AgentEvent =
       type: "TASK_PLAN_PROPOSED";
       plan: TaskPlan;
       validation: TaskPlanValidationResult;
+    }
+  | {
+      type: "TASK_PLAN_REVISION_PROPOSED";
+      plan: TaskPlan;
+      validation: TaskPlanValidationResult;
+      reason: string;
     }
   | { type: "CONFIRM_TASK_PLAN"; revision: number }
   | {
@@ -958,6 +1262,7 @@ export type AgentEvent =
   | { type: "ANSWER_CLARIFICATION"; questionId: string; answer: string; answeredAt?: string }
   | { type: "SKIP_CLARIFICATION"; questionId: string; skippedAt?: string }
   | { type: "PREPARE_GITHUB_REPOSITORY"; fullName: string }
+  | { type: "ANALYZE_GITHUB_REPOSITORY"; fullName: string }
   | { type: "PREPARE_NODE_DEPENDENCIES" }
   | { type: "TOGGLE_NODE_DEPENDENCIES"; selected: boolean }
   | { type: "PLAN_GENERATED" }
@@ -1005,6 +1310,11 @@ export type AgentEvent =
       taskId: string;
       repository: LocalRepositorySummary;
     }
+  | {
+      type: "GITHUB_REPOSITORY_ANALYSIS_ATTACHED";
+      taskId: string;
+      repository: GitHubRepositoryAnalysisSummary;
+    }
   | { type: "GITHUB_PUBLISH_PLAN_PREPARED"; plan: GitHubPublishPlan }
   | {
       type: "GITHUB_PUBLISH_STARTED";
@@ -1047,6 +1357,40 @@ export type AgentEvent =
   | { type: "MODEL_FINISHED"; summary: string }
   | { type: "MODEL_STEP_LIMIT_REACHED" }
   | { type: "MODEL_RUNTIME_FAILED"; reason: string }
+  | {
+      type: "AGENT_LOOP_STARTED";
+      runId: string;
+      planId: string;
+      planRevision: number;
+      stepId: string;
+      startedAt: string;
+    }
+  | {
+      type: "AGENT_LOOP_EVENT_RECORDED";
+      event: AgentLoopEvent<AgentToolName>;
+    }
+  | {
+      type: "AGENT_LOOP_SETTLED";
+      stepId: string;
+      result: AgentLoopResult<AgentToolName, unknown, TaskPlanProposal>;
+      settledAt: string;
+    }
+  | {
+      type: "AGENT_LOOP_INPUT_REQUESTED";
+      stepId: string;
+      result: Extract<
+        AgentLoopResult<AgentToolName, unknown, TaskPlanProposal>,
+        { status: "waiting_user_input" }
+      >;
+      requestedAt: string;
+    }
+  | {
+      type: "AGENT_LOOP_RECOVERY_REJECTED";
+      runId: string;
+      stepId: string;
+      reason: string;
+      rejectedAt: string;
+    }
   | { type: "CANCEL_TASK"; cancelledAt?: string }
   | { type: "RESET" };
 
@@ -1059,6 +1403,7 @@ export type AgentUserEvent = Extract<
       | "ANSWER_CLARIFICATION"
       | "SKIP_CLARIFICATION"
       | "PREPARE_GITHUB_REPOSITORY"
+      | "ANALYZE_GITHUB_REPOSITORY"
       | "PREPARE_NODE_DEPENDENCIES"
       | "TOGGLE_NODE_DEPENDENCIES"
       | "TOGGLE_RESOURCE"

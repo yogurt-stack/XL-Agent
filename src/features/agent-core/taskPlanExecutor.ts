@@ -13,6 +13,7 @@ export type TaskPlanExecutorCommand =
   | { type: "request_approval"; stepId: string }
   | { type: "auto_approve"; stepId: string }
   | { type: "start_step"; stepId: string }
+  | { type: "run_agent_loop"; stepId: string }
   | { type: "execute_tool"; stepId: string; call: AgentToolCall }
   | { type: "generate_resource_plan"; stepId: string }
   | { type: "execute_download_batch"; stepId: string }
@@ -62,6 +63,14 @@ function commandForRunningStep(
         }
       : null;
   }
+  if (
+    step.kind === "analysis" &&
+    step.execution?.mode === "agent_loop"
+  ) {
+    return state.phase === "planning"
+      ? { type: "run_agent_loop", stepId: step.id }
+      : null;
+  }
   if (step.kind === "resource_plan") {
     return state.phase === "planning" || state.phase === "replanning"
       ? { type: "generate_resource_plan", stepId: step.id }
@@ -75,14 +84,20 @@ function commandForRunningStep(
       : null;
   }
   if (step.kind === "handoff") {
+    const readOnlyResultTask =
+      state.routeDecision?.skillId === "github-project-discovery" ||
+      [
+        "local-development-environment-inspection",
+        "local-environment-compatibility-assessment",
+        "local-project-environment-compatibility",
+        "github-project-environment-compatibility"
+      ].includes(state.routeDecision?.skillId ?? "");
     return {
       type: "complete_passive",
       stepId: step.id,
-      terminalPhase:
-        state.routeDecision?.skillId === "github-project-discovery" &&
-        state.resources.length === 0
-          ? "result"
-          : "handoff"
+      terminalPhase: readOnlyResultTask && state.resources.length === 0
+        ? "result"
+        : "handoff"
     };
   }
   return { type: "complete_passive", stepId: step.id };
@@ -168,6 +183,9 @@ export function createTaskPlanToolCall(
   const input = resolveTaskPlanStepInput(state.taskPlan, step);
   const callId = `task-plan-r${state.taskPlan.revision}-${step.id}`;
   if (step.tool === "read_system_profile") {
+    return parseAgentToolCall({ callId, name: step.tool, input: {} });
+  }
+  if (step.tool === "inspect_local_development_environment") {
     return parseAgentToolCall({ callId, name: step.tool, input: {} });
   }
   if (step.tool === "search_trusted_catalog") {

@@ -227,7 +227,19 @@ app.whenReady().then(async () => {
         startButton.click();
 
         await waitFor(
-          () => document.body.innerText.includes("Python AI 环境是否需要同时准备前端工具链"),
+          () => document.body.innerText.includes("先确认 Agent 对任务的理解"),
+          "Task Plan confirmation did not render."
+        );
+        const confirmTaskPlanButton = [...document.querySelectorAll("button")]
+          .find((button) => button.textContent?.includes("确认流程并继续"));
+        if (!confirmTaskPlanButton || confirmTaskPlanButton.disabled) {
+          throw new Error("Task Plan confirmation action is unavailable.");
+        }
+        confirmTaskPlanButton.click();
+
+        await waitFor(
+          () => [...document.querySelectorAll("button")]
+            .some((button) => button.textContent?.trim() === "仅 Python AI"),
           "Python task clarification did not render."
         );
         const pythonOnlyButton = [...document.querySelectorAll("button")]

@@ -30,6 +30,31 @@ const localModelConnection: ModelConnectionState = {
 };
 
 describe("clarification view", () => {
+  it("renders a free-form answer when an Agent Loop question has no options", () => {
+    const state: AgentState = {
+      ...createInitialAgentState(),
+      phase: "clarifying",
+      clarifications: [{
+        id: "target-framework-version",
+        prompt: "需要匹配哪个 PyTorch 版本？",
+        reason: "目标版本会改变兼容性结论。",
+        required: true,
+        options: []
+      }],
+      clarificationIndex: 0
+    };
+    const html = renderToStaticMarkup(createElement(ClarificationView, {
+      dispatch: async (event) => transition(state, event),
+      onNavigate: () => undefined,
+      onRetryLocally: async () => state,
+      state
+    }));
+
+    expect(html).toContain("需要匹配哪个 PyTorch 版本");
+    expect(html).toContain("textarea");
+    expect(html).toContain("提交回答");
+  });
+
   it("renders the validated Task Plan confirmation gate separately from download approval", () => {
     let state = transition(createInitialAgentState(), {
       type: "SUBMIT_TASK",
@@ -196,6 +221,8 @@ describe("clarification view", () => {
     );
 
     expect(html).toContain("本地仓库只读摘要");
+    expect(html).toContain("分析项目环境");
+    expect(html).toContain("自定义仓库任务");
     expect(html).toContain("审批后发布到 GitHub");
     expect(html).toContain("owner/example");
     expect(html).toContain("不强推");
@@ -351,8 +378,79 @@ describe("clarification view", () => {
     expect(html).toContain("owner/tau");
     expect(html).toContain("MIT");
     expect(html).toContain("1,234");
+    expect(html).toContain("分析环境");
     expect(html).toContain("准备到本地");
     expect(html).not.toContain("查看资源计划");
+  });
+
+  it("renders a local development environment inventory without download actions", () => {
+    const initial = createInitialAgentState();
+    const state: AgentState = {
+      ...initial,
+      phase: "result",
+      task: "查询本地代码环境版本",
+      route: "local-development-environment-inspection",
+      routeDecision: {
+        status: "supported",
+        reason: "matched",
+        skillId: "local-development-environment-inspection",
+        sourceProviderId: "electron-main",
+        userLinks: [],
+        resourceIds: [],
+        clarifications: [],
+        requirements: null
+      },
+      agentRun: {
+        ...initial.agentRun,
+        status: "complete",
+        toolResults: [{
+          callId: "inspect-local-environment",
+          tool: "inspect_local_development_environment",
+          status: "success",
+          output: {
+            host: { platform: "darwin", architecture: "arm64" },
+            tools: [
+              {
+                id: "node",
+                name: "Node.js",
+                command: "node",
+                status: "available",
+                version: "v22.20.0",
+                detail: null
+              },
+              {
+                id: "cuda-compiler",
+                name: "CUDA Compiler",
+                command: "nvcc",
+                status: "not_applicable",
+                version: null,
+                detail: "Apple GPU 使用 Metal/MPS。"
+              }
+            ],
+            collectedAt: "2026-08-07T00:00:00.000Z",
+            source: "electron-main-fixed-command-allowlist",
+            boundary: "read-only-fixed-command-allowlist"
+          },
+          startedAt: "start",
+          finishedAt: "finish"
+        }]
+      }
+    };
+    const html = renderToStaticMarkup(createElement(ClarificationView, {
+      dispatch: async (event) => transition(state, event),
+      onNavigate: () => undefined,
+      onRetryLocally: async () => state,
+      state
+    }));
+
+    expect(html).toContain("本地环境只读盘点");
+    expect(html).toContain("Node.js");
+    expect(html).toContain("v22.20.0");
+    expect(html).toContain("CUDA Compiler");
+    expect(html).toContain("不适用");
+    expect(html).toContain("未执行下载、安装、升级或本地写入");
+    expect(html).not.toContain("准备到本地");
+    expect(html).not.toContain("确认下载计划");
   });
 
   it("only shows speed and ETA while a download is active or paused", () => {

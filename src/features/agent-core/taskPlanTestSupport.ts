@@ -10,6 +10,13 @@ import type { AgentState, AgentToolName } from "./types";
 
 const testTools: AgentToolName[] = [
   "read_system_profile",
+  "inspect_local_development_environment",
+  "list_local_repository_tree",
+  "read_local_repository_file",
+  "inspect_project_requirements",
+  "list_github_repository_tree",
+  "read_github_repository_file",
+  "inspect_github_project_requirements",
   "search_trusted_catalog",
   "search_github_repositories",
   "controlled_download",

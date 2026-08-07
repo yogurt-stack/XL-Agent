@@ -46,7 +46,7 @@ export interface DomainSkill {
   id: string;
   displayName: string;
   sourceProviderId?: string;
-  matches(goal: UserGoal): boolean;
+  matches(goal: UserGoal, state?: AgentState): boolean;
   clarify(goal: UserGoal, profile: SystemProfile): ClarificationQuestion[];
   buildRequirements(context: PlanningContext): ResourceRequirement[];
   generateGuide(context: WorkspaceContext): WorkspaceGuide;
@@ -74,8 +74,8 @@ export class DomainSkillRegistry {
     return this.skills.get(skillId) ?? null;
   }
 
-  match(goal: UserGoal) {
-    return [...this.skills.values()].find((skill) => skill.matches(goal)) ?? null;
+  match(goal: UserGoal, state?: AgentState) {
+    return [...this.skills.values()].find((skill) => skill.matches(goal, state)) ?? null;
   }
 
   list() {
@@ -85,6 +85,294 @@ export class DomainSkillRegistry {
 
 function normalizedTask(text: string) {
   return text.normalize("NFKC").trim().toLowerCase();
+}
+
+const localInspectionActions = [
+  "查询",
+  "查看",
+  "检查",
+  "检测",
+  "探测",
+  "盘点",
+  "列出",
+  "显示",
+  "版本",
+  "是否安装",
+  "有没有安装",
+  "有无安装",
+  "已安装",
+  "inspect",
+  "check",
+  "detect",
+  "list",
+  "show",
+  "version",
+  "installed"
+];
+
+const localDevelopmentToolKeywords = [
+  "本地代码环境",
+  "本地开发环境",
+  "本机代码环境",
+  "本机开发环境",
+  "代码环境",
+  "开发环境",
+  "node.js",
+  "nodejs",
+  "npm",
+  "python",
+  " py ",
+  "pip",
+  "cuda",
+  "nvcc",
+  "nvidia-smi",
+  "git"
+];
+
+/** 识别纯只读的本机开发工具版本盘点，且显式排除混合安装/下载请求。 */
+export function isLocalDevelopmentEnvironmentInspectionGoal(text: string) {
+  const normalized = ` ${normalizedTask(text)} `;
+  const hasInspectionAction = localInspectionActions.some((keyword) =>
+    normalized.includes(keyword)
+  );
+  const hasDevelopmentTool = localDevelopmentToolKeywords.some((keyword) =>
+    normalized.includes(keyword)
+  ) || /(^|[^\p{L}\p{N}_])(node|py)(?:\.exe)?($|[^\p{L}\p{N}_])/iu
+    .test(normalized);
+  if (!hasInspectionAction || !hasDevelopmentTool) return false;
+
+  const withoutInstallationState = normalized
+    .replace(/(是否|有没有|有无|已经|已)安装/gu, "")
+    .replace(/installed/gu, "");
+  return !/(安装|下载|搭建|部署|配置|准备|克隆|clone|download|setup|install)/iu
+    .test(withoutInstallationState);
+}
+
+const compatibilityAssessmentSignals = [
+  "匹配程度",
+  "环境匹配",
+  "兼容性",
+  "是否兼容",
+  "是否满足",
+  "能否运行",
+  "可以运行",
+  "哪些已具备",
+  "哪些具备",
+  "哪些缺少",
+  "还缺什么",
+  "环境要求",
+  "compatibility",
+  "compatible",
+  "requirements",
+  "ready to run"
+];
+
+const compatibilityAssessmentTargets = [
+  "pytorch",
+  "torch",
+  "tensorflow",
+  "cuda",
+  "机器学习",
+  "深度学习",
+  "qt",
+  "occt",
+  "opencascade",
+  "cmake"
+];
+
+/** 识别“先调查本机，再判断目标技术是否可用”的只读分析任务。 */
+export function isLocalEnvironmentCompatibilityAssessmentGoal(text: string) {
+  const normalized = normalizedTask(text);
+  return compatibilityAssessmentSignals.some((keyword) =>
+    normalized.includes(keyword)
+  ) && compatibilityAssessmentTargets.some((keyword) =>
+    normalized.includes(keyword)
+  );
+}
+
+export class LocalEnvironmentCompatibilityAssessmentSkill
+implements DomainSkill {
+  readonly id = "local-environment-compatibility-assessment";
+  readonly displayName = "本地环境兼容性评估";
+  readonly sourceProviderId = "electron-main";
+
+  matches(goal: UserGoal) {
+    return goal.links.length === 0 &&
+      isLocalEnvironmentCompatibilityAssessmentGoal(goal.text);
+  }
+
+  clarify(_goal: UserGoal, _profile: SystemProfile) {
+    return [];
+  }
+
+  buildRequirements(_context: PlanningContext): ResourceRequirement[] {
+    return [];
+  }
+
+  generateGuide(_context: WorkspaceContext): WorkspaceGuide {
+    return {
+      title: "本地环境兼容性评估",
+      summary:
+        "Agent 只在已确认的只读能力范围内调查本机环境，并将证据回注模型形成兼容性结论。",
+      nextActions: [
+        "核对每项结论引用的本机探测证据。",
+        "把无法由当前工具确认的条件保留为未知，不推断为已满足。",
+        "如需安装或下载缺失项，创建新的 Task Plan revision 并重新审批。"
+      ]
+    };
+  }
+}
+
+const localProjectAssessmentSignals = [
+  "这个仓库",
+  "当前仓库",
+  "本地仓库",
+  "这个项目",
+  "当前项目",
+  "项目环境",
+  "项目依赖",
+  "运行要求",
+  "构建要求",
+  "能否运行",
+  "能不能运行",
+  "缺少什么",
+  "还缺什么",
+  "匹配程度",
+  "兼容性",
+  "readme",
+  "repository requirements",
+  "project requirements",
+  "build requirements"
+];
+
+/** 识别针对当前已导入固定 HEAD 的项目要求与本机环境对比任务。 */
+export function isLocalProjectEnvironmentCompatibilityGoal(text: string) {
+  const normalized = normalizedTask(text);
+  return localProjectAssessmentSignals.some((keyword) =>
+    normalized.includes(keyword)
+  );
+}
+
+export class LocalProjectEnvironmentCompatibilitySkill
+implements DomainSkill {
+  readonly id = "local-project-environment-compatibility";
+  readonly displayName = "本地项目环境兼容性分析";
+  readonly sourceProviderId = "local-git";
+
+  matches(goal: UserGoal, state?: AgentState) {
+    return goal.links.length === 0 &&
+      Boolean(state?.localRepository) &&
+      isLocalProjectEnvironmentCompatibilityGoal(goal.text);
+  }
+
+  clarify(_goal: UserGoal, _profile: SystemProfile) {
+    return [];
+  }
+
+  buildRequirements(_context: PlanningContext): ResourceRequirement[] {
+    return [];
+  }
+
+  generateGuide(_context: WorkspaceContext): WorkspaceGuide {
+    return {
+      title: "本地项目环境兼容性报告",
+      summary:
+        "结论来自仓库固定 HEAD 的白名单项目文件与本机固定命令探测；仓库内容按不可信数据处理。",
+      nextActions: [
+        "核对每项要求的仓库相对路径与固定 commit。",
+        "把未被本机探测覆盖的库或包保留为无法确认。",
+        "需要安装、下载或执行项目时，另建需要审批的 Task Plan revision。"
+      ]
+    };
+  }
+}
+
+const githubProjectAssessmentSignals = [
+  "运行与构建要求",
+  "项目环境",
+  "项目依赖",
+  "运行要求",
+  "构建要求",
+  "环境兼容",
+  "匹配本机",
+  "缺少和无法确认",
+  "repository requirements",
+  "project requirements",
+  "build requirements",
+  "environment compatibility"
+];
+
+/** 识别针对当前已固定 GitHub commit 的项目要求与本机环境对比任务。 */
+export function isGitHubProjectEnvironmentCompatibilityGoal(text: string) {
+  const normalized = normalizedTask(text);
+  return githubProjectAssessmentSignals.some((keyword) =>
+    normalized.includes(keyword)
+  );
+}
+
+export class GitHubProjectEnvironmentCompatibilitySkill
+implements DomainSkill {
+  readonly id = "github-project-environment-compatibility";
+  readonly displayName = "GitHub 项目环境兼容性分析";
+  readonly sourceProviderId = "github-api";
+
+  matches(goal: UserGoal, state?: AgentState) {
+    return goal.links.length === 0 &&
+      Boolean(state?.githubRepository) &&
+      isGitHubProjectEnvironmentCompatibilityGoal(goal.text);
+  }
+
+  clarify(_goal: UserGoal, _profile: SystemProfile) {
+    return [];
+  }
+
+  buildRequirements(_context: PlanningContext): ResourceRequirement[] {
+    return [];
+  }
+
+  generateGuide(_context: WorkspaceContext): WorkspaceGuide {
+    return {
+      title: "GitHub 项目环境兼容性报告",
+      summary:
+        "结论来自固定 commit/tree 的 GitHub 白名单文本证据与本机固定命令探测；不下载或执行仓库内容。",
+      nextActions: [
+        "核对仓库 fullName、commitSha、treeSha 与每项要求的来源文件。",
+        "把未被本机探测覆盖的包、库或平台条件保留为无法确认。",
+        "需要下载源码、安装依赖或执行项目时，另建需要审批的 Task Plan revision。"
+      ]
+    };
+  }
+}
+
+export class LocalDevelopmentEnvironmentInspectionSkill implements DomainSkill {
+  readonly id = "local-development-environment-inspection";
+  readonly displayName = "本地开发环境只读盘点";
+  readonly sourceProviderId = "electron-main";
+
+  matches(goal: UserGoal) {
+    return goal.links.length === 0 &&
+      isLocalDevelopmentEnvironmentInspectionGoal(goal.text);
+  }
+
+  clarify(_goal: UserGoal, _profile: SystemProfile) {
+    return [];
+  }
+
+  buildRequirements(_context: PlanningContext): ResourceRequirement[] {
+    return [];
+  }
+
+  generateGuide(_context: WorkspaceContext): WorkspaceGuide {
+    return {
+      title: "本地开发环境版本清单",
+      summary: "结果来自 Electron Main 固定命令白名单，只读且不会下载、安装或修改本机环境。",
+      nextActions: [
+        "核对已检测工具的版本与命令入口。",
+        "将未找到与不适用区分处理。",
+        "只有用户后续明确提出安装需求时，才创建独立资源计划。"
+      ]
+    };
+  }
 }
 
 export class GitHubProjectDiscoverySkill implements DomainSkill {
@@ -340,6 +628,10 @@ export class ResearchDataEnvironmentSkill implements DomainSkill {
 
 export function createDefaultDomainSkillRegistry() {
   return new DomainSkillRegistry([
+    new GitHubProjectEnvironmentCompatibilitySkill(),
+    new LocalProjectEnvironmentCompatibilitySkill(),
+    new LocalEnvironmentCompatibilityAssessmentSkill(),
+    new LocalDevelopmentEnvironmentInspectionSkill(),
     new GitHubProjectDiscoverySkill(),
     new ResearchDataEnvironmentSkill(),
     new AiDevelopmentEnvironmentSkill()

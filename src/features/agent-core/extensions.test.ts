@@ -18,7 +18,10 @@ import {
 import { FixedWindowsPlanner, MockVerifier } from "./mockServices";
 import { ExtensibleAgentRouter } from "./router";
 import { AgentRuntime } from "./runtime";
-import { confirmTaskPlanForTest } from "./taskPlanTestSupport";
+import {
+  confirmTaskPlanForTest,
+  proposeTaskPlanForTest
+} from "./taskPlanTestSupport";
 import {
   TrustedCatalogSourceProvider,
   createDefaultSourceProviderRegistry
@@ -27,6 +30,7 @@ import {
   createDefaultWorkspaceTemplateRegistry
 } from "./workspaceTemplates";
 import type { AgentScheduler } from "./interfaces";
+import type { AgentState } from "./types";
 
 function submitted(task: string) {
   return transition(createInitialAgentState(), {
@@ -37,6 +41,32 @@ function submitted(task: string) {
 }
 
 describe("extensible routing and registries", () => {
+  it("routes version inventory to the local read-only inspection skill before resource preparation", () => {
+    const router = new ExtensibleAgentRouter();
+    const routed = router.route(
+      submitted("帮我查询本地的代码环境，包括 npm、nodejs、py、cuda，把版本号全部列出来")
+    );
+
+    expect(routed?.decision).toMatchObject({
+      status: "supported",
+      skillId: "local-development-environment-inspection",
+      sourceProviderId: "electron-main",
+      clarifications: []
+    });
+  });
+
+  it("keeps explicit environment preparation on the resource acquisition skill", () => {
+    const router = new ExtensibleAgentRouter();
+    const routed = router.route(
+      submitted("帮我下载安装 Node.js 并配置开发环境")
+    );
+
+    expect(routed?.decision).toMatchObject({
+      status: "supported",
+      skillId: "ai-development-environment"
+    });
+  });
+
   it("routes an installed AI development skill as supported", () => {
     const router = new ExtensibleAgentRouter();
     const event = router.route(submitted("准备 Python 机器学习开发环境"));
@@ -96,6 +126,252 @@ describe("extensible routing and registries", () => {
     });
     expect(routed?.decision.clarifications.map((question) => question.id))
       .toEqual(["github-created-window", "github-sort"]);
+  });
+
+  it("keeps an imported fixed repository attached and routes project compatibility analysis", () => {
+    const imported = transition(createInitialAgentState(), {
+      type: "LOCAL_REPOSITORY_IMPORTED",
+      taskId: "local-repository-task",
+      repository: {
+        repositoryHandleId: "local-repo-fixture",
+        displayName: "fixture",
+        fingerprint: "f".repeat(64),
+        commitSha: "a".repeat(40),
+        branch: "main",
+        detached: false,
+        clean: true,
+        status: {
+          modified: 0,
+          deleted: 0,
+          untracked: 0,
+          conflicted: 0,
+          ahead: 0,
+          behind: 0
+        },
+        fileCount: 2,
+        trackedFileCount: 2,
+        hasSubmodules: false,
+        hasSymlinks: false,
+        inspectedAt: "2026-08-07T00:00:00.000Z",
+        analysis: {
+          ecosystems: ["node"],
+          manifests: ["package.json"],
+          lockfiles: [],
+          runtimeHints: ["Node.js"],
+          nodeOfflinePreparation: "lockfile-unsupported",
+          nodeOfflinePackageCount: 0,
+          nodeOfflineBlockers: [],
+          treeTruncated: false
+        }
+      }
+    });
+    const submittedWithRepository = transition(imported, {
+      type: "SUBMIT_TASK",
+      task: "分析当前项目的运行要求，并告诉我本机还缺什么",
+      taskId: "project-compatibility-task"
+    });
+    expect(submittedWithRepository.localRepository?.repositoryHandleId)
+      .toBe("local-repo-fixture");
+    const routed = new ExtensibleAgentRouter().route(submittedWithRepository);
+    expect(routed?.decision).toMatchObject({
+      status: "supported",
+      skillId: "local-project-environment-compatibility",
+      sourceProviderId: "local-git"
+    });
+    const planning = transition(submittedWithRepository, routed!);
+    const proposed = proposeTaskPlanForTest(planning);
+    expect(proposed.taskPlan?.steps[0]).toMatchObject({
+      kind: "analysis",
+      execution: {
+        mode: "agent_loop",
+        allowedTools: [
+          "list_local_repository_tree",
+          "inspect_project_requirements",
+          "read_local_repository_file",
+          "inspect_local_development_environment"
+        ]
+      }
+    });
+  });
+
+  it("starts a separate read-only analysis plan from a fixed GitHub search result", () => {
+    const initial = createInitialAgentState();
+    const searchResultState: AgentState = {
+      ...initial,
+      taskId: "github-search-task",
+      phase: "result",
+      route: "github-project-discovery",
+      routeDecision: {
+        status: "supported",
+        reason: "matched",
+        skillId: "github-project-discovery",
+        sourceProviderId: "github-api",
+        userLinks: [],
+        resourceIds: [],
+        clarifications: [],
+        requirements: null
+      }
+    };
+    const attached = transition(searchResultState, {
+      type: "GITHUB_REPOSITORY_ANALYSIS_ATTACHED",
+      taskId: "github-analysis-task",
+      repository: {
+        repositoryHandleId: "github-repo-fixture",
+        fullName: "owner/example",
+        displayName: "owner/example",
+        defaultBranch: "main",
+        commitSha: "a".repeat(40),
+        treeSha: "b".repeat(40),
+        trackedFileCount: 2,
+        treeTruncated: false,
+        inspectedAt: "2026-08-07T00:00:00.000Z",
+        analysis: {
+          ecosystems: ["node"],
+          manifests: ["package.json"],
+          lockfiles: [],
+          runtimeHints: ["Node.js"],
+          nodeOfflinePreparation: "lockfile-unsupported",
+          nodeOfflinePackageCount: 0,
+          nodeOfflineBlockers: [],
+          treeTruncated: false
+        }
+      }
+    });
+    expect(attached).toMatchObject({
+      phase: "routing",
+      localRepository: null,
+      githubRepository: {
+        fullName: "owner/example",
+        commitSha: "a".repeat(40)
+      }
+    });
+    const routedEvent = new ExtensibleAgentRouter().route(attached);
+    expect(routedEvent?.decision).toMatchObject({
+      status: "supported",
+      skillId: "github-project-environment-compatibility",
+      sourceProviderId: "github-api"
+    });
+    const routed = transition(attached, routedEvent!);
+    const proposed = proposeTaskPlanForTest(routed);
+    expect(proposed.taskPlan?.steps[0]).toMatchObject({
+      id: "analyze-github-project-environment",
+      kind: "analysis",
+      execution: {
+        mode: "agent_loop",
+        allowedTools: [
+          "list_github_repository_tree",
+          "inspect_github_project_requirements",
+          "read_github_repository_file",
+          "inspect_local_development_environment"
+        ]
+      }
+    });
+    expect(proposed.resources).toEqual([]);
+  });
+
+  it("executes local environment inspection exactly once and reaches a read-only result", async () => {
+    const jobs: Array<() => void | Promise<void>> = [];
+    let inspectionCalls = 0;
+    const scheduler: AgentScheduler = {
+      schedule(task) {
+        jobs.push(task);
+        return () => undefined;
+      }
+    };
+    const tools = new InMemoryAgentToolExecutor(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => {
+        inspectionCalls += 1;
+        return {
+          host: { platform: "darwin" as const, architecture: "arm64" as const },
+          tools: [{
+            id: "node" as const,
+            name: "Node.js",
+            command: "node",
+            status: "available" as const,
+            version: "v22.20.0",
+            detail: null
+          }],
+          collectedAt: "2026-08-07T00:00:00.000Z",
+          source: "electron-main-fixed-command-allowlist" as const,
+          boundary: "read-only-fixed-command-allowlist" as const
+        };
+      }
+    );
+    const runtime = new AgentRuntime({
+      router: new ExtensibleAgentRouter(),
+      planner: new FixedWindowsPlanner(),
+      verifier: new MockVerifier(),
+      scheduler,
+      model: new LocalRuleModelRuntime(),
+      tools,
+      policy: new DefaultAgentPolicy(),
+      stepDelayMs: 0,
+      createTaskId: () => "local-environment-inspection-test"
+    });
+
+    runtime.start();
+    runtime.dispatch({
+      type: "SUBMIT_TASK",
+      task: "查询本地代码环境，列出 npm、nodejs、py 和 cuda 版本"
+    });
+    await jobs.shift()?.();
+    await jobs.shift()?.();
+
+    expect(runtime.getState()).toMatchObject({
+      phase: "waiting_task_plan_confirmation",
+      routeDecision: {
+        skillId: "local-development-environment-inspection"
+      },
+      taskPlan: {
+        steps: [
+          expect.objectContaining({
+            id: "inspect-local-development-environment",
+            tool: "inspect_local_development_environment",
+            risk: "read_only"
+          }),
+          expect.objectContaining({
+            id: "present-local-development-environment",
+            kind: "handoff"
+          })
+        ]
+      }
+    });
+    expect(runtime.getState().taskPlan?.steps).toHaveLength(2);
+    expect(runtime.getState().taskPlan?.steps.some((step) =>
+      step.tool === "controlled_download" ||
+      step.tool === "search_trusted_catalog" ||
+      step.tool === "export_workspace"
+    )).toBe(false);
+
+    runtime.dispatch({ type: "CONFIRM_TASK_PLAN", revision: 1 });
+    for (
+      let step = 0;
+      step < 8 && runtime.getState().phase !== "result";
+      step += 1
+    ) {
+      const job = jobs.shift();
+      if (!job) throw new Error(`Runtime stalled at ${runtime.getState().phase}.`);
+      await job();
+    }
+
+    expect(runtime.getState()).toMatchObject({
+      phase: "result",
+      resources: [],
+      taskPlan: { status: "completed" },
+      agentRun: { status: "complete" }
+    });
+    expect(inspectionCalls).toBe(1);
+    expect(runtime.getState().agentRun.toolResults).toEqual([
+      expect.objectContaining({
+        tool: "inspect_local_development_environment",
+        status: "success"
+      })
+    ]);
   });
 
   it("routes a named GitHub repository search without trending clarifications", async () => {
