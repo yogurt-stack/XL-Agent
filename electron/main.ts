@@ -25,6 +25,7 @@ import {
   LocalRepositoryInspectionError
 } from "./localRepository";
 import { GitHubPublisher } from "./githubPublisher";
+import { NativeXunleiDownloadClient } from "./nativeXunleiDownload";
 
 loadEnv({ path: path.resolve(process.cwd(), ".env"), quiet: true });
 
@@ -35,6 +36,7 @@ const ownsSingleInstanceLock = app.requestSingleInstanceLock();
 const remoteModelClient = new RemoteModelClient();
 const githubRepositorySearchClient = new GitHubRepositorySearchClient();
 const githubPublisher = new GitHubPublisher();
+let nativeXunleiClient: NativeXunleiDownloadClient | null | undefined;
 const downloadFixtureAttempts = new Map<string, number>();
 let taskStorePromise: Promise<TaskStore> | null = null;
 let runtimeHostPromise: Promise<AgentRuntimeHost> | null = null;
@@ -206,6 +208,30 @@ async function performTrustedDownload(
       });
     }
     return result;
+  }
+
+  if (process.env.XL_AGENT_XUNLEI_ENABLED === "1") {
+    if (nativeXunleiClient === undefined) {
+      const appId = process.env.XL_AGENT_XUNLEI_APP_ID;
+      const apiKey = process.env.XL_AGENT_XUNLEI_API_KEY;
+      const helperPath = process.env.XL_AGENT_XUNLEI_HOST_PATH ?? path.join(
+        app.isPackaged
+          ? path.join(process.resourcesPath, "xunlei-sdk")
+          : path.resolve(process.cwd(), "native/xunlei-download-host/dist/windows-x64"),
+        process.platform === "win32" ? "xunlei-download-host.exe" : "xunlei-download-host"
+      );
+      nativeXunleiClient = appId && apiKey
+        ? new NativeXunleiDownloadClient({
+            appId,
+            apiKey,
+            helperPath,
+            configRoot: path.join(app.getPath("userData"), "xunlei-sdk")
+          })
+        : null;
+    }
+    if (nativeXunleiClient) {
+      return nativeXunleiClient.download(resourceId, metadata, options);
+    }
   }
 
   try {

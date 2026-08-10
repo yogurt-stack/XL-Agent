@@ -211,7 +211,7 @@ XL-Agent/
 ## 当前边界
 
 - 当前不会自动安装依赖、运行仓库代码或执行任意终端命令。
-- `LocalXunleiAdapter` 目前使用 Electron Main 的受控 HTTP 下载后端，尚未接入正式迅雷 SDK。
+- `LocalXunleiAdapter` 默认使用 Electron Main 的受控 HTTP 下载后端；设置 `XL_AGENT_XUNLEI_ENABLED=1`、构建原生宿主并提供迅雷凭证后，可切换到 C++ SDK 下载传输。
 - GitHub 发布首版只创建新仓库，不覆盖、追加或强推，也不复制原仓库提交历史。
 - Windows 安装包是未签名的内部 Demo，公开分发前仍需要代码签名与 Windows 11 实机验收。
 - 项目依赖分析仍在持续改进，目前可能将示例或测试目录中的要求标记为“待确认”。

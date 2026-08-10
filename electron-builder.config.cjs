@@ -1,3 +1,16 @@
+const fs = require("node:fs");
+
+const nativeHostRoot = "native/xunlei-download-host/dist/windows-x64";
+const extraResources = fs.existsSync(nativeHostRoot)
+  ? [
+      {
+        from: nativeHostRoot,
+        to: "xunlei-sdk",
+        filter: ["xunlei-download-host.exe", "dk.dll"]
+      }
+    ]
+  : [];
+
 module.exports = {
   appId: "com.xunlei.ai-task-agent",
   productName: "迅雷 AI Task Agent",
@@ -15,6 +28,7 @@ module.exports = {
     "!**/.env",
     "!**/.env.*"
   ],
+  extraResources,
   win: {
     target: [
       {
