@@ -35,6 +35,41 @@ const languageKeywords = [
   "react"
 ];
 
+const genericRepositoryNames = new Set([
+  "api",
+  "find",
+  "git",
+  "github",
+  "latest",
+  "locate",
+  "npm",
+  "popular",
+  "project",
+  "projects",
+  "repo",
+  "repository",
+  "search",
+  "top",
+  "trending"
+]);
+
+const ambiguousBareTechnologyNames = new Set([
+  ...languageKeywords,
+  "cmake",
+  "cuda",
+  "node",
+  "nodejs",
+  "numpy",
+  "occt",
+  "opencv",
+  "pandas",
+  "pip",
+  "pytorch",
+  "qt",
+  "tensorflow",
+  "torch"
+]);
+
 const sortByAnswer: Record<string, GitHubRepositorySort> = {
   "按 Star 数": "stars",
   "按最近更新": "updated",
@@ -124,26 +159,22 @@ function explicitRepositoryName(task: string) {
     /(?:在\s*)?github\s*(?:上|中|里)?\s*(?:搜索|查找|寻找|检索|搜|找)\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_.-]{0,99})/iu,
     /(?:搜索|查找|寻找|检索|搜|找)\s*github\s*(?:上|中|里)?\s*(?:的|for)?\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_.-]{0,99})/iu,
     /(?:搜索|查找|寻找|检索|搜|找)\s*(?:一个|一下)?\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_.-]{0,99})\s*(?:的)?\s*(?:开源)?(?:项目|仓库|repo(?:sitory)?)/iu,
+    /(?:搜索|查找|寻找|检索|搜|找)\s*(?:一个|一下)?\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_.-]{0,99})\s*[”"'」』]?\s*[。.!！?？]*$/iu,
     /\b(?:search|find|locate)\s+github\s+(?:for\s+)?[“"']?([A-Za-z0-9][A-Za-z0-9_.-]{0,99})/iu
   ];
-  const genericCandidates = new Set([
-    "api",
-    "find",
-    "latest",
-    "popular",
-    "project",
-    "projects",
-    "repo",
-    "repository",
-    "search",
-    "top",
-    "trending"
-  ]);
   for (const pattern of patterns) {
     const candidate = cleanNameCandidate(task.match(pattern)?.[1]);
-    if (candidate && !genericCandidates.has(candidate.toLowerCase())) {
+    if (candidate && !genericRepositoryNames.has(candidate.toLowerCase())) {
       return candidate;
     }
+  }
+  const bareCandidate = cleanNameCandidate(task);
+  if (
+    bareCandidate &&
+    !genericRepositoryNames.has(bareCandidate.toLowerCase()) &&
+    !ambiguousBareTechnologyNames.has(bareCandidate.toLowerCase())
+  ) {
+    return bareCandidate;
   }
   return null;
 }
@@ -170,14 +201,46 @@ export function inferGitHubSearchIntent(
   return { mode: "discovery" };
 }
 
-function explicitKeywords(task: string) {
-  const normalized = task.normalize("NFKC").toLowerCase();
-  return languageKeywords.filter((keyword) => {
-    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`(^|[^a-z0-9+#])${escaped}([^a-z0-9+#]|$)`, "u").test(
-      normalized
-    );
-  }).join(" ");
+const discoveryStopPhrases = [
+  "repository",
+  "repositories",
+  "github",
+  "开源项目",
+  "开源仓库",
+  "帮我",
+  "请帮我",
+  "查找",
+  "寻找",
+  "搜索",
+  "检索",
+  "找一下",
+  "搜一下",
+  "项目",
+  "仓库",
+  "一个",
+  "一些",
+  "开源",
+  "repo",
+  "请",
+  "的"
+].sort((left, right) => right.length - left.length);
+
+/**
+ * 为 discovery 保留用户真正表达的主题，而不是只提取编程语言。
+ *
+ * 先做短语级清洗再切 token，避免中文连续文本被当成一个 token，导致
+ * `帮我找一个 python 的机器学习项目` 无法保留“机器学习”。
+ */
+export function buildDiscoveryQuery(task: string) {
+  let normalized = task.normalize("NFKC").trim().toLowerCase();
+  for (const phrase of discoveryStopPhrases) {
+    normalized = normalized.split(phrase).join(" ");
+  }
+  const tokens = normalized
+    .split(/[^\p{L}\p{N}+#_.-]+/u)
+    .map((token) => token.trim())
+    .filter(Boolean);
+  return [...new Set(tokens)].join(" ").slice(0, 200);
 }
 
 export function githubSearchInputFromState(
@@ -193,9 +256,16 @@ export function githubSearchInputFromState(
   if (intent.mode === "name") {
     return { mode: "name", query: intent.query, limit: 10 };
   }
+  const semanticSearch = state.routeDecision?.semanticIntent?.githubSearch;
+  if (semanticSearch?.mode === "name") {
+    return { mode: "name", query: semanticSearch.query, limit: 10 };
+  }
   return {
     mode: "discovery",
-    keywords: explicitKeywords(state.task),
+    keywords:
+      semanticSearch?.mode === "discovery" && semanticSearch.query
+        ? semanticSearch.query
+        : buildDiscoveryQuery(state.task),
     createdWithinDays:
       daysByAnswer[state.answers["github-created-window"] as string] ?? 30,
     sort: sortByAnswer[state.answers["github-sort"] as string] ?? "stars",
@@ -261,7 +331,7 @@ export function isGitHubRepositorySearchOutput(
   ) {
     return false;
   }
-  return value.repositories.every((repository) =>
+  const repositoriesValid = value.repositories.every((repository) =>
     isRecord(repository) &&
     typeof repository.id === "number" &&
     typeof repository.fullName === "string" &&
@@ -274,6 +344,29 @@ export function isGitHubRepositorySearchOutput(
     typeof repository.license.spdxId === "string" &&
     typeof repository.license.name === "string"
   );
+  if (!repositoriesValid) return false;
+  if (value.recommendation === undefined) return true;
+  const repositoryNames = new Set(
+    value.repositories
+      .filter(isRecord)
+      .map((repository) => String(repository.fullName))
+  );
+  return isRecord(value.recommendation) &&
+    Array.isArray(value.recommendation.selectedFullNames) &&
+    value.recommendation.selectedFullNames.length > 0 &&
+    value.recommendation.selectedFullNames.length <= 3 &&
+    value.recommendation.selectedFullNames.every(
+      (fullName) =>
+        typeof fullName === "string" &&
+        /^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u.test(fullName) &&
+        repositoryNames.has(fullName)
+    ) &&
+    typeof value.recommendation.reason === "string" &&
+    value.recommendation.reason.trim().length > 0 &&
+    value.recommendation.reason.length <= 2000 &&
+    ["remote-llm", "deterministic"].includes(
+      String(value.recommendation.source)
+    );
 }
 
 export function latestGitHubRepositorySearchResult(

@@ -7,6 +7,7 @@ import type {
   AgentToolName,
   TaskPlanProposal
 } from "../src/features/agent-core/types";
+import { createInitialAgentState } from "../src/features/agent-core/machine";
 import { RemoteModelClient, type ModelFetch } from "./modelClient";
 
 function responseWithToolCall(
@@ -189,5 +190,130 @@ describe("RemoteModelClient Agent Loop turns", () => {
     )).rejects.toMatchObject({
       detail: { code: "MODEL_INVALID_RESPONSE" }
     });
+  });
+});
+
+describe("RemoteModelClient intent classification", () => {
+  const intentContext = {
+    task: "给我找一个能在终端里协助写代码的开源助手",
+    links: [],
+    profile: createInitialAgentState().systemProfile,
+    skills: [{
+      id: "github-project-discovery",
+      displayName: "GitHub 开源项目检索",
+      description: "只读检索公开开源仓库。"
+    }]
+  };
+
+  it("uses one required classify_intent tool and stamps trusted metadata", async () => {
+    const requestBodies: Array<Record<string, unknown>> = [];
+    const client = new RemoteModelClient({
+      XL_AGENT_LLM_PROVIDER: "openai-compatible",
+      XL_AGENT_LLM_ENDPOINT: "https://api.deepseek.com/chat/completions",
+      XL_AGENT_LLM_API_KEY: "test-secret",
+      XL_AGENT_LLM_MODEL: "deepseek-chat"
+    }, async (_input, init) => {
+      requestBodies.push(
+        JSON.parse(String(init?.body)) as Record<string, unknown>
+      );
+      return responseWithToolCall("classify_intent", {
+        skillId: "github-project-discovery",
+        githubSearch: { mode: "name", query: "tau" },
+        reason: "用户希望定位一个开源仓库。"
+      }, "intent-call-1");
+    });
+
+    await expect(client.requestIntentClassification(intentContext))
+      .resolves.toEqual({
+        decisionId: "intent-call-1",
+        provider: "remote-llm",
+        model: "deepseek-chat",
+        skillId: "github-project-discovery",
+        githubSearch: { mode: "name", query: "tau" },
+        reason: "用户希望定位一个开源仓库。"
+      });
+    expect(requestBodies[0]).toMatchObject({
+      model: "deepseek-chat",
+      tool_choice: "required",
+      tools: [{
+        function: { name: "classify_intent" }
+      }]
+    });
+  });
+
+  it("rejects malformed classifier arguments before they reach routing", async () => {
+    const client = new RemoteModelClient({
+      XL_AGENT_LLM_PROVIDER: "openai-compatible",
+      XL_AGENT_LLM_ENDPOINT: "https://api.deepseek.com/chat/completions",
+      XL_AGENT_LLM_API_KEY: "test-secret",
+      XL_AGENT_LLM_MODEL: "deepseek-chat"
+    }, async () => responseWithToolCall("classify_intent", {
+      skillId: "INVALID SKILL",
+      reason: "invalid"
+    }, "intent-invalid"));
+
+    await expect(client.requestIntentClassification(intentContext))
+      .rejects.toMatchObject({
+        detail: { code: "MODEL_INVALID_DECISION" }
+      });
+  });
+});
+
+describe("RemoteModelClient GitHub candidate selection", () => {
+  const selectorInput = {
+    task: "寻找 tau",
+    candidates: [
+      {
+        fullName: "taubyte/tau",
+        description: "A coding agent",
+        stars: 100,
+        language: "Go",
+        topics: ["agent"]
+      },
+      {
+        fullName: "example/tau-toolkit",
+        description: "A math toolkit",
+        stars: 20,
+        language: "Python",
+        topics: ["math"]
+      }
+    ]
+  };
+
+  it("accepts only selected full names from the supplied candidates", async () => {
+    const client = new RemoteModelClient({
+      XL_AGENT_LLM_PROVIDER: "openai-compatible",
+      XL_AGENT_LLM_ENDPOINT: "https://api.deepseek.com/chat/completions",
+      XL_AGENT_LLM_API_KEY: "test-secret",
+      XL_AGENT_LLM_MODEL: "deepseek-chat"
+    }, async () => responseWithToolCall("select_github_candidates", {
+      selectedFullNames: ["taubyte/tau"],
+      reason: "名称与 coding agent 描述最符合用户目标。"
+    }, "candidate-call"));
+
+    await expect(client.requestCandidateSelection(selectorInput))
+      .resolves.toMatchObject({
+        decisionId: "candidate-call",
+        provider: "remote-llm",
+        model: "deepseek-chat",
+        selectedFullNames: ["taubyte/tau"]
+      });
+  });
+
+  it("rejects a repository invented outside the supplied candidates", async () => {
+    const client = new RemoteModelClient({
+      XL_AGENT_LLM_PROVIDER: "openai-compatible",
+      XL_AGENT_LLM_ENDPOINT: "https://api.deepseek.com/chat/completions",
+      XL_AGENT_LLM_API_KEY: "test-secret",
+      XL_AGENT_LLM_MODEL: "deepseek-chat"
+    }, async () => responseWithToolCall("select_github_candidates", {
+      selectedFullNames: ["invented/tau"],
+      reason: "invalid"
+    }, "candidate-invalid"));
+
+    await expect(client.requestCandidateSelection(selectorInput))
+      .rejects.toMatchObject({
+        detail: { code: "MODEL_INVALID_DECISION" }
+      });
   });
 });

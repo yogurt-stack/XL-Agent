@@ -101,6 +101,16 @@ export type TaskRequirements = {
 
 export type RouteStatus = "supported" | "needs_links" | "unsupported";
 
+export type SemanticRouteIntent = {
+  source: "remote-llm";
+  decisionId: string;
+  model: string;
+  reason: string;
+  githubSearch?:
+    | { mode: "name"; query: string }
+    | { mode: "discovery"; query?: string };
+};
+
 export type RouteDecision = {
   status: RouteStatus;
   reason: string;
@@ -110,6 +120,8 @@ export type RouteDecision = {
   resourceIds: string[];
   clarifications: ClarificationQuestion[];
   requirements: TaskRequirements | null;
+  /** 严格校验后的语义路由提示；确定性规则决策不需要此字段。 */
+  semanticIntent?: SemanticRouteIntent;
 };
 
 export type PlanValidationIssueCode =
@@ -774,6 +786,11 @@ export type GitHubRepositorySearchOutput = {
     remaining: number | null;
     resetAt: string | null;
   };
+  recommendation?: {
+    selectedFullNames: string[];
+    reason: string;
+    source: "remote-llm" | "deterministic";
+  };
 };
 
 export type GitHubRepositorySearchError = {
@@ -1218,6 +1235,8 @@ export type AgentLoopRunRecord = {
 export type AgentEvent =
   | { type: "SUBMIT_TASK"; task: string; taskId?: string }
   | { type: "ROUTE_RESOLVED"; decision: RouteDecision }
+  | { type: "ROUTE_FAILED"; reason: string }
+  | { type: "RETRY_ROUTING" }
   | {
       type: "TASK_PLAN_PROPOSED";
       plan: TaskPlan;
@@ -1331,6 +1350,8 @@ export type AgentEvent =
   | { type: "WORKSPACE_ROOT_SELECTED"; rootPath: string }
   | {
       type: "MANIFEST_SNAPSHOT_WRITTEN";
+      taskId: string;
+      planRevision: number;
       manifestRevision: number;
       rootPath: string;
       status: WorkspaceOverallStatus;
@@ -1399,6 +1420,7 @@ export type AgentUserEvent = Extract<
   {
     type:
       | "SUBMIT_TASK"
+      | "RETRY_ROUTING"
       | "CONFIRM_TASK_PLAN"
       | "ANSWER_CLARIFICATION"
       | "SKIP_CLARIFICATION"

@@ -82,6 +82,66 @@ type Navigate = (
     | "settings"
 ) => void;
 
+export async function cancelActiveTaskAndReturnHome(
+  dispatch: Dispatch,
+  onNavigate: (view: "home") => void
+) {
+  const cancelled = await dispatch({ type: "CANCEL_TASK" });
+  if (cancelled.phase !== "cancelled") return cancelled;
+  // Keep the terminal cancellation snapshot as the durable active-task
+  // tombstone. Starting a new task already creates a fresh initial state, so a
+  // second RESET IPC only adds a race between persistence and navigation.
+  onNavigate("home");
+  return cancelled;
+}
+
+function taskCanBeCancelled(state: AgentState) {
+  return (
+    state.taskId !== "unassigned" &&
+    !["intake", "unsupported", "result", "handoff", "cancelled"].includes(
+      state.phase
+    ) &&
+    state.githubPublish.status !== "publishing"
+  );
+}
+
+function CancelTaskButton({
+  cancelling,
+  disabled = false,
+  label = "取消任务",
+  onCancel
+}: {
+  cancelling: boolean;
+  disabled?: boolean;
+  label?: string;
+  onCancel: () => void;
+}) {
+  return (
+    <button
+      className="btn btn-ghost"
+      data-testid="cancel-active-task"
+      disabled={disabled || cancelling}
+      type="button"
+      onClick={onCancel}
+    >
+      {cancelling ? <Loader2 className="spin" size={16} /> : <XCircle size={16} />}
+      {cancelling ? "正在停止" : label}
+    </button>
+  );
+}
+
+function taskSubmissionWasAccepted(
+  previousTaskId: string,
+  nextState: AgentState,
+  task: string
+) {
+  return (
+    nextState.taskId !== previousTaskId &&
+    nextState.task === task.trim() &&
+    nextState.phase !== "intake"
+  );
+}
+
 const statusMeta: Record<ResourceStatus, { label: string; className: string }> = {
   pending: { label: "待确认", className: "status-muted" },
   queued: { label: "等待下载", className: "status-queued" },
@@ -158,10 +218,14 @@ const modelConnectionMeta: Record<
 
 export function AgentTopBar({
   state,
-  modelConnection
+  modelConnection,
+  cancelling = false,
+  onCancelTask
 }: {
   state: AgentState;
   modelConnection: ModelConnectionState;
+  cancelling?: boolean;
+  onCancelTask?: () => void;
 }) {
   const active = state.phase === "routing" || state.phase === "task_planning" || state.phase === "planning" || state.phase === "replanning";
   const connectionMeta = modelConnectionMeta[modelConnection.status];
@@ -181,6 +245,13 @@ export function AgentTopBar({
         <span className="app-subtitle">Agent Core r{state.revision} · {state.systemProfile.os} {state.systemProfile.architecture} 目标 · {modelConnection.activeProvider === "remote-llm" ? "远程模型" : "本地规则模型"}</span>
       </div>
       <div className="topbar-meta">
+        {onCancelTask && taskCanBeCancelled(state) ? (
+          <CancelTaskButton
+            cancelling={cancelling}
+            label="停止当前任务"
+            onCancel={onCancelTask}
+          />
+        ) : null}
         <span className="meta-chip"><ShieldCheck size={15} />可信目录</span>
         <span className="meta-chip"><TerminalSquare size={15} />{state.systemProfile.shell}</span>
         <span className="meta-chip" title={state.hostProfile ? `主机画像：${formatHostProfile(state)}` : "系统画像将在任务路由前由只读工具采集"}><Server size={15} />{state.hostProfile ? state.hostProfile.platformLabel : "主机画像待读取"}</span>
@@ -228,10 +299,13 @@ export function AgentHomeView({
   ];
   const downloadCount = state.resources.filter((resource) => resource.status === "downloading").length;
   const taskSubmissionLocked =
-    state.phase === "downloading" ||
-    state.phase === "verifying" ||
-    state.phase === "exporting" ||
+    !["intake", "unsupported", "result", "handoff", "cancelled"].includes(
+      state.phase
+    ) ||
     state.githubPublish.status === "publishing";
+  const taskSubmissionLockReason = state.githubPublish.status === "publishing"
+    ? "GitHub 发布完成前不能开始新任务"
+    : "请先返回当前澄清或计划页面取消任务，再开始新任务";
 
   return (
     <section className="agent-view agent-home-view">
@@ -245,13 +319,16 @@ export function AgentHomeView({
           event.preventDefault();
           const formData = new FormData(event.currentTarget);
           const task = String(formData.get("task") ?? "");
+          const previousTaskId = state.taskId;
           const nextState = await dispatch({ type: "SUBMIT_TASK", task });
-          if (nextState.phase === "routing" && nextState.task === task.trim()) onNavigate("clarification");
+          if (taskSubmissionWasAccepted(previousTaskId, nextState, task)) {
+            onNavigate("clarification");
+          }
         }}
       >
         <label className="sr-only" htmlFor="agent-task-input">任务描述</label>
         <textarea id="agent-task-input" disabled={taskSubmissionLocked} name="task" defaultValue={state.task || "帮我准备一个 Windows 下的 AI 开发环境"} />
-        <button className="btn btn-primary" disabled={taskSubmissionLocked} title={taskSubmissionLocked ? "当前资源执行完成后才能开始新任务" : undefined} type="submit"><Sparkles size={17} />开始任务</button>
+        <button className="btn btn-primary" disabled={taskSubmissionLocked} title={taskSubmissionLocked ? taskSubmissionLockReason : undefined} type="submit"><Sparkles size={17} />开始任务</button>
       </form>
       <section className="agent-panel agent-local-repository-entry">
         <div className="agent-panel-heading">
@@ -315,7 +392,7 @@ export function AgentHomeView({
           <div className="agent-panel-heading"><Clock3 size={17} /><h2>最近任务</h2></div>
           <div className="recent-task-list">
             {recentTasks.map((task) => (
-              <button disabled={taskSubmissionLocked} key={task} type="button" onClick={async () => { const nextState = await dispatch({ type: "SUBMIT_TASK", task }); if (nextState.phase === "routing" && nextState.task === task) onNavigate("clarification"); }}>
+              <button disabled={taskSubmissionLocked} key={task} type="button" onClick={async () => { const previousTaskId = state.taskId; const nextState = await dispatch({ type: "SUBMIT_TASK", task }); if (taskSubmissionWasAccepted(previousTaskId, nextState, task)) onNavigate("clarification"); }}>
                 <span>{task}</span><ChevronRight size={16} />
               </button>
             ))}
@@ -480,6 +557,25 @@ function GitHubRepositoryResults({
         <span>鉴权<strong>{output.authenticated ? "Token" : "公开访问"}</strong></span>
         <span>剩余额度<strong>{output.rateLimit.remaining ?? "未知"}</strong></span>
       </section>
+      {output.recommendation ? (
+        <section
+          className="github-results-summary"
+          aria-label="Agent 候选推荐"
+        >
+          <span>
+            Agent 推荐
+            <strong>{output.recommendation.selectedFullNames.join("、")}</strong>
+          </span>
+          <span>
+            推荐依据
+            <strong>{output.recommendation.reason}</strong>
+          </span>
+          <span>
+            决策边界
+            <strong>仅供核对，仍由用户选择</strong>
+          </span>
+        </section>
+      ) : null}
       {preparationError ? (
         <div className="agent-alert" role="alert">
           <AlertTriangle size={17} />
@@ -881,12 +977,26 @@ function TaskPlanConfirmationCard({
 }: {
   state: AgentState;
   dispatch: Dispatch;
-  onNavigate?: Navigate;
+  onNavigate: Navigate;
 }) {
-  const [confirming, setConfirming] = useState(false);
+  const [activeAction, setActiveAction] = useState<"confirm" | "cancel" | null>(null);
   const plan = state.taskPlan;
   if (!plan) {
-    return <WaitingPanel title="正在生成任务计划" copy="Agent 正在拆解目标、依赖关系与权限边界。" />;
+    return (
+      <WaitingPanel
+        cancelling={activeAction === "cancel"}
+        copy="Agent 正在拆解目标、依赖关系与权限边界。"
+        onCancel={() => {
+          setActiveAction("cancel");
+          void cancelActiveTaskAndReturnHome(dispatch, onNavigate)
+            .then((nextState) => {
+              if (nextState.phase !== "intake") setActiveAction(null);
+            })
+            .catch(() => setActiveAction(null));
+        }}
+        title="正在生成任务计划"
+      />
+    );
   }
   const valid =
     state.taskPlanValidation?.valid === true &&
@@ -954,29 +1064,38 @@ function TaskPlanConfirmationCard({
       <div className="task-plan-actions">
         <button
           className="btn btn-primary"
-          disabled={!valid || confirming}
+          disabled={!valid || activeAction !== null}
           type="button"
           onClick={async () => {
-            setConfirming(true);
+            setActiveAction("confirm");
             const nextState = await dispatch({
               type: "CONFIRM_TASK_PLAN",
               revision: plan.revision
             });
             if (nextState.phase === "waiting_task_plan_confirmation") {
-              setConfirming(false);
+              setActiveAction(null);
             } else if (nextState.phase === "replanning") {
-              onNavigate?.("execution");
+              onNavigate("execution");
             } else if (nextState.phase === "waiting_approval") {
-              onNavigate?.("plan");
+              onNavigate("plan");
             }
           }}
         >
-          {confirming ? <Loader2 className="spin" size={16} /> : <ClipboardCheck size={16} />}
-          {confirming ? "正在确认" : "确认流程并继续"}
+          {activeAction === "confirm" ? <Loader2 className="spin" size={16} /> : <ClipboardCheck size={16} />}
+          {activeAction === "confirm" ? "正在确认" : "确认流程并继续"}
         </button>
-        <button className="btn btn-ghost" disabled={confirming} type="button" onClick={() => void dispatch({ type: "CANCEL_TASK" })}>
-          <XCircle size={16} />取消任务
-        </button>
+        <CancelTaskButton
+          cancelling={activeAction === "cancel"}
+          disabled={activeAction !== null}
+          onCancel={() => {
+            setActiveAction("cancel");
+            void cancelActiveTaskAndReturnHome(dispatch, onNavigate)
+              .then((nextState) => {
+                if (nextState.phase !== "intake") setActiveAction(null);
+              })
+              .catch(() => setActiveAction(null));
+          }}
+        />
       </div>
     </section>
   );
@@ -1071,8 +1190,35 @@ export function ClarificationView({
   onNavigate: Navigate;
   onRetryLocally: () => Promise<AgentState>;
 }) {
+  const [cancelling, setCancelling] = useState(false);
+  const cancelTask = () => {
+    setCancelling(true);
+    void cancelActiveTaskAndReturnHome(dispatch, onNavigate)
+      .then((nextState) => {
+        if (nextState.phase !== "intake") setCancelling(false);
+      })
+      .catch(() => setCancelling(false));
+  };
   const question = getActiveClarification(state);
   if (!question) {
+    if (state.phase === "intake") {
+      return (
+        <section className="agent-view">
+          <div className="agent-waiting">
+            <CheckCircle2 size={25} />
+            <strong>当前没有正在处理的任务</strong>
+            <span>之前的任务已经停止，可以返回入口提交新需求。</span>
+            <button
+              className="btn btn-primary"
+              type="button"
+              onClick={() => onNavigate("home")}
+            >
+              返回任务入口
+            </button>
+          </div>
+        </section>
+      );
+    }
     if (state.phase === "waiting_task_plan_confirmation") {
       return <TaskPlanConfirmationCard dispatch={dispatch} onNavigate={onNavigate} state={state} />;
     }
@@ -1143,6 +1289,54 @@ export function ClarificationView({
       );
     }
     if (state.phase === "cancelled") {
+      const latestError = [...state.logs]
+        .reverse()
+        .find((entry) => entry.level === "error")?.message;
+      const routingFailed =
+        state.routeDecision === null &&
+        state.taskPlan === null &&
+        state.agentRun.status === "failed" &&
+        latestError?.startsWith("任务路由失败：") === true;
+      if (routingFailed) {
+        const failureMessage = latestError ?? "本地任务路由执行失败。";
+        return (
+          <section className="agent-view clarification-view">
+            <section className="failure-resolution-panel" role="alert">
+              <div className="failure-resolution-heading">
+                <span><AlertTriangle size={19} /></span>
+                <div>
+                  <small>本地路由已停止</small>
+                  <h2>任务路由失败，但任务内容仍已保留</h2>
+                </div>
+              </div>
+              <p>{failureMessage}</p>
+              <div className="failure-actions">
+                <button
+                  className="btn btn-primary"
+                  data-testid="retry-routing"
+                  type="button"
+                  onClick={() => void dispatch({ type: "RETRY_ROUTING" })}
+                >
+                  <RefreshCw size={16} />重新执行路由
+                </button>
+                <button
+                  className="btn btn-ghost"
+                  type="button"
+                  onClick={async () => {
+                    const next = await dispatch({ type: "RESET" });
+                    if (next.phase === "intake") onNavigate("home");
+                  }}
+                >
+                  放弃并返回任务入口
+                </button>
+              </div>
+              <small className="failure-resolution-note">
+                重新路由只执行本地规则匹配，不会下载资源、运行代码或授予新权限。
+              </small>
+            </section>
+          </section>
+        );
+      }
       const failedPlanStep = state.taskPlan?.steps.find(
         (step) => step.status === "failed"
       );
@@ -1177,9 +1371,9 @@ export function ClarificationView({
               <button
                 className="btn btn-ghost"
                 type="button"
-                onClick={() => {
-                  dispatch({ type: "RESET" });
-                  onNavigate("home");
+                onClick={async () => {
+                  const next = await dispatch({ type: "RESET" });
+                  if (next.phase === "intake") onNavigate("home");
                 }}
               >
                 返回首页
@@ -1201,10 +1395,62 @@ export function ClarificationView({
             <CheckCircle2 size={25} />
             <strong>澄清完成，资源计划已生成</strong>
             <span>模型已完成可信目录查询，计划仍需用户确认。</span>
-            <button className="btn btn-primary" type="button" onClick={() => onNavigate("plan")}>
-              <ListChecks size={16} />查看资源计划
-            </button>
+            <div className="failure-actions">
+              <button className="btn btn-primary" type="button" onClick={() => onNavigate("plan")}>
+                <ListChecks size={16} />查看资源计划
+              </button>
+              <CancelTaskButton cancelling={cancelling} onCancel={cancelTask} />
+            </div>
           </div>
+        </section>
+      );
+    }
+    if (state.phase === "routing") {
+      return (
+        <section className="agent-view">
+          <div className="agent-waiting">
+            <Loader2 className="spin" size={25} />
+            <strong>正在路由任务</strong>
+            <span>Agent 正在读取系统画像并决定下一项动作。</span>
+            <div className="failure-actions">
+              <CancelTaskButton
+                cancelling={cancelling}
+                label="放弃并返回任务入口"
+                onCancel={cancelTask}
+              />
+            </div>
+          </div>
+        </section>
+      );
+    }
+    if (state.phase === "clarifying") {
+      return (
+        <section className="agent-view clarification-view">
+          <section className="failure-resolution-panel" role="alert">
+            <div className="failure-resolution-heading">
+              <span><AlertTriangle size={19} /></span>
+              <div>
+                <small>澄清状态无法继续</small>
+                <h2>当前任务缺少可展示的确认问题</h2>
+              </div>
+            </div>
+            <p>
+              已停止等待，避免把损坏的澄清状态误显示为正在路由。你可以重新规划当前任务，或放弃后返回任务入口。
+            </p>
+            <div className="failure-actions">
+              <button
+                className="btn btn-primary"
+                type="button"
+                onClick={() => void onRetryLocally()}
+              >
+                <RefreshCw size={16} />重新规划当前任务
+              </button>
+              <CancelTaskButton
+                cancelling={cancelling}
+                onCancel={cancelTask}
+              />
+            </div>
+          </section>
         </section>
       );
     }
@@ -1217,6 +1463,7 @@ export function ClarificationView({
       ].includes(state.routeDecision?.skillId ?? "");
     return (
       <WaitingPanel
+        cancelling={cancelling}
         title={state.phase === "task_planning"
           ? "正在生成任务计划"
           : state.phase === "planning" && localEnvironmentInspection
@@ -1242,6 +1489,7 @@ export function ClarificationView({
               ? "只读取固定 HEAD 的白名单项目证据并执行固定版本查询；不运行仓库代码。"
               : "只执行固定白名单中的版本查询，不下载或修改本机环境。"
             : "Agent 正在读取系统画像并决定下一项动作。"}
+        onCancel={cancelTask}
       />
     );
   }
@@ -1253,7 +1501,7 @@ export function ClarificationView({
         <h2>{question.prompt}</h2>
         {question.options.length > 0 ? (
           <div className="clarification-options">
-            {question.options.map((option) => <button key={option} className="option-button" type="button" onClick={() => dispatch({ type: "ANSWER_CLARIFICATION", questionId: question.id, answer: option })}>{option}<ChevronRight size={16} /></button>)}
+            {question.options.map((option) => <button key={option} className="option-button" disabled={cancelling} type="button" onClick={() => dispatch({ type: "ANSWER_CLARIFICATION", questionId: question.id, answer: option })}>{option}<ChevronRight size={16} /></button>)}
           </div>
         ) : (
           <form
@@ -1276,14 +1524,18 @@ export function ClarificationView({
               id={`clarification-${question.id}`}
               name="answer"
               maxLength={4000}
+              disabled={cancelling}
               required
             />
-            <button className="btn btn-primary" type="submit">
+            <button className="btn btn-primary" disabled={cancelling} type="submit">
               提交回答<ChevronRight size={16} />
             </button>
           </form>
         )}
-        {!question.required && <button className="btn btn-ghost" type="button" onClick={() => dispatch({ type: "SKIP_CLARIFICATION", questionId: question.id })}>跳过此非必填问题</button>}
+        {!question.required && <button className="btn btn-ghost" disabled={cancelling} type="button" onClick={() => dispatch({ type: "SKIP_CLARIFICATION", questionId: question.id })}>跳过此非必填问题</button>}
+        <div className="task-plan-actions">
+          <CancelTaskButton cancelling={cancelling} onCancel={cancelTask} />
+        </div>
       </section>
     </section>
   );
@@ -1302,10 +1554,19 @@ export function ResourcePlanView({
   onSelectLocalResources?: () => Promise<unknown>;
   onSelectWorkspaceRoot?: () => Promise<unknown>;
 }) {
+  const [cancelling, setCancelling] = useState(false);
+  const cancelTask = () => {
+    setCancelling(true);
+    void cancelActiveTaskAndReturnHome(dispatch, onNavigate)
+      .then((nextState) => {
+        if (nextState.phase !== "intake") setCancelling(false);
+      })
+      .catch(() => setCancelling(false));
+  };
   if (state.phase === "waiting_task_plan_confirmation") {
     return <TaskPlanConfirmationCard dispatch={dispatch} onNavigate={onNavigate} state={state} />;
   }
-  if (state.phase === "task_planning" || state.phase === "planning" || state.phase === "routing" || state.phase === "clarifying") return <WaitingPanel title="正在生成计划" copy="先确认 Task Plan，再由系统画像和澄清答案生成资源计划。" />;
+  if (state.phase === "task_planning" || state.phase === "planning" || state.phase === "routing" || state.phase === "clarifying") return <WaitingPanel cancelling={cancelling} title="正在生成计划" copy="先确认 Task Plan，再由系统画像和澄清答案生成资源计划。" onCancel={cancelTask} />;
   if (state.resources.length === 0) return <WaitingPanel title="尚无资源计划" copy="请先在首页提交任务并完成澄清。" />;
   const waitingApproval = state.phase === "waiting_approval";
   const validationCurrent = state.planValidation?.checkedRevision === state.revision;
@@ -1478,6 +1739,7 @@ export function ResourcePlanView({
       ) : null}
       <div className="plan-footer">
         <span title={state.workspace.targetRootPath}>已选择 {state.resources.filter((resource) => resource.selected).length} 项资源 · {state.workspace.targetRootPath ? "自定义目录" : "默认目录"}</span>
+        <CancelTaskButton cancelling={cancelling} onCancel={cancelTask} />
         <button className="btn btn-ghost" disabled={!waitingApproval || !onSelectLocalResources} type="button" onClick={() => void onSelectLocalResources?.()}><FolderOpen size={16} />接入本地文件或目录</button>
         <button className="btn btn-ghost" disabled={!waitingApproval || !onSelectWorkspaceRoot} type="button" onClick={() => void onSelectWorkspaceRoot?.()}><FolderOpen size={16} />选择工作区目录</button>
         <button className="btn btn-primary" disabled={!canApprove} title={canApprove ? `批准计划 r${state.revision}` : "请先解决计划验证问题"} type="button" onClick={async () => { const nextState = await dispatch({ type: "APPROVE_PLAN", revision: state.revision }); if ((nextState.phase === "downloading" || nextState.phase === "exporting") && nextState.approvedRevision === state.revision) onNavigate("execution"); }}><ShieldCheck size={16} />确认下载计划 r{state.revision}</button>
@@ -1487,7 +1749,7 @@ export function ResourcePlanView({
 }
 
 export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: { state: AgentState; dispatch: Dispatch; onNavigate: Navigate; modelConnection: ModelConnectionState }) {
-  const isWorking = ["downloading", "awaiting_failure_action", "verifying", "exporting", "replanning", "waiting_task_plan_confirmation"].includes(state.phase);
+  const isWorking = taskCanBeCancelled(state);
   const handoffComplete = state.phase === "handoff" && state.workspace.ready;
   const failedResource = state.resources.find((resource) => resource.status === "failed");
   const fallbackResource = failedResource?.fallbackId ? catalogById.get(failedResource.fallbackId) : undefined;
@@ -1501,7 +1763,7 @@ export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: 
   const toolResultGroups = groupedToolResults(state);
   return (
     <section className="agent-view execution-view">
-      <div className="agent-page-heading"><div><span>执行监控</span><h1>{handoffComplete ? "Agent 已完成工作区交接" : `Agent 正在${phaseLabel(state.phase)}`}</h1></div><button className="btn btn-ghost" disabled={!isWorking} type="button" onClick={() => dispatch({ type: "CANCEL_TASK" })}><XCircle size={16} />取消任务</button></div>
+      <div className="agent-page-heading"><div><span>执行监控</span><h1>{handoffComplete ? "Agent 已完成工作区交接" : `Agent 正在${phaseLabel(state.phase)}`}</h1></div><button className="btn btn-ghost" data-testid="cancel-active-task" disabled={!isWorking} type="button" onClick={() => { void cancelActiveTaskAndReturnHome(dispatch, onNavigate).catch(() => undefined); }}><XCircle size={16} />取消任务</button></div>
       <div className="execution-summary"><div><span>总体进度</span><strong>{overallProgress(state)}%</strong></div><div><span>本轮模型步骤</span><strong>{state.agentRun.step}/{state.agentRun.maxSteps}</strong></div><div><span>模型来源</span><strong>{modelConnection.activeProvider === "remote-llm" ? "远程 LLM" : "本地规则"}</strong></div><div><span>计划修订</span><strong>r{state.revision}</strong></div></div>
       <TaskPlanExecutionPanel state={state} />
       {modelConnection.status === "fallback_local" && modelConnection.error ? <section className="model-fallback-notice" role="status" aria-live="polite"><WifiOff size={17} /><div><strong>远程模型不可用，任务已切换到本地规则模型</strong><span>{modelConnection.error.message}</span></div><button className="btn btn-ghost" type="button" onClick={() => onNavigate("settings")}>查看连接</button></section> : null}
@@ -1861,7 +2123,15 @@ export function WorkspaceView({
                   type: "SUBMIT_TASK",
                   task: `分析当前项目 ${state.localRepository?.displayName ?? ""} 的运行与构建要求，对比本机环境，列出已满足、缺少和无法确认的条件`
                 });
-                if (next.phase === "routing") onNavigate("clarification");
+                if (
+                  taskSubmissionWasAccepted(
+                    state.taskId,
+                    next,
+                    `分析当前项目 ${state.localRepository?.displayName ?? ""} 的运行与构建要求，对比本机环境，列出已满足、缺少和无法确认的条件`
+                  )
+                ) {
+                  onNavigate("clarification");
+                }
               }}
             >
               <BrainCircuit size={16} />分析项目环境
@@ -2144,6 +2414,16 @@ export function WorkspaceView({
   );
 }
 
-function WaitingPanel({ title, copy }: { title: string; copy: string }) {
-  return <section className="agent-view"><div className="agent-waiting"><Loader2 className="spin" size={25} /><strong>{title}</strong><span>{copy}</span></div></section>;
+function WaitingPanel({
+  title,
+  copy,
+  cancelling = false,
+  onCancel
+}: {
+  title: string;
+  copy: string;
+  cancelling?: boolean;
+  onCancel?: () => void;
+}) {
+  return <section className="agent-view"><div className="agent-waiting"><Loader2 className="spin" size={25} /><strong>{title}</strong><span>{copy}</span>{onCancel ? <CancelTaskButton cancelling={cancelling} onCancel={onCancel} /> : null}</div></section>;
 }

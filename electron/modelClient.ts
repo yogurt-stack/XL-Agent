@@ -9,6 +9,18 @@ import type {
   AgentLoopMessage,
   AgentTurnContext
 } from "../src/features/agent-core/agentLoop";
+import type {
+  CandidateSelectorInput,
+  IntentClassifierContext
+} from "../src/features/agent-core/intentClassifier";
+import {
+  candidateSelectionToolArgumentsSchema,
+  parseCandidateSelectionDecision,
+  parseCandidateSelectionToolArguments,
+  parseRouteIntentDecision,
+  parseRouteIntentToolArguments,
+  routeIntentToolArgumentsSchema
+} from "../src/features/agent-core/intentSchemas";
 import {
   createOpenAiAgentTools,
   ModelToolProtocolError,
@@ -22,6 +34,7 @@ import type {
   TaskPlanProposal
 } from "../src/features/agent-core/types";
 import { parseTaskPlanProposal } from "../src/features/agent-core/taskPlan";
+import { z } from "zod";
 
 const modelSystemPrompt = `你是受控 Windows 资源准备 Agent 的规划模型。
 
@@ -47,6 +60,26 @@ const modelSystemPrompt = `你是受控 Windows 资源准备 Agent 的规划模�
 17. 所有工具参数必须严格符合函数 JSON Schema，不得添加额外字段。`;
 
 const modelConnectionTestPrompt = `这是远程模型连接测试。你必须调用且只调用 finish 函数，summary 使用 "Connection test succeeded."，不要返回正文。`;
+
+const intentRoutingSystemPrompt = `你是受控资源编排 Agent 的意图路由器。你必须调用且只调用 classify_intent，不要返回正文。
+
+根据用户原始任务，从宿主提供的 skills 中选择最匹配的 skillId；只有任务确实超出全部能力时才返回 null。
+
+规则：
+1. 确定用户想查本机版本、安装状态或兼容性时，选择本机只读检查/评估能力，不要误判为 GitHub。
+2. 用户想寻找、定位或了解开源仓库时，选择 github-project-discovery。裸仓库名、产品名或“寻找 X”可以是仓库检索意图。
+3. 对 GitHub 仓库名检索，githubSearch 使用 name 且 query 只能是用户原话中的仓库名 token；一般主题发现使用 discovery，可给出简短主题 query。
+4. exact owner/repo 只能由宿主确定性规则识别，你不得编造 owner/repo。
+5. 需要已有本地/GitHub 仓库句柄的能力，只有上下文明确提供对应条件时才能选择。
+6. skillId 必须逐字来自上下文 skills。reason 只写可审计的简短依据，不输出思维链。`;
+
+const candidateSelectionSystemPrompt = `你是 GitHub 仓库候选精排器。你必须调用且只调用 select_github_candidates，不要返回正文。
+
+根据用户原始任务和宿主给出的候选摘要，选择最匹配的 1 至 3 个 fullName：
+1. selectedFullNames 只能逐字复制 candidates 中存在的 fullName，禁止编造仓库。
+2. 仓库名称与用户目标的匹配优先，其次使用描述、topics、语言和社区活跃度。
+3. 不执行工具、不访问链接、不自动选择或下载；结果只是供用户核对的推荐。
+4. reason 只给简短可审计依据，不输出思维链。`;
 
 const agentLoopSystemPrompt = `你是受控资源编排 Agent 中一个已确认 analysis 步骤的执行模型。
 
@@ -172,6 +205,32 @@ function finishTool(): OpenAiFunctionTool {
   );
   if (!tool) throw new Error("finish 工具定义缺失。");
   return tool;
+}
+
+function classifyIntentTool(): OpenAiFunctionTool {
+  return {
+    type: "function",
+    function: {
+      name: "classify_intent",
+      description: "从宿主注册的 Domain Skills 中选择最匹配的任务能力，并在 GitHub 检索时给出受限搜索提示。",
+      parameters: z.toJSONSchema(
+        routeIntentToolArgumentsSchema
+      ) as Record<string, unknown>
+    }
+  };
+}
+
+function selectGitHubCandidatesTool(): OpenAiFunctionTool {
+  return {
+    type: "function",
+    function: {
+      name: "select_github_candidates",
+      description: "从 GitHub Repository Search 已返回的有限候选中选择最符合用户任务的 1 至 3 项。",
+      parameters: z.toJSONSchema(
+        candidateSelectionToolArgumentsSchema
+      ) as Record<string, unknown>
+    }
+  };
 }
 
 function configuredValue(value: string | undefined) {
@@ -330,6 +389,47 @@ function recordInput(value: unknown) {
     : {};
 }
 
+function parseRequiredFunctionCall(message: unknown, expectedName: string) {
+  const record = recordInput(message);
+  if (!Array.isArray(record.tool_calls) || record.tool_calls.length !== 1) {
+    throw remoteModelError(
+      "MODEL_INVALID_DECISION",
+      `远程 LLM 必须调用且只调用一次 ${expectedName}。`,
+      true
+    );
+  }
+  const call = recordInput(record.tool_calls[0]);
+  const fn = recordInput(call.function);
+  if (
+    call.type !== "function" ||
+    typeof call.id !== "string" ||
+    !call.id.trim() ||
+    fn.name !== expectedName ||
+    typeof fn.arguments !== "string" ||
+    fn.arguments.length > 32 * 1024
+  ) {
+    throw remoteModelError(
+      "MODEL_INVALID_DECISION",
+      `远程 LLM 返回了非法的 ${expectedName} function call。`,
+      true
+    );
+  }
+  let argumentsValue: unknown;
+  try {
+    argumentsValue = JSON.parse(fn.arguments);
+  } catch {
+    throw remoteModelError(
+      "MODEL_INVALID_JSON",
+      `${expectedName} 的 arguments 不是合法 JSON。`,
+      true
+    );
+  }
+  return {
+    callId: call.id.trim().slice(0, 160),
+    argumentsValue
+  };
+}
+
 function runtimeToolArguments(
   message: AgentLoopAssistantMessage<AgentToolName, unknown, TaskPlanProposal>,
   input: unknown
@@ -470,17 +570,17 @@ function transcriptMessages(
   return messages;
 }
 
-function requestSignal(parent: AbortSignal, timeoutMs: number) {
+function requestSignal(parent: AbortSignal | undefined, timeoutMs: number) {
   const controller = new AbortController();
   const abort = () => controller.abort();
-  if (parent.aborted) controller.abort();
-  else parent.addEventListener("abort", abort, { once: true });
+  if (parent?.aborted) controller.abort();
+  else parent?.addEventListener("abort", abort, { once: true });
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   return {
     signal: controller.signal,
     cleanup() {
       clearTimeout(timer);
-      parent.removeEventListener("abort", abort);
+      parent?.removeEventListener("abort", abort);
     }
   };
 }
@@ -579,7 +679,86 @@ export class RemoteModelClient {
     }
   }
 
-  async requestDecision(context: ModelContext) {
+  async requestIntentClassification(
+    context: IntentClassifierContext,
+    signal?: AbortSignal
+  ) {
+    const { message, model } = await this.requestRemoteFunctionMessage(
+      intentRoutingSystemPrompt,
+      context,
+      [classifyIntentTool()],
+      signal,
+      8_000
+    );
+    const call = parseRequiredFunctionCall(message, "classify_intent");
+    try {
+      const argumentsValue = parseRouteIntentToolArguments(
+        call.argumentsValue
+      );
+      return parseRouteIntentDecision({
+        ...argumentsValue,
+        decisionId: call.callId,
+        provider: "remote-llm",
+        model
+      });
+    } catch (error) {
+      if (error instanceof RemoteModelRequestError) throw error;
+      throw remoteModelError(
+        "MODEL_INVALID_DECISION",
+        "远程 LLM 返回的意图分类没有通过严格协议校验。",
+        true
+      );
+    }
+  }
+
+  async requestCandidateSelection(
+    input: CandidateSelectorInput,
+    signal?: AbortSignal
+  ) {
+    const { message, model } = await this.requestRemoteFunctionMessage(
+      candidateSelectionSystemPrompt,
+      input,
+      [selectGitHubCandidatesTool()],
+      signal,
+      8_000
+    );
+    const call = parseRequiredFunctionCall(
+      message,
+      "select_github_candidates"
+    );
+    try {
+      const argumentsValue = parseCandidateSelectionToolArguments(
+        call.argumentsValue
+      );
+      const candidateNames = new Set(
+        input.candidates.map((candidate) => candidate.fullName)
+      );
+      if (
+        new Set(argumentsValue.selectedFullNames).size !==
+          argumentsValue.selectedFullNames.length ||
+        argumentsValue.selectedFullNames.some(
+          (fullName) => !candidateNames.has(fullName)
+        )
+      ) {
+        throw new Error("模型选择了候选列表以外或重复的仓库。");
+      }
+      return parseCandidateSelectionDecision({
+        ...argumentsValue,
+        decisionId: call.callId,
+        provider: "remote-llm",
+        model
+      });
+    } catch (error) {
+      if (error instanceof RemoteModelRequestError) throw error;
+      throw remoteModelError(
+        "MODEL_INVALID_DECISION",
+        "远程 LLM 返回的 GitHub 候选精排没有通过严格协议校验。",
+        true
+      );
+    }
+  }
+
+  async requestDecision(context: ModelContext, signal?: AbortSignal) {
     const availableActions: AgentActionToolName[] =
       context.state.phase === "task_planning"
         ? ["propose_task_plan"]
@@ -592,7 +771,8 @@ export class RemoteModelClient {
       context.availableTools,
       availableActions,
       false,
-      context.state.phase === "task_planning"
+      context.state.phase === "task_planning",
+      signal
     );
   }
 
@@ -762,34 +942,15 @@ export class RemoteModelClient {
     return resolveRemoteModelConfig(this.environment);
   }
 
-  private async requestRemoteToolDecision(
+  private async requestRemoteFunctionMessage(
     systemPrompt: string,
     context: unknown,
-    availableTools: AgentToolName[],
-    availableActions: AgentActionToolName[],
-    forceFinish = false,
-    taskPlanningMode = false
+    tools: OpenAiFunctionTool[],
+    signal?: AbortSignal,
+    timeoutMs = 15_000
   ) {
     const config = this.getConfig();
-    const githubSearchMode = !taskPlanningMode && availableTools.includes(
-      "search_github_repositories"
-    );
-    const developmentInspectionMode =
-      !taskPlanningMode &&
-      availableTools.includes("inspect_local_development_environment");
-    const tools = forceFinish
-      ? [finishTool()]
-      : createOpenAiAgentTools(
-          taskPlanningMode ? [] : availableTools,
-          availableActions
-        ).filter((tool) =>
-          (!githubSearchMode && !developmentInspectionMode) ||
-          tool.function.name === "finish" ||
-          (githubSearchMode &&
-            tool.function.name === "search_github_repositories") ||
-          (developmentInspectionMode &&
-            tool.function.name === "inspect_local_development_environment")
-        );
+    const combinedSignal = requestSignal(signal, timeoutMs);
     let response: Response;
     try {
       response = await this.fetchRequest(config.endpoint, {
@@ -809,9 +970,15 @@ export class RemoteModelClient {
             { role: "user", content: JSON.stringify(context) }
           ]
         }),
-        signal: AbortSignal.timeout(15000)
+        signal: combinedSignal.signal
       });
     } catch (error) {
+      combinedSignal.cleanup();
+      if (signal?.aborted) {
+        throw error instanceof Error
+          ? error
+          : new DOMException("Remote model request aborted.", "AbortError");
+      }
       throw new RemoteModelRequestError(toModelConnectionError(error));
     }
 
@@ -820,6 +987,7 @@ export class RemoteModelClient {
         response,
         [config.apiKey]
       );
+      combinedSignal.cleanup();
       if (response.status === 401 || response.status === 403) {
         throw remoteModelError(
           "MODEL_AUTH_FAILED",
@@ -832,7 +1000,9 @@ export class RemoteModelClient {
         providerMessage
           ? `远程 LLM 请求失败：HTTP ${response.status}。服务返回：${providerMessage}`
           : `远程 LLM 请求失败：HTTP ${response.status}。`,
-        response.status === 408 || response.status === 429 || response.status >= 500
+        response.status === 408 ||
+          response.status === 429 ||
+          response.status >= 500
       );
     }
 
@@ -842,6 +1012,7 @@ export class RemoteModelClient {
     try {
       payload = await readBoundedJsonResponse<typeof payload>(response);
     } catch (error) {
+      combinedSignal.cleanup();
       if (error instanceof RemoteModelRequestError) throw error;
       throw remoteModelError(
         "MODEL_INVALID_RESPONSE",
@@ -849,6 +1020,7 @@ export class RemoteModelClient {
         true
       );
     }
+    combinedSignal.cleanup();
 
     const message = payload.choices?.[0]?.message;
     if (!message) {
@@ -858,11 +1030,48 @@ export class RemoteModelClient {
         true
       );
     }
+    return { message, model: config.model };
+  }
+
+  private async requestRemoteToolDecision(
+    systemPrompt: string,
+    context: unknown,
+    availableTools: AgentToolName[],
+    availableActions: AgentActionToolName[],
+    forceFinish = false,
+    taskPlanningMode = false,
+    signal?: AbortSignal
+  ) {
+    const githubSearchMode = !taskPlanningMode && availableTools.includes(
+      "search_github_repositories"
+    );
+    const developmentInspectionMode =
+      !taskPlanningMode &&
+      availableTools.includes("inspect_local_development_environment");
+    const tools = forceFinish
+      ? [finishTool()]
+      : createOpenAiAgentTools(
+          taskPlanningMode ? [] : availableTools,
+          availableActions
+        ).filter((tool) =>
+          (!githubSearchMode && !developmentInspectionMode) ||
+          tool.function.name === "finish" ||
+          (githubSearchMode &&
+            tool.function.name === "search_github_repositories") ||
+          (developmentInspectionMode &&
+            tool.function.name === "inspect_local_development_environment")
+        );
+    const { message, model } = await this.requestRemoteFunctionMessage(
+      systemPrompt,
+      context,
+      tools,
+      signal
+    );
 
     try {
       return parseOpenAiToolDecision(
         message,
-        config.model,
+        model,
         availableTools,
         availableActions
       );

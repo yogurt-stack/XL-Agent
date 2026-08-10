@@ -3,8 +3,10 @@ import { createInitialAgentState } from "./machine";
 import type { ModelConnectionState } from "./modelConnection";
 import type {
   AgentRuntimeSnapshot,
+  AgentRuntimeSnapshotCursor,
   PlatformCapabilitySummary
 } from "./runtimeBridge";
+import { classifyAgentRuntimeSnapshot } from "./runtimeBridge";
 import type { AgentState, AgentUserEvent } from "./types";
 
 export type PersistenceViewState = {
@@ -62,6 +64,8 @@ function createInitialModelConnectionState(
 export function useAgentCore() {
   const bridge = window.xunleiAgent;
   const stateRef = useRef<AgentState>(createInitialAgentState());
+  const snapshotCursorRef = useRef<AgentRuntimeSnapshotCursor | null>(null);
+  const snapshotRequestRef = useRef<Promise<boolean> | null>(null);
   const [state, setState] = useState(stateRef.current);
   const [modelConnectionState, setModelConnectionState] = useState(
     () => createInitialModelConnectionState(Boolean(bridge))
@@ -80,16 +84,69 @@ export function useAgentCore() {
     useState<PlatformCapabilitySummary>(browserCapabilities);
 
   const applySnapshot = useCallback((snapshot: AgentRuntimeSnapshot) => {
+    const acceptance = classifyAgentRuntimeSnapshot(
+      snapshotCursorRef.current,
+      snapshot
+    );
+    if (!acceptance.accepted) {
+      if (
+        acceptance.reason === "incompatible-protocol" ||
+        acceptance.reason === "invalid-envelope"
+      ) {
+        setPersistenceState((current) => ({
+          ...current,
+          status: "error",
+          error:
+            "Renderer 与 Electron Main 的 Agent Runtime 协议不一致，请完全退出并重新启动应用。"
+        }));
+      }
+      return false;
+    }
+    snapshotCursorRef.current = acceptance.cursor;
     stateRef.current = snapshot.state;
     setState(snapshot.state);
     setModelConnectionState(snapshot.modelConnection);
     setPersistenceState(snapshot.persistence);
     setCapabilities(snapshot.capabilities);
+    return true;
   }, []);
+
+  const refreshRuntimeSnapshot = useCallback(async () => {
+    if (!bridge) return false;
+    if (snapshotRequestRef.current) return snapshotRequestRef.current;
+
+    const request = (async () => {
+      try {
+        const result = await bridge.getAgentRuntimeSnapshot();
+        if (result.ok) return applySnapshot(result.snapshot);
+        setPersistenceState((current) => ({
+          ...current,
+          status: "error",
+          error: `${result.error.code}: ${result.error.message}`
+        }));
+        return false;
+      } catch (error) {
+        setPersistenceState((current) => ({
+          ...current,
+          status: "error",
+          error:
+            error instanceof Error
+              ? `Agent Runtime 同步失败：${error.message}`
+              : "Agent Runtime 同步失败。"
+        }));
+        return false;
+      } finally {
+        snapshotRequestRef.current = null;
+      }
+    })();
+    snapshotRequestRef.current = request;
+    return request;
+  }, [applySnapshot, bridge]);
 
   const dispatch = useCallback(
     async (event: AgentUserEvent) => {
       if (!bridge) return stateRef.current;
+      const stateBeforeDispatch = stateRef.current;
       const result = await bridge.dispatchAgentEvent(event);
       if (result.ok) {
         applySnapshot(result.snapshot);
@@ -99,6 +156,10 @@ export function useAgentCore() {
           status: "error",
           error: `${result.error.code}: ${result.error.message}`
         }));
+        // A push snapshot can arrive before the IPC response. Returning that
+        // optimistic state here would make callers treat a rejected or
+        // non-durable mutation as acknowledged (most importantly CANCEL_TASK).
+        return stateBeforeDispatch;
       }
       return stateRef.current;
     },
@@ -271,24 +332,54 @@ export function useAgentCore() {
       if (!disposed) applySnapshot(snapshot);
     });
 
-    void bridge.getAgentRuntimeSnapshot().then((result) => {
-      if (disposed) return;
-      if (result.ok) {
-        applySnapshot(result.snapshot);
-      } else {
-        setPersistenceState((current) => ({
-          ...current,
-          status: "error",
-          error: `${result.error.code}: ${result.error.message}`
-        }));
-      }
-    });
+    if (!disposed) void refreshRuntimeSnapshot();
 
     return () => {
       disposed = true;
       unsubscribe();
     };
-  }, [applySnapshot, bridge]);
+  }, [applySnapshot, bridge, refreshRuntimeSnapshot]);
+
+  useEffect(() => {
+    if (!bridge) return;
+    const runtimeIsAdvancing =
+      [
+        "routing",
+        "task_planning",
+        "planning",
+        "replanning",
+        "downloading",
+        "verifying",
+        "exporting"
+      ].includes(state.phase) ||
+      state.agentB.status === "running" ||
+      state.githubPublish.status === "publishing";
+    if (!runtimeIsAdvancing) return;
+
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const intervalMs = state.phase === "routing" ? 1_000 : 2_500;
+    const poll = async () => {
+      await refreshRuntimeSnapshot();
+      if (!disposed) timer = setTimeout(poll, intervalMs);
+    };
+    timer = setTimeout(poll, intervalMs);
+
+    const refreshWhenVisible = () => {
+      if (!disposed && document.visibilityState === "visible") {
+        void refreshRuntimeSnapshot();
+      }
+    };
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+
+    return () => {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, [bridge, refreshRuntimeSnapshot, state.agentB.status, state.githubPublish.status, state.phase]);
 
   return {
     state,

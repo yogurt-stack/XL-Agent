@@ -1,6 +1,7 @@
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import {
   existsSync,
   mkdirSync,
@@ -15,6 +16,7 @@ import axe, { type AxeResults } from "axe-core";
 import { _electron as electron, type ElectronApplication } from "playwright";
 
 const projectRoot = path.resolve(__dirname, "..");
+const requireCompiled = createRequire(path.join(projectRoot, "e2e-runtime.cjs"));
 const visualRegressionEnabled = process.platform === "linux";
 
 let electronApp: ElectronApplication;
@@ -297,6 +299,177 @@ function createLocalGitRepository() {
   return rootPath;
 }
 
+async function seedTransientTaskSnapshot(phase: "routing" | "planning") {
+  type CompiledTaskStore = {
+    saveSnapshot(state: unknown): Promise<unknown>;
+    close(): Promise<void>;
+  };
+  const { TaskStore } = requireCompiled(
+    path.join(projectRoot, "dist-electron/electron/taskStore.js")
+  ) as {
+    TaskStore: {
+      open(options: { databasePath: string }): Promise<CompiledTaskStore>;
+    };
+  };
+  const { createInitialAgentState, transition } = requireCompiled(
+    path.join(
+      projectRoot,
+      "dist-electron/src/features/agent-core/machine.js"
+    )
+  ) as {
+    createInitialAgentState(): Record<string, unknown>;
+    transition(
+      state: Record<string, unknown>,
+      event: Record<string, unknown>
+    ): Record<string, unknown>;
+  };
+
+  const taskId = `e2e-restored-${phase}-task`;
+  let state = transition(createInitialAgentState(), {
+    type: "SUBMIT_TASK",
+    task: "准备 Python 机器学习环境",
+    taskId
+  });
+  if (phase === "planning") {
+    state = {
+      ...state,
+      phase,
+      route: "ai-development-environment",
+      routeDecision: {
+        status: "supported",
+        reason: "E2E transient planning fixture.",
+        skillId: "ai-development-environment",
+        sourceProviderId: "trusted-catalog",
+        userLinks: [],
+        resourceIds: [],
+        clarifications: [],
+        requirements: null
+      },
+      agentRun: {
+        ...(state.agentRun as Record<string, unknown>),
+        status: "thinking"
+      }
+    };
+  }
+
+  const store = await TaskStore.open({
+    databasePath: testEnvironment.XL_AGENT_TASK_STORE_PATH
+  });
+  try {
+    await store.saveSnapshot(state);
+  } finally {
+    await store.close();
+  }
+  return taskId;
+}
+
+async function runtimeStateFromRenderer() {
+  return page.evaluate(async () => {
+    const bridge = (
+      window as unknown as {
+        xunleiAgent?: {
+          getAgentRuntimeSnapshot(): Promise<
+            | {
+                ok: true;
+                snapshot: {
+                  state: { taskId: string; phase: string };
+                  persistence: { restoredAt: string | null };
+                };
+              }
+            | { ok: false }
+          >;
+        };
+      }
+    ).xunleiAgent;
+    const result = await bridge?.getAgentRuntimeSnapshot();
+    return result?.ok ? {
+      taskId: result.snapshot.state.taskId,
+      phase: result.snapshot.state.phase,
+      restoredAt: result.snapshot.persistence.restoredAt
+    } : null;
+  });
+}
+
+test("cancels planning and clarification without restoring stale work", async () => {
+  const taskInput = page.getByRole("textbox", { name: "任务描述" });
+
+  await taskInput.fill("准备 Python 机器学习环境");
+  await page.getByRole("button", { name: "开始任务" }).click();
+  await expect(
+    page.getByRole("heading", { name: "先确认 Agent 对任务的理解" })
+  ).toBeVisible();
+  await page.getByRole("button", { name: "取消任务" }).click();
+  await expect(
+    page.getByRole("heading", { name: "准备一个可交接的开发工作区" })
+  ).toBeVisible();
+
+  await taskInput.fill("准备 Python 机器学习环境");
+  await page.getByRole("button", { name: "开始任务" }).click();
+  await expect(
+    page.getByRole("heading", { name: "先确认 Agent 对任务的理解" })
+  ).toBeVisible();
+  await page.getByRole("button", { name: "确认流程并继续" }).click();
+  await expect(
+    page.getByRole("heading", {
+      name: "Python AI 环境是否需要同时准备前端工具链"
+    })
+  ).toBeVisible();
+  await page.getByRole("button", { name: "取消任务" }).click();
+  await expect(
+    page.getByRole("heading", { name: "准备一个可交接的开发工作区" })
+  ).toBeVisible();
+
+  await electronApp.close();
+  await launchApplication();
+  await expect(
+    page.getByRole("heading", { name: "准备一个可交接的开发工作区" })
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "开始任务" })).toBeEnabled();
+});
+
+test.describe("transient task restart recovery", () => {
+  for (const phase of ["routing", "planning"] as const) {
+    test(`does not resume a persisted ${phase} request or leave a loading UI`, async () => {
+      await electronApp.context().tracing.stop();
+      await electronApp.close();
+      const taskId = await seedTransientTaskSnapshot(phase);
+
+      await launchApplication();
+
+      await expect(
+        page.getByRole("heading", { name: "准备一个可交接的开发工作区" })
+      ).toBeVisible();
+      await expect(page.getByText("正在路由任务")).toHaveCount(0);
+      await expect(page.getByText("Agent 正在生成首轮 Task Plan")).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "开始任务" })).toBeEnabled();
+      expect(await runtimeStateFromRenderer()).toMatchObject({
+        taskId,
+        phase: "cancelled",
+        restoredAt: expect.any(String)
+      });
+
+      await page.evaluate(async () => {
+        await (
+          window as unknown as {
+            xunleiAgent?: { flushTaskPersistence(): Promise<{ ok: true }> };
+          }
+        ).xunleiAgent?.flushTaskPersistence();
+      });
+      await electronApp.context().tracing.stop();
+      await electronApp.close();
+
+      await launchApplication();
+      expect(await runtimeStateFromRenderer()).toMatchObject({
+        taskId: "unassigned",
+        phase: "intake",
+        restoredAt: null
+      });
+      await expect(page.getByText("正在路由任务")).toHaveCount(0);
+      await expect(page.getByText("Agent 正在生成首轮 Task Plan")).toHaveCount(0);
+    });
+  }
+});
+
 test("imports a local Git repository into Manifest and Agent B without write permission", async () => {
   const repositoryRoot = createLocalGitRepository();
   await electronApp.evaluate(
@@ -524,6 +697,33 @@ test("shows persisted task history without changing the active task", async () =
   await page.getByRole("button", { name: "执行" }).click();
   await expect(page.getByRole("heading", { name: "AI Dev Starter 需要人工决策" })).toBeVisible();
   await expect(page.getByRole("alert")).toContainText("CHECKSUM_MISMATCH");
+});
+
+test("pulls the latest runtime snapshot when a Main push is missed", async () => {
+  await electronApp.evaluate(({ BrowserWindow }) => {
+    const webContents = BrowserWindow.getAllWindows()[0]?.webContents as
+      | (Electron.WebContents & {
+          send: (channel: string, ...args: unknown[]) => void;
+        })
+      | undefined;
+    if (!webContents) throw new Error("Electron window is unavailable");
+    const originalSend = webContents.send.bind(webContents);
+    webContents.send = (channel: string, ...args: unknown[]) => {
+      if (channel === "agent:runtimeSnapshot") return;
+      originalSend(channel, ...args);
+    };
+  });
+
+  await page
+    .getByRole("textbox", { name: "任务描述" })
+    .fill("准备一个科研数据分析工作区");
+  await page.getByRole("button", { name: "开始任务" }).click();
+
+  await expect(
+    page.getByRole("heading", { name: "先确认 Agent 对任务的理解" })
+  ).toBeVisible();
+  await expect(page.getByText("确认的是处理流程，不是执行权限。"))
+    .toBeVisible();
 });
 
 test("routes the second Domain Skill through its own plan", async () => {

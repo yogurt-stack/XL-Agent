@@ -30,6 +30,8 @@ loadEnv({ path: path.resolve(process.cwd(), ".env"), quiet: true });
 
 app.setName("迅雷 AI Task Agent");
 
+const ownsSingleInstanceLock = app.requestSingleInstanceLock();
+
 const remoteModelClient = new RemoteModelClient();
 const githubRepositorySearchClient = new GitHubRepositorySearchClient();
 const githubPublisher = new GitHubPublisher();
@@ -224,8 +226,12 @@ async function performTrustedDownload(
 
 function broadcastRuntimeSnapshot(snapshot: AgentRuntimeSnapshot) {
   for (const window of BrowserWindow.getAllWindows()) {
-    if (!window.isDestroyed()) {
-      window.webContents.send("agent:runtimeSnapshot", snapshot);
+    if (!window.isDestroyed() && !window.webContents.isDestroyed()) {
+      try {
+        window.webContents.send("agent:runtimeSnapshot", snapshot);
+      } catch {
+        // Renderer 导航或销毁可能与 send 竞争；pull 通道会补回最新快照。
+      }
     }
   }
 }
@@ -311,6 +317,19 @@ function createMainWindow() {
   } else {
     void mainWindow.loadFile(path.resolve(__dirname, "../../dist/index.html"));
   }
+
+  return mainWindow;
+}
+
+function focusOrCreateMainWindow() {
+  const mainWindow = BrowserWindow.getAllWindows()[0];
+  if (!mainWindow) {
+    createMainWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
 }
 
 function runtimeIpcFailure(error: unknown) {
@@ -766,24 +785,93 @@ ipcMain.handle("agent:openWorkspace", async (_event, input: unknown) => {
     : { ok: true as const };
 });
 
-app.whenReady().then(async () => {
-  await getAgentRuntimeHost();
-  createMainWindow();
+let runtimeShutdownComplete = false;
+let runtimeShutdownPromise: Promise<void> | null = null;
+let shouldFocusAfterReady = false;
+const runtimeShutdownTimeoutMs = 5000;
 
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createMainWindow();
+function prepareRuntimeShutdown() {
+  if (!runtimeShutdownPromise) {
+    runtimeShutdownPromise = (async () => {
+      if (!runtimeHostPromise) return;
+      const host = await runtimeHostPromise;
+      host.stop();
+      await host.flushPersistence();
+      if (taskStorePromise) {
+        await (await taskStorePromise).close();
+      }
+    })();
+  }
+  return runtimeShutdownPromise;
+}
+
+function waitForRuntimeShutdown() {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(
+        `Agent Runtime 退出超过 ${runtimeShutdownTimeoutMs}ms，已强制结束应用进程。`
+      ));
+    }, runtimeShutdownTimeoutMs);
+    void prepareRuntimeShutdown().then(
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
+if (!ownsSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (app.isReady()) {
+      focusOrCreateMainWindow();
+    } else {
+      shouldFocusAfterReady = true;
     }
   });
-});
 
-app.on("before-quit", () => {
-  void runtimeHostPromise?.then(async (host) => {
-    await host.flushPersistence();
-    host.stop();
+  void app.whenReady()
+    .then(async () => {
+      await getAgentRuntimeHost();
+      createMainWindow();
+      if (shouldFocusAfterReady) {
+        shouldFocusAfterReady = false;
+        focusOrCreateMainWindow();
+      }
+
+      app.on("activate", () => {
+        if (BrowserWindow.getAllWindows().length === 0) {
+          createMainWindow();
+        }
+      });
+    })
+    .catch((error: unknown) => {
+      console.error("Agent Runtime 初始化失败，应用将退出。", error);
+      app.quit();
+    });
+
+  app.on("before-quit", (event) => {
+    if (runtimeShutdownComplete) return;
+
+    event.preventDefault();
+    if (runtimeShutdownPromise) return;
+    void waitForRuntimeShutdown()
+      .catch((error: unknown) => {
+        console.error("Agent Runtime 退出前的持久化失败。", error);
+      })
+      .finally(() => {
+        runtimeShutdownComplete = true;
+        app.exit(0);
+      });
   });
-});
 
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
-});
+  app.on("window-all-closed", () => {
+    if (process.platform !== "darwin" || getDevServerUrl()) app.quit();
+  });
+}

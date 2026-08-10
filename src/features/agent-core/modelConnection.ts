@@ -225,7 +225,7 @@ export class ModelConnectionController {
     return this.state;
   }
 
-  recordRemoteSuccess(decision: ModelDecision) {
+  recordRemoteSuccess(decision: Pick<ModelDecision, "model">) {
     this.update({
       ...this.state,
       status: "remote_available",

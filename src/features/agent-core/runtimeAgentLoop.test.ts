@@ -10,17 +10,30 @@ import type {
 import type {
   AgentScheduler,
   AgentToolExecutionOptions,
+  AgentVerifier,
   ModelRuntime
 } from "./interfaces";
 import { LocalRuleModelRuntime } from "./localRuleModel";
+import {
+  createInitialAgentState,
+  transition
+} from "./machine";
 import { FixedWindowsPlanner, MockVerifier } from "./mockServices";
 import { ExtensibleAgentRouter } from "./router";
 import { AgentRuntime } from "./runtime";
 import { analyzeProjectRequirementFiles } from "./projectRequirements";
+import {
+  createTaskPlan,
+  defaultTaskPlanToolPolicies,
+  prepareTaskPlanForConfirmation,
+  validateTaskPlan
+} from "./taskPlan";
 import type {
   AgentState,
   AgentToolCall,
   AgentToolName,
+  ModelContext,
+  ModelDecision,
   TaskPlanProposal
 } from "./types";
 
@@ -114,6 +127,72 @@ function compatibilityTurnModel(
       };
     }
   };
+}
+
+function createDirectReadToolConfirmationState(): AgentState {
+  const submitted = transition(createInitialAgentState(), {
+    type: "SUBMIT_TASK",
+    task: "只读检查当前系统画像",
+    taskId: "runtime-direct-read-cancellation"
+  });
+  const routed = transition(submitted, {
+    type: "ROUTE_RESOLVED",
+    decision: {
+      status: "supported",
+      reason: "direct read cancellation fixture",
+      skillId: "ai-development-environment",
+      sourceProviderId: "trusted-catalog",
+      userLinks: [],
+      resourceIds: [],
+      clarifications: [],
+      requirements: null
+    }
+  });
+  const validationContext = {
+    tools: defaultTaskPlanToolPolicies,
+    requireInitialConfirmation: true
+  };
+  const createdAt = "2026-08-10T01:00:00.000Z";
+  const draft = createTaskPlan({
+    planId: "direct-read-cancellation-plan",
+    taskId: routed.taskId,
+    proposal: {
+      objective: "只读检查当前系统画像",
+      deliverables: ["安全裁剪的系统画像"],
+      assumptions: [],
+      constraints: ["不得执行写入操作。"],
+      steps: [{
+        id: "read-system-profile",
+        title: "读取系统画像",
+        description: "调用只读工具检查当前系统画像。",
+        kind: "read_tool",
+        tool: "read_system_profile",
+        dependsOn: [],
+        staticInput: {},
+        inputBindings: {},
+        expectedOutput: "安全裁剪的系统画像",
+        risk: "read_only",
+        approval: { required: false, reason: null }
+      }],
+      confirmation: {
+        required: true,
+        reason: "先确认只读检查边界。"
+      }
+    },
+    createdBy: "local-rule",
+    createdAt
+  });
+  const validation = validateTaskPlan(draft, validationContext);
+  expect(validation.valid).toBe(true);
+  return transition(routed, {
+    type: "TASK_PLAN_PROPOSED",
+    plan: prepareTaskPlanForConfirmation(
+      draft,
+      validationContext,
+      createdAt
+    ),
+    validation
+  });
 }
 
 describe("AgentRuntime TaskPlan analysis AgentLoop", () => {
@@ -1052,5 +1131,274 @@ describe("AgentRuntime TaskPlan analysis AgentLoop", () => {
         agentLoop: { status: "plan_revision_proposed" }
       }
     });
+  });
+});
+
+describe("AgentRuntime cancellation outside AgentLoop", () => {
+  it("aborts a hanging verifier and immediately drives a replacement task", async () => {
+    const { jobs, scheduler } = queuedScheduler();
+    let receivedSignal: AbortSignal | undefined;
+    let releaseVerifier!: () => void;
+    let notifyVerifierStarted!: () => void;
+    const verifierStarted = new Promise<void>((resolve) => {
+      notifyVerifierStarted = resolve;
+    });
+    const verifier: AgentVerifier = {
+      verify(_state, signal?: AbortSignal) {
+        receivedSignal = signal;
+        notifyVerifierStarted();
+        return new Promise<null>((resolve, reject) => {
+          releaseVerifier = () => resolve(null);
+          if (signal?.aborted) {
+            reject(new DOMException("Aborted", "AbortError"));
+            return;
+          }
+          signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true }
+          );
+        });
+      }
+    };
+    let taskSequence = 0;
+    const initialState: AgentState = {
+      ...createInitialAgentState(),
+      taskId: "hanging-verifier-task",
+      task: "验证旧任务资源",
+      phase: "verifying",
+      revision: 1,
+      approvedRevision: 1,
+      agentRun: {
+        ...createInitialAgentState().agentRun,
+        status: "executing"
+      }
+    };
+    const runtime = new AgentRuntime({
+      router: new ExtensibleAgentRouter(),
+      planner: new FixedWindowsPlanner(),
+      verifier,
+      scheduler,
+      model: new LocalRuleModelRuntime(),
+      tools: new InMemoryAgentToolExecutor(),
+      policy: new DefaultAgentPolicy(),
+      initialState,
+      stepDelayMs: 0,
+      createTaskId: () => `post-verifier-cancel-${++taskSequence}`
+    });
+
+    runtime.start();
+    const verifierJob = jobs.shift();
+    if (!verifierJob) throw new Error("Verifier job was not scheduled.");
+    const pendingVerifierJob = Promise.resolve(verifierJob());
+    await verifierStarted;
+
+    runtime.dispatch({
+      type: "CANCEL_TASK",
+      cancelledAt: "2026-08-10T08:10:00.000Z"
+    });
+    runtime.dispatch({ type: "RESET" });
+    runtime.dispatch({
+      type: "SUBMIT_TASK",
+      task: "帮我准备一个 Windows 下的 AI 开发环境"
+    });
+    await Promise.resolve();
+
+    expect.soft(receivedSignal).toBeDefined();
+    expect.soft(receivedSignal?.aborted).toBe(true);
+    expect.soft(runtime.getState()).toMatchObject({
+      taskId: "post-verifier-cancel-1",
+      phase: "task_planning"
+    });
+    expect.soft(jobs.length).toBeGreaterThan(0);
+
+    releaseVerifier();
+    await pendingVerifierJob;
+    if (jobs.length > 0) {
+      await runUntil(
+        jobs,
+        runtime,
+        (state) => state.phase === "waiting_task_plan_confirmation"
+      );
+    }
+    expect(runtime.getState()).toMatchObject({
+      taskId: "post-verifier-cancel-1",
+      phase: "waiting_task_plan_confirmation"
+    });
+  });
+
+  it("aborts an in-flight task-planning decision and lets a replacement task start", async () => {
+    const { jobs, scheduler } = queuedScheduler();
+    const planner = new LocalRuleModelRuntime();
+    let decisionCalls = 0;
+    let firstContext: ModelContext | null = null;
+    let firstSignal: AbortSignal | undefined;
+    let resolveFirstDecision!: (decision: ModelDecision) => void;
+    let notifyFirstDecisionStarted!: () => void;
+    const firstDecisionStarted = new Promise<void>((resolve) => {
+      notifyFirstDecisionStarted = resolve;
+    });
+    const firstDecision = new Promise<ModelDecision>((resolve, reject) => {
+      resolveFirstDecision = resolve;
+      // Once production passes an AbortSignal into decide(), this deferred
+      // request must settle immediately when the task is cancelled.
+      const installAbort = (signal: AbortSignal | undefined) => {
+        if (!signal) return;
+        if (signal.aborted) {
+          reject(new DOMException("Aborted", "AbortError"));
+          return;
+        }
+        signal.addEventListener(
+          "abort",
+          () => reject(new DOMException("Aborted", "AbortError")),
+          { once: true }
+        );
+      };
+      queueMicrotask(() => installAbort(firstSignal));
+    });
+    const model: ModelRuntime = {
+      decide(context: ModelContext, signal?: AbortSignal) {
+        decisionCalls += 1;
+        if (decisionCalls === 1) {
+          firstContext = context;
+          firstSignal = signal;
+          notifyFirstDecisionStarted();
+          return firstDecision;
+        }
+        return planner.decide(context);
+      }
+    };
+    let taskSequence = 0;
+    const runtime = new AgentRuntime({
+      router: new ExtensibleAgentRouter(),
+      planner: new FixedWindowsPlanner(),
+      verifier: new MockVerifier(),
+      scheduler,
+      model,
+      tools: new InMemoryAgentToolExecutor(),
+      policy: new DefaultAgentPolicy(),
+      stepDelayMs: 0,
+      createTaskId: () => `replacement-task-${++taskSequence}`
+    });
+
+    runtime.start();
+    runtime.dispatch({
+      type: "SUBMIT_TASK",
+      task: "帮我准备一个 Windows 下的 AI 开发环境"
+    });
+    const firstJob = jobs.shift();
+    if (!firstJob) throw new Error("Initial task-planning job was not scheduled.");
+    const pendingFirstJob = Promise.resolve(firstJob());
+    await firstDecisionStarted;
+
+    runtime.dispatch({
+      type: "CANCEL_TASK",
+      cancelledAt: "2026-08-10T01:01:00.000Z"
+    });
+    runtime.dispatch({ type: "RESET" });
+    runtime.dispatch({
+      type: "SUBMIT_TASK",
+      task: "帮我准备一个 Windows 下的 AI 开发环境"
+    });
+
+    // Current production has no signal on decide(), so release the old request
+    // explicitly to keep the RED test bounded and expose the stale running flag.
+    if (firstContext) {
+      resolveFirstDecision(await planner.decide(firstContext));
+    }
+    await pendingFirstJob;
+
+    expect.soft(firstSignal).toBeDefined();
+    expect.soft(firstSignal?.aborted).toBe(true);
+    if (jobs.length > 0) {
+      await runUntil(
+        jobs,
+        runtime,
+        (state) => state.phase === "waiting_task_plan_confirmation"
+      );
+    }
+    expect.soft(runtime.getState()).toMatchObject({
+      taskId: "replacement-task-2",
+      phase: "waiting_task_plan_confirmation",
+      agentRun: { status: "waiting_approval" }
+    });
+    expect.soft(decisionCalls).toBe(2);
+    expect(runtime.getState().logs.some((entry) => entry.level === "error"))
+      .toBe(false);
+  });
+
+  it("aborts a direct TaskPlan read tool and ignores its late result", async () => {
+    const { jobs, scheduler } = queuedScheduler();
+    let receivedSignal: AbortSignal | undefined;
+    let resolveTool!: (result: {
+      callId: string;
+      tool: "read_system_profile";
+      status: "success";
+      output: Record<string, never>;
+      startedAt: string;
+      finishedAt: string;
+    }) => void;
+    let notifyToolStarted!: () => void;
+    const toolStarted = new Promise<void>((resolve) => {
+      notifyToolStarted = resolve;
+    });
+    const execute = vi.fn((
+      call: AgentToolCall,
+      _state: AgentState,
+      options?: AgentToolExecutionOptions
+    ) => new Promise<{
+      callId: string;
+      tool: "read_system_profile";
+      status: "success";
+      output: Record<string, never>;
+      startedAt: string;
+      finishedAt: string;
+    }>((resolve) => {
+      receivedSignal = options?.signal;
+      resolveTool = resolve;
+      notifyToolStarted();
+    }));
+    const runtime = new AgentRuntime({
+      router: new ExtensibleAgentRouter(),
+      planner: new FixedWindowsPlanner(),
+      verifier: new MockVerifier(),
+      scheduler,
+      model: new LocalRuleModelRuntime(),
+      tools: { execute },
+      policy: new DefaultAgentPolicy(),
+      initialState: createDirectReadToolConfirmationState(),
+      stepDelayMs: 0
+    });
+
+    runtime.start();
+    runtime.dispatch({ type: "CONFIRM_TASK_PLAN", revision: 1 });
+    await runNext(jobs, runtime); // start read-system-profile
+    const toolJob = jobs.shift();
+    if (!toolJob) throw new Error("Direct read-tool job was not scheduled.");
+    const pendingTool = Promise.resolve(toolJob());
+    await toolStarted;
+
+    runtime.dispatch({
+      type: "CANCEL_TASK",
+      cancelledAt: "2026-08-10T01:02:00.000Z"
+    });
+    resolveTool({
+      callId: "late-read-system-profile",
+      tool: "read_system_profile",
+      status: "success",
+      output: {},
+      startedAt: "2026-08-10T01:01:00.000Z",
+      finishedAt: "2026-08-10T01:03:00.000Z"
+    });
+    await pendingTool;
+
+    expect.soft(receivedSignal).toBeDefined();
+    expect.soft(receivedSignal?.aborted).toBe(true);
+    expect(runtime.getState()).toMatchObject({
+      phase: "cancelled",
+      taskPlan: { status: "cancelled" },
+      agentRun: { toolResults: [] }
+    });
+    expect(jobs).toHaveLength(0);
   });
 });

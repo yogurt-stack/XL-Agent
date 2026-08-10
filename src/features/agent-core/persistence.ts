@@ -7,6 +7,7 @@ import type {
   TaskRequirements
 } from "./types";
 import {
+  completeTaskPlanStep,
   defaultTaskPlanToolPolicies,
   parseTaskPlan,
   taskPlanSchema,
@@ -51,6 +52,125 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isPresentableClarification(
+  value: unknown
+): value is ClarificationQuestion {
+  return isRecord(value) &&
+    typeof value.id === "string" &&
+    value.id.trim().length > 0 &&
+    typeof value.prompt === "string" &&
+    value.prompt.trim().length > 0 &&
+    typeof value.reason === "string" &&
+    typeof value.required === "boolean" &&
+    isStringArray(value.options);
+}
+
+function waitingTaskPlanStep(
+  plan: AgentState["taskPlan"]
+) {
+  return plan?.steps.find((step) => step.status === "waiting_user_input") ?? null;
+}
+
+/**
+ * Repairs a snapshot written by the legacy clarification scheduler.
+ *
+ * Older builds could persist the user's answer and advance the clarification
+ * cursor before the corresponding DAG user-decision step became ready. Once
+ * that step was later marked as waiting, the restored UI had neither a visible
+ * question nor an executor command that could make progress. The persisted
+ * answer is sufficient audit evidence to finish only that exact decision step;
+ * every other malformed clarification state is rejected instead of guessed.
+ */
+function repairPersistedClarification(
+  value: Record<string, unknown>
+): Record<string, unknown> | null {
+  if (value.phase !== "clarifying") return value;
+  if (
+    !Array.isArray(value.clarifications) ||
+    !Number.isInteger(value.clarificationIndex) ||
+    (value.clarificationIndex as number) < 0 ||
+    !isRecord(value.answers)
+  ) {
+    return null;
+  }
+
+  const clarifications = value.clarifications;
+  const plan = value.taskPlan as AgentState["taskPlan"];
+  const waitingStep = waitingTaskPlanStep(plan);
+
+  if (waitingStep?.kind === "user_decision") {
+    const questionId = waitingStep.staticInput.questionId;
+    if (typeof questionId !== "string" || !questionId.trim()) {
+      // Repository selection is rendered on the result surface, not by the
+      // clarification form. Do not reinterpret or auto-complete that protocol.
+      return null;
+    }
+
+    const questionIndex = clarifications.findIndex(
+      (question) =>
+        isPresentableClarification(question) && question.id === questionId
+    );
+    const answer = value.answers[questionId];
+    if (questionIndex >= 0 && typeof answer === "string" && answer.trim()) {
+      if (!plan || !isRecord(value.agentRun) || !isRecord(value.workspace)) {
+        return null;
+      }
+      try {
+        const repairedPlan = completeTaskPlanStep(plan, {
+          stepId: waitingStep.id,
+          completedAt: plan.updatedAt,
+          result: {
+            reference: `user-answer:${questionId}`,
+            summary: "已从持久化快照恢复用户回答。",
+            output: { questionId, answer }
+          }
+        });
+        const validation = validateTaskPlan(repairedPlan, {
+          tools: defaultTaskPlanToolPolicies,
+          requireInitialConfirmation: true
+        });
+        if (!validation.valid) return null;
+
+        const completed = repairedPlan.status === "completed";
+        return {
+          ...value,
+          phase: completed ? "result" : "planning",
+          clarificationIndex: Math.min(
+            questionIndex + 1,
+            clarifications.length
+          ),
+          taskPlan: repairedPlan,
+          taskPlanValidation: validation,
+          agentRun: {
+            ...value.agentRun,
+            status: completed ? "complete" : "thinking"
+          },
+          workspace: {
+            ...value.workspace,
+            nextAction: completed
+              ? "已恢复持久化的澄清答案，Task Plan 已完成。"
+              : "已恢复持久化的澄清答案，正在继续执行 Task Plan。"
+          }
+        };
+      } catch {
+        return null;
+      }
+    }
+
+    const activeQuestion = clarifications[value.clarificationIndex as number];
+    return isPresentableClarification(activeQuestion) &&
+        activeQuestion.id === questionId
+      ? value
+      : null;
+  }
+
+  // Dynamic Agent Loop/resource-plan clarifications do not store a questionId
+  // on the Task Plan step. Their currently indexed question is the resumable
+  // protocol, so preserve it exactly when it is renderable.
+  const activeQuestion = clarifications[value.clarificationIndex as number];
+  return isPresentableClarification(activeQuestion) ? value : null;
 }
 
 function isLocalRepositorySummary(value: unknown) {
@@ -412,7 +532,12 @@ export function isRestorableAgentState(value: unknown): value is AgentState {
     !isGitHubPublishState(value.githubPublish) ||
     !Array.isArray(value.logs) ||
     !Array.isArray(value.clarifications) ||
+    !value.clarifications.every(isPresentableClarification) ||
+    !Number.isInteger(value.clarificationIndex) ||
+    (value.clarificationIndex as number) < 0 ||
+    (value.clarificationIndex as number) > value.clarifications.length ||
     !isRecord(value.answers) ||
+    !Object.values(value.answers).every((answer) => typeof answer === "string") ||
     !Array.isArray(value.agentRun.decisions) ||
     !Array.isArray(value.agentRun.toolResults) ||
     !Array.isArray(value.agentRun.policyAudit) ||
@@ -425,6 +550,25 @@ export function isRestorableAgentState(value: unknown): value is AgentState {
       value.agentB.status !== "failed")
   ) {
     return false;
+  }
+
+  if (value.phase === "clarifying") {
+    const activeQuestion = value.clarifications[value.clarificationIndex as number];
+    if (!isPresentableClarification(activeQuestion)) return false;
+
+    const waitingStep = waitingTaskPlanStep(
+      value.taskPlan as AgentState["taskPlan"]
+    );
+    if (waitingStep?.kind === "user_decision") {
+      const questionId = waitingStep.staticInput.questionId;
+      if (
+        typeof questionId !== "string" ||
+        questionId !== activeQuestion.id ||
+        typeof value.answers[questionId] === "string"
+      ) {
+        return false;
+      }
+    }
   }
 
   return value.resources.every(
@@ -604,6 +748,11 @@ export function normalizeRestorableAgentState(
     }
     candidate = { ...(candidate as Record<string, unknown>), routeDecision };
   }
+
+  candidate = repairPersistedClarification(
+    candidate as Record<string, unknown>
+  );
+  if (candidate === null) return null;
 
   return isRestorableAgentState(candidate) ? candidate : null;
 }

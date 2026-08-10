@@ -203,6 +203,9 @@ export const agentUserEventSchema = z.discriminatedUnion("type", [
     task: z.string().trim().min(1).max(4000)
   }).strict(),
   z.object({
+    type: z.literal("RETRY_ROUTING")
+  }).strict(),
+  z.object({
     type: z.literal("CONFIRM_TASK_PLAN"),
     revision: z.number().int().positive()
   }).strict(),

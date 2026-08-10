@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   DefaultAgentPolicy,
   InMemoryAgentToolExecutor,
@@ -8,6 +9,10 @@ import {
   isGitHubRepositorySearchOutput,
   latestGitHubRepositorySearchResult
 } from "../src/features/agent-core/githubSearch";
+import {
+  LlmCandidateSelector,
+  LlmIntentClassifier
+} from "../src/features/agent-core/intentClassifier";
 import { LocalRuleModelRuntime } from "../src/features/agent-core/localRuleModel";
 import {
   ModelConnectionController,
@@ -23,10 +28,11 @@ import {
   AgentRuntime,
   createTimeoutScheduler
 } from "../src/features/agent-core/runtime";
-import type {
-  AgentRuntimeSnapshot,
-  PlatformCapabilitySummary,
-  RuntimePersistenceState
+import {
+  AGENT_RUNTIME_SNAPSHOT_PROTOCOL_VERSION,
+  type AgentRuntimeSnapshot,
+  type PlatformCapabilitySummary,
+  type RuntimePersistenceState
 } from "../src/features/agent-core/runtimeBridge";
 import { createSystemProfileToolOutput } from "../src/features/agent-core/systemProfile";
 import {
@@ -128,6 +134,8 @@ function workspaceExportError(
  */
 export class AgentRuntimeHost {
   private runtime!: AgentRuntime;
+  private readonly runtimeInstanceId = randomUUID();
+  private snapshotSequence = 0;
   private persistence: RuntimePersistenceState = {
     status: "loading",
     restoredAt: null,
@@ -213,7 +221,8 @@ export class AgentRuntimeHost {
 
     const localModel = new LocalRuleModelRuntime();
     const remoteModel = new RemoteLlmModelRuntime({
-      requestDecision: (context) => this.options.modelClient.requestDecision(context),
+      requestDecision: (context, signal) =>
+        this.options.modelClient.requestDecision(context, signal),
       requestTurn: (context, signal) =>
         this.options.modelClient.requestTurn(context, signal)
     });
@@ -225,6 +234,68 @@ export class AgentRuntimeHost {
         this.modelConnection.recordFallback(new ModelConnectionRequestError(detail));
       }
     });
+    const intentClassifier = new LlmIntentClassifier(
+      async (context, signal) => {
+        if (!this.modelConnection.shouldAttemptRemote()) {
+          const connection = this.modelConnection.getState();
+          throw new ModelConnectionRequestError(
+            connection.error ?? {
+              code: "MODEL_UNCONFIGURED",
+              message: "远程模型未配置，语义路由将使用确定性规则结果。",
+              retriable: false
+            }
+          );
+        }
+        try {
+          const decision =
+            await this.options.modelClient.requestIntentClassification(
+              context,
+              signal
+            );
+          this.modelConnection.recordRemoteSuccess(decision);
+          return decision;
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          this.modelConnection.recordFallback(
+            new ModelConnectionRequestError(
+              toMainModelConnectionError(error)
+            )
+          );
+          throw error;
+        }
+      }
+    );
+    const candidateSelector = new LlmCandidateSelector(
+      async (input, signal) => {
+        if (!this.modelConnection.shouldAttemptRemote()) {
+          const connection = this.modelConnection.getState();
+          throw new ModelConnectionRequestError(
+            connection.error ?? {
+              code: "MODEL_UNCONFIGURED",
+              message: "远程模型未配置，GitHub 候选将保持 API 原始排序。",
+              retriable: false
+            }
+          );
+        }
+        try {
+          const decision =
+            await this.options.modelClient.requestCandidateSelection(
+              input,
+              signal
+            );
+          this.modelConnection.recordRemoteSuccess(decision);
+          return decision;
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          this.modelConnection.recordFallback(
+            new ModelConnectionRequestError(
+              toMainModelConnectionError(error)
+            )
+          );
+          throw error;
+        }
+      }
+    );
 
     const localRepositoryTools = createLocalRepositoryAgentTools(
       (repositoryHandleId) =>
@@ -245,13 +316,15 @@ export class AgentRuntimeHost {
         signal: executionOptions?.signal
       }),
       localRepositoryTools,
-      githubRepositoryTools
+      githubRepositoryTools,
+      candidateSelector
     );
 
     this.runtime = new AgentRuntime({
       router: new ExtensibleAgentRouter(
         this.domainSkills,
-        this.sourceProviders
+        this.sourceProviders,
+        intentClassifier
       ),
       planner: new FixedWindowsPlanner(),
       verifier: new ElectronArtifactVerifier(
@@ -267,6 +340,9 @@ export class AgentRuntimeHost {
       stepDelayMs: this.options.stepDelayMs,
       createTaskId: this.options.createTaskId
     });
+
+    this.runtime.subscribe((state) => this.handleRuntimeState(state));
+    this.modelConnection.subscribe(() => this.emitSnapshot());
 
     const restored = await this.options.store.loadLatestUnfinished();
     if (restored) {
@@ -288,14 +364,15 @@ export class AgentRuntimeHost {
     }
     if (this.persistence.status === "loading") this.persistence.status = "ready";
 
-    this.runtime.subscribe((state) => this.handleRuntimeState(state));
-    this.modelConnection.subscribe(() => this.emitSnapshot());
     this.runtime.start();
     this.emitSnapshot();
   }
 
   getSnapshot(): AgentRuntimeSnapshot {
     return {
+      protocolVersion: AGENT_RUNTIME_SNAPSHOT_PROTOCOL_VERSION,
+      runtimeInstanceId: this.runtimeInstanceId,
+      sequence: ++this.snapshotSequence,
       state: this.runtime.getState(),
       modelConnection: this.modelConnection.getState(),
       persistence: { ...this.persistence },
@@ -339,6 +416,24 @@ export class AgentRuntimeHost {
         "GitHub 发布正在执行；完成或失败前不能派发其他任务事件。"
       );
     }
+    if (event.type === "RESET") {
+      const taskIsStillActive =
+        state.taskId !== "unassigned" &&
+        !["intake", "unsupported", "result", "handoff", "cancelled"].includes(
+          state.phase
+        );
+      if (taskIsStillActive) {
+        await this.downloadAdapter.cancelTask(state.taskId);
+        this.runtime.dispatch({
+          type: "CANCEL_TASK",
+          cancelledAt: new Date().toISOString()
+        });
+        // RESET itself intentionally returns to the unassigned intake state and is
+        // therefore not persisted. Commit the terminal snapshot first so a later
+        // launch cannot resurrect the task the user just abandoned.
+        await this.waitForPersistence();
+      }
+    }
     if (event.type === "PAUSE_DOWNLOAD") {
       if (
         await this.downloadAdapter.pause(
@@ -370,7 +465,10 @@ export class AgentRuntimeHost {
       return this.getSnapshot();
     }
     if (event.type === "CANCEL_TASK") {
+      this.runtime.dispatch(event);
       await this.downloadAdapter.cancelTask(state.taskId);
+      await this.waitForPersistence();
+      return this.getSnapshot();
     }
     if (event.type === "PREPARE_GITHUB_REPOSITORY") {
       const searchResult = latestGitHubRepositorySearchResult(state);
@@ -923,6 +1021,17 @@ export class AgentRuntimeHost {
     if (state.phase === "intake" || state.taskId === "unassigned" || !state.task) return;
     const shouldGenerateManifest =
       !this.suppressNextManifestGeneration &&
+      state.phase !== "cancelled" &&
+      [
+        "waiting_approval",
+        "downloading",
+        "awaiting_failure_action",
+        "verifying",
+        "exporting",
+        "awaiting_export_retry",
+        "replanning",
+        "handoff"
+      ].includes(state.phase) &&
       ![
         "local-development-environment-inspection",
         "local-environment-compatibility-assessment"
@@ -981,6 +1090,8 @@ export class AgentRuntimeHost {
             this.suppressNextManifestGeneration = true;
             this.runtime.reportExternalEvent({
               type: "MANIFEST_SNAPSHOT_WRITTEN",
+              taskId: manifest.taskId,
+              planRevision: manifest.planRevision,
               manifestRevision: manifest.manifestRevision,
               rootPath: manifest.rootPath,
               status: manifest.status

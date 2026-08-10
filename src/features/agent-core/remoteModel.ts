@@ -76,9 +76,12 @@ export class RemoteLlmModelRuntime implements ModelRuntime {
     return this.transport.requestTurn(context, signal);
   }
 
-  async decide(context: ModelContext): Promise<ModelDecision> {
+  async decide(
+    context: ModelContext,
+    signal?: AbortSignal
+  ): Promise<ModelDecision> {
     const decision = parseRemoteDecision(
-      await this.transport.requestDecision(context)
+      await this.transport.requestDecision(context, signal)
     );
     const action = decision.action;
     if (context.state.phase === "task_planning") {
@@ -235,18 +238,22 @@ export class FallbackModelRuntime implements ModelRuntime {
     private readonly observer: FallbackModelObserver = {}
   ) {}
 
-  async decide(context: ModelContext): Promise<ModelDecision> {
+  async decide(
+    context: ModelContext,
+    signal?: AbortSignal
+  ): Promise<ModelDecision> {
     if (this.observer.shouldAttemptPrimary && !this.observer.shouldAttemptPrimary()) {
-      return this.fallback.decide(context);
+      return this.fallback.decide(context, signal);
     }
 
     try {
-      const decision = await this.primary.decide(context);
+      const decision = await this.primary.decide(context, signal);
       this.observer.onPrimarySuccess?.(decision);
       return decision;
     } catch (error) {
+      if (signal?.aborted) throw error;
       this.observer.onPrimaryFailure?.(error);
-      return this.fallback.decide(context);
+      return this.fallback.decide(context, signal);
     }
   }
 
