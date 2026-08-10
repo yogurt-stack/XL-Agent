@@ -62,13 +62,16 @@ export class ElectronArtifactVerifier implements AgentVerifier {
   ) {}
 
   async verify(
-    state: AgentState
+    state: AgentState,
+    signal?: AbortSignal
   ): Promise<Extract<AgentEvent, { type: "VERIFY_RESOURCES" }> | null> {
     if (state.phase !== "verifying") return null;
+    signal?.throwIfAborted();
     const artifacts = await this.store.listDownloadArtifacts(
       state.taskId,
       state.revision
     );
+    signal?.throwIfAborted();
     const byResourceId = new Map(
       artifacts.map((artifact) => [artifact.resourceId, artifact])
     );
@@ -76,6 +79,7 @@ export class ElectronArtifactVerifier implements AgentVerifier {
     for (const resource of state.resources.filter(
       (candidate) => candidate.selected
     )) {
+      signal?.throwIfAborted();
       const artifact = byResourceId.get(resource.id);
       if (!artifact) {
         return failure(
@@ -86,11 +90,13 @@ export class ElectronArtifactVerifier implements AgentVerifier {
         );
       }
       const validation = await this.validateArtifact(resource, artifact);
+      signal?.throwIfAborted();
       if (validation) return validation;
       const signatureValidation = await this.validateSignature(
         resource,
         artifact
       );
+      signal?.throwIfAborted();
       if (signatureValidation) return signatureValidation;
       if (artifact.verificationStatus === "downloaded") {
         await this.store.updateDownloadArtifactVerification(

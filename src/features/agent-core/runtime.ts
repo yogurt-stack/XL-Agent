@@ -87,11 +87,26 @@ export class AgentRuntime implements AgentRuntimePort {
   private cancelScheduledStep: (() => void) | null = null;
   private started = false;
   private workVersion = 0;
-  private modelStepRunning = false;
-  private agentLoopRunning = false;
-  private activeAgentLoopAbortController: AbortController | null = null;
-  private toolStepRunning = false;
-  private verifierStepRunning = false;
+  private activeRoutingWork: {
+    version: number;
+    controller: AbortController;
+  } | null = null;
+  private activeModelWork: {
+    version: number;
+    controller: AbortController;
+  } | null = null;
+  private activeAgentLoopWork: {
+    version: number;
+    controller: AbortController;
+  } | null = null;
+  private activeToolWork: {
+    version: number;
+    controller: AbortController;
+  } | null = null;
+  private activeVerifierWork: {
+    version: number;
+    controller: AbortController;
+  } | null = null;
   private restoredFromPersistence: boolean;
   private readonly stepDelayMs: number;
   private readonly downloadTool: RuntimeDownloadTool;
@@ -244,22 +259,41 @@ export class AgentRuntime implements AgentRuntimePort {
     if (
       !this.started ||
       this.cancelScheduledStep ||
-      this.modelStepRunning ||
-      this.agentLoopRunning ||
-      this.toolStepRunning ||
-      this.verifierStepRunning
+      this.activeRoutingWork ||
+      this.activeModelWork ||
+      this.activeAgentLoopWork ||
+      this.activeToolWork ||
+      this.activeVerifierWork
     ) return;
 
     if (this.state.phase === "routing") {
-      const event = this.dependencies.router.route(this.state);
-      if (!event) return;
-      const version = this.workVersion;
-      this.cancelScheduledStep = this.dependencies.scheduler.schedule(() => {
-        this.cancelScheduledStep = null;
-        if (!this.started || version !== this.workVersion) return;
-        this.applyEvent(event);
-        this.drive();
-      }, this.stepDelayMs);
+      if (this.dependencies.router.routeWithIntent) {
+        const routingWork = {
+          version: this.workVersion,
+          controller: new AbortController()
+        };
+        this.activeRoutingWork = routingWork;
+        void this.runRoutingStep(routingWork);
+        return;
+      }
+      try {
+        const event = this.dependencies.router.route(this.state);
+        this.applyEvent(
+          event ?? {
+            type: "ROUTE_FAILED",
+            reason: "本地路由器未返回路由结果。"
+          }
+        );
+      } catch (error) {
+        this.applyEvent({
+          type: "ROUTE_FAILED",
+          reason:
+            error instanceof Error
+              ? error.message
+              : "本地路由器执行失败。"
+        });
+      }
+      this.drive();
       return;
     }
 
@@ -563,7 +597,11 @@ export class AgentRuntime implements AgentRuntimePort {
       purpose: step.description,
       call: command.call
     };
-    this.toolStepRunning = true;
+    const toolWork = {
+      version,
+      controller: new AbortController()
+    };
+    this.activeToolWork = toolWork;
     try {
       const policyDecision = this.dependencies.policy.evaluate(
         action,
@@ -584,7 +622,8 @@ export class AgentRuntime implements AgentRuntimePort {
       }
       const result = await this.dependencies.tools.execute(
         command.call,
-        this.state
+        this.state,
+        { signal: toolWork.controller.signal }
       );
       if (!this.isCurrentWork(version)) return;
       this.applyEvent({ type: "MODEL_TOOL_COMPLETED", result });
@@ -600,8 +639,10 @@ export class AgentRuntime implements AgentRuntimePort {
         result.output
       );
     } finally {
-      this.toolStepRunning = false;
-      if (this.isCurrentWork(version)) this.drive();
+      if (this.activeToolWork === toolWork) {
+        this.activeToolWork = null;
+        if (this.started) this.drive();
+      }
     }
   }
 
@@ -895,9 +936,12 @@ export class AgentRuntime implements AgentRuntimePort {
         }
       }));
 
-    const loopController = new AbortController();
-    this.activeAgentLoopAbortController = loopController;
-    this.agentLoopRunning = true;
+    const loopWork = {
+      version,
+      controller: new AbortController()
+    };
+    const loopController = loopWork.controller;
+    this.activeAgentLoopWork = loopWork;
     this.applyEvent({
       type: "AGENT_LOOP_STARTED",
       runId,
@@ -1168,11 +1212,10 @@ export class AgentRuntime implements AgentRuntimePort {
       this.failRunningTaskPlanStep(stepId, reason);
       this.applyEvent({ type: "MODEL_RUNTIME_FAILED", reason });
     } finally {
-      if (this.activeAgentLoopAbortController === loopController) {
-        this.activeAgentLoopAbortController = null;
+      if (this.activeAgentLoopWork === loopWork) {
+        this.activeAgentLoopWork = null;
+        if (this.started) this.drive();
       }
-      this.agentLoopRunning = false;
-      if (this.isCurrentWork(version)) this.drive();
     }
   }
 
@@ -1574,16 +1617,23 @@ export class AgentRuntime implements AgentRuntimePort {
     const policy = this.dependencies.policy;
     if (!model) return;
 
-    this.modelStepRunning = true;
+    const modelWork = {
+      version,
+      controller: new AbortController()
+    };
+    this.activeModelWork = modelWork;
     try {
       const availableTools = this.availableToolsForCurrentState();
-      const decision = parseModelDecision(await model.decide({
-        state: this.state,
-        step: this.state.agentRun.step,
-        maxSteps: this.state.agentRun.maxSteps,
-        availableTools,
-        toolResults: this.state.agentRun.toolResults
-      }));
+      const decision = parseModelDecision(await model.decide(
+        {
+          state: this.state,
+          step: this.state.agentRun.step,
+          maxSteps: this.state.agentRun.maxSteps,
+          availableTools,
+          toolResults: this.state.agentRun.toolResults
+        },
+        modelWork.controller.signal
+      ));
       if (!this.isCurrentWork(version)) return;
 
       this.applyEvent({ type: "MODEL_DECISION_RECORDED", decision });
@@ -1603,7 +1653,9 @@ export class AgentRuntime implements AgentRuntimePort {
       if (action.type === "propose_task_plan") {
         this.receiveTaskPlanProposal(action, decision.provider, availableTools);
       } else if (action.type === "call_tool") {
-        const result = await tools.execute(action.call, this.state);
+        const result = await tools.execute(action.call, this.state, {
+          signal: modelWork.controller.signal
+        });
         if (!this.isCurrentWork(version)) return;
         this.applyEvent({ type: "MODEL_TOOL_COMPLETED", result });
       } else if (action.type === "ask_clarification") {
@@ -1690,8 +1742,10 @@ export class AgentRuntime implements AgentRuntimePort {
         });
       }
     } finally {
-      this.modelStepRunning = false;
-      if (this.isCurrentWork(version)) this.drive();
+      if (this.activeModelWork === modelWork) {
+        this.activeModelWork = null;
+        if (this.started) this.drive();
+      }
     }
   }
 
@@ -1918,7 +1972,11 @@ export class AgentRuntime implements AgentRuntimePort {
       call
     };
 
-    this.toolStepRunning = true;
+    const toolWork = {
+      version,
+      controller: new AbortController()
+    };
+    this.activeToolWork = toolWork;
     try {
       const policyDecision = this.dependencies.policy.evaluate(action, this.state);
       this.applyEvent({
@@ -1931,7 +1989,9 @@ export class AgentRuntime implements AgentRuntimePort {
         return;
       }
 
-      const result = await this.dependencies.tools.execute(action.call, this.state);
+      const result = await this.dependencies.tools.execute(action.call, this.state, {
+        signal: toolWork.controller.signal
+      });
       if (!this.isCurrentWork(version)) return;
       this.applyEvent({ type: "MODEL_TOOL_COMPLETED", result });
 
@@ -2003,8 +2063,10 @@ export class AgentRuntime implements AgentRuntimePort {
         }
       }
     } finally {
-      this.toolStepRunning = false;
-      if (this.isCurrentWork(version)) this.drive();
+      if (this.activeToolWork === toolWork) {
+        this.activeToolWork = null;
+        if (this.started) this.drive();
+      }
     }
   }
 
@@ -2024,7 +2086,11 @@ export class AgentRuntime implements AgentRuntimePort {
       }
     };
 
-    this.toolStepRunning = true;
+    const toolWork = {
+      version,
+      controller: new AbortController()
+    };
+    this.activeToolWork = toolWork;
     try {
       const policyDecision = this.dependencies.policy.evaluate(action, this.state);
       this.applyEvent({
@@ -2038,7 +2104,9 @@ export class AgentRuntime implements AgentRuntimePort {
       }
 
       this.applyEvent({ type: "WORKSPACE_EXPORT_STARTED" });
-      const result = await this.dependencies.tools.execute(action.call, this.state);
+      const result = await this.dependencies.tools.execute(action.call, this.state, {
+        signal: toolWork.controller.signal
+      });
       if (!this.isCurrentWork(version)) return;
       this.applyEvent({ type: "MODEL_TOOL_COMPLETED", result });
       if (result.status === "error") {
@@ -2086,15 +2154,24 @@ export class AgentRuntime implements AgentRuntimePort {
         }
       }
     } finally {
-      this.toolStepRunning = false;
-      if (this.isCurrentWork(version)) this.drive();
+      if (this.activeToolWork === toolWork) {
+        this.activeToolWork = null;
+        if (this.started) this.drive();
+      }
     }
   }
 
   private async runVerifierStep(version: number) {
-    this.verifierStepRunning = true;
+    const verifierWork = {
+      version,
+      controller: new AbortController()
+    };
+    this.activeVerifierWork = verifierWork;
     try {
-      const event = await this.dependencies.verifier.verify(this.state);
+      const event = await this.dependencies.verifier.verify(
+        this.state,
+        verifierWork.controller.signal
+      );
       if (!event || !this.isCurrentWork(version)) return;
       this.applyEvent(event);
       if (this.state.phase === "exporting") {
@@ -2142,8 +2219,47 @@ export class AgentRuntime implements AgentRuntimePort {
         }
       }
     } finally {
-      this.verifierStepRunning = false;
-      if (this.isCurrentWork(version)) this.drive();
+      if (this.activeVerifierWork === verifierWork) {
+        this.activeVerifierWork = null;
+        if (this.started) this.drive();
+      }
+    }
+  }
+
+  private async runRoutingStep(routingWork: {
+    version: number;
+    controller: AbortController;
+  }) {
+    try {
+      const event = await this.dependencies.router.routeWithIntent?.(
+        this.state,
+        routingWork.controller.signal
+      );
+      if (!this.isCurrentWork(routingWork.version)) return;
+      this.applyEvent(
+        event ?? {
+          type: "ROUTE_FAILED",
+          reason: "语义路由器未返回路由结果。"
+        }
+      );
+    } catch (error) {
+      if (
+        this.isCurrentWork(routingWork.version) &&
+        !routingWork.controller.signal.aborted
+      ) {
+        this.applyEvent({
+          type: "ROUTE_FAILED",
+          reason:
+            error instanceof Error
+              ? error.message
+              : "语义路由器执行失败。"
+        });
+      }
+    } finally {
+      if (this.activeRoutingWork === routingWork) {
+        this.activeRoutingWork = null;
+        if (this.started) this.drive();
+      }
     }
   }
 
@@ -2160,8 +2276,16 @@ export class AgentRuntime implements AgentRuntimePort {
 
   private invalidatePendingWork() {
     this.workVersion += 1;
-    this.activeAgentLoopAbortController?.abort();
-    this.activeAgentLoopAbortController = null;
+    this.activeRoutingWork?.controller.abort();
+    this.activeRoutingWork = null;
+    this.activeModelWork?.controller.abort();
+    this.activeModelWork = null;
+    this.activeAgentLoopWork?.controller.abort();
+    this.activeAgentLoopWork = null;
+    this.activeToolWork?.controller.abort();
+    this.activeToolWork = null;
+    this.activeVerifierWork?.controller.abort();
+    this.activeVerifierWork = null;
     this.cancelScheduledStep?.();
     this.cancelScheduledStep = null;
   }

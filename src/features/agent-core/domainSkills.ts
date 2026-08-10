@@ -46,6 +46,7 @@ export interface DomainSkill {
   id: string;
   displayName: string;
   sourceProviderId?: string;
+  describeForModel?(): string;
   matches(goal: UserGoal, state?: AgentState): boolean;
   clarify(goal: UserGoal, profile: SystemProfile): ClarificationQuestion[];
   buildRequirements(context: PlanningContext): ResourceRequirement[];
@@ -196,6 +197,10 @@ implements DomainSkill {
   readonly displayName = "本地环境兼容性评估";
   readonly sourceProviderId = "electron-main";
 
+  describeForModel() {
+    return "只读检查本机开发工具，并评估 PyTorch、TensorFlow、CUDA、Qt、OCCT 等目标技术与当前环境的兼容程度；不安装或下载。";
+  }
+
   matches(goal: UserGoal) {
     return goal.links.length === 0 &&
       isLocalEnvironmentCompatibilityAssessmentGoal(goal.text);
@@ -259,6 +264,10 @@ implements DomainSkill {
   readonly displayName = "本地项目环境兼容性分析";
   readonly sourceProviderId = "local-git";
 
+  describeForModel() {
+    return "读取用户已导入本地仓库的固定 HEAD 与项目清单，对比本机环境并报告运行或构建缺口；需要已有本地仓库句柄。";
+  }
+
   matches(goal: UserGoal, state?: AgentState) {
     return goal.links.length === 0 &&
       Boolean(state?.localRepository) &&
@@ -316,6 +325,10 @@ implements DomainSkill {
   readonly displayName = "GitHub 项目环境兼容性分析";
   readonly sourceProviderId = "github-api";
 
+  describeForModel() {
+    return "读取已经选定并固定 commit 的 GitHub 仓库白名单文件，对比本机环境；需要已有 GitHub 仓库句柄。";
+  }
+
   matches(goal: UserGoal, state?: AgentState) {
     return goal.links.length === 0 &&
       Boolean(state?.githubRepository) &&
@@ -349,6 +362,10 @@ export class LocalDevelopmentEnvironmentInspectionSkill implements DomainSkill {
   readonly displayName = "本地开发环境只读盘点";
   readonly sourceProviderId = "electron-main";
 
+  describeForModel() {
+    return "只读盘点本机 Node.js、npm、Python、pip、Git、CUDA 等开发工具版本；不评估项目、不安装或下载。";
+  }
+
   matches(goal: UserGoal) {
     return goal.links.length === 0 &&
       isLocalDevelopmentEnvironmentInspectionGoal(goal.text);
@@ -380,16 +397,22 @@ export class GitHubProjectDiscoverySkill implements DomainSkill {
   readonly displayName = "GitHub 开源项目检索";
   readonly sourceProviderId = "github-api";
 
+  describeForModel() {
+    return "从 GitHub 只读检索或定位公开开源项目，可按仓库名、主题、热度和时间窗口查询，之后由用户选择仓库。";
+  }
+
   matches(goal: UserGoal) {
     const task = normalizedTask(goal.text);
     const hasGitHubRepositoryLink = goal.links.some(
       (link) => githubFullNameFromUrl(link) !== null
     );
-    const hasSpecificRepositoryIntent =
-      inferGitHubSearchIntent(goal).mode !== "discovery";
-    return hasGitHubRepositoryLink || (
+    const searchIntent = inferGitHubSearchIntent(goal);
+    const hasSpecificRepositoryIntent = searchIntent.mode !== "discovery";
+    // 明确仓库名和 owner/repo 本身已经是高置信度 GitHub 语义，不应再
+    // 强迫用户额外说出 “GitHub”。这也让 tau / 寻找tau 直接进入 name
+    // 搜索，避免误套近期热门项目的时间窗口。
+    return hasGitHubRepositoryLink || hasSpecificRepositoryIntent || (
       task.includes("github") && (
-        hasSpecificRepositoryIntent ||
         [
           "项目",
           "仓库",
@@ -520,6 +543,10 @@ export class AiDevelopmentEnvironmentSkill implements DomainSkill {
   readonly displayName = "AI 开发环境";
   readonly sourceProviderId = "trusted-catalog";
 
+  describeForModel() {
+    return "为 Windows 开发或 AI 环境准备可信目录中的安装资源与工作区；下载和本地写入必须另行审批。";
+  }
+
   matches(goal: UserGoal) {
     const task = ` ${normalizedTask(goal.text)} `;
     return (
@@ -578,6 +605,10 @@ export class ResearchDataEnvironmentSkill implements DomainSkill {
   readonly id = "research-data-environment";
   readonly displayName = "科研数据环境";
   readonly sourceProviderId = "trusted-catalog";
+
+  describeForModel() {
+    return "为科研数据分析准备受控的 Python、编辑器、版本管理等可信资源与工作区；下载和写入必须另行审批。";
+  }
 
   matches(goal: UserGoal) {
     const task = normalizedTask(goal.text);

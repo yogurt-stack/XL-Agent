@@ -20,7 +20,7 @@ import type { AgentToolName, TaskPlanProposal } from "./types";
  * 具体实现可以是本地规则模型或后续接入的远程 LLM。
  */
 export interface ModelRuntime {
-  decide(context: ModelContext): Promise<ModelDecision>;
+  decide(context: ModelContext, signal?: AbortSignal): Promise<ModelDecision>;
   generateTurn?(
     context: AgentTurnContext<AgentToolName, unknown, TaskPlanProposal>,
     signal: AbortSignal
@@ -28,7 +28,7 @@ export interface ModelRuntime {
 }
 
 export interface RemoteModelTransport {
-  requestDecision(context: ModelContext): Promise<unknown>;
+  requestDecision(context: ModelContext, signal?: AbortSignal): Promise<unknown>;
   requestTurn?(
     context: AgentTurnContext<AgentToolName, unknown, TaskPlanProposal>,
     signal: AbortSignal
@@ -60,6 +60,10 @@ export interface AgentScheduler {
 
 export interface AgentRouter {
   route(state: AgentState): Extract<AgentEvent, { type: "ROUTE_RESOLVED" }> | null;
+  routeWithIntent?(
+    state: AgentState,
+    signal: AbortSignal
+  ): Promise<Extract<AgentEvent, { type: "ROUTE_RESOLVED" }> | null>;
   resolveRequirements?(state: AgentState): TaskRequirements | null;
 }
 
@@ -70,7 +74,8 @@ export interface AgentPlanner {
 
 export interface AgentVerifier {
   verify(
-    state: AgentState
+    state: AgentState,
+    signal?: AbortSignal
   ):
     | Extract<AgentEvent, { type: "VERIFY_RESOURCES" }>
     | null

@@ -260,6 +260,49 @@ describe("clarification view", () => {
     expect(html).not.toContain("正在生成资源计划");
   });
 
+  it("shows an explicit exit action without a no-op retry while routing", () => {
+    const state = transition(createInitialAgentState(), {
+      type: "SUBMIT_TASK",
+      task: "检查本机开发环境",
+      taskId: "routing-view"
+    });
+
+    const html = renderToStaticMarkup(createElement(ClarificationView, {
+      dispatch: async (event) => transition(state, event),
+      onNavigate: () => undefined,
+      onRetryLocally: async () => state,
+      state
+    }));
+
+    expect(html).toContain("正在路由任务");
+    expect(html).not.toContain("重新同步并路由");
+    expect(html).toContain("放弃并返回任务入口");
+  });
+
+  it("renders a dedicated local route failure instead of a model failure", () => {
+    const routing = transition(createInitialAgentState(), {
+      type: "SUBMIT_TASK",
+      task: "检查本机开发环境",
+      taskId: "routing-failure-view"
+    });
+    const failed = transition(routing, {
+      type: "ROUTE_FAILED",
+      reason: "synthetic route failure"
+    });
+
+    const html = renderToStaticMarkup(createElement(ClarificationView, {
+      dispatch: async (event) => transition(failed, event),
+      onNavigate: () => undefined,
+      onRetryLocally: async () => failed,
+      state: failed
+    }));
+
+    expect(html).toContain("任务路由失败，但任务内容仍已保留");
+    expect(html).toContain("synthetic route failure");
+    expect(html).toContain("重新执行路由");
+    expect(html).not.toContain("使用本地模型重新开始");
+  });
+
   it("reports an unrenderable GitHub decision as a plan recovery instead of an API failure", () => {
     let state = transition(createInitialAgentState(), {
       type: "SUBMIT_TASK",

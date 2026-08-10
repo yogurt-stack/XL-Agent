@@ -478,6 +478,48 @@ function requestNextPlannedClarification(
   }
 }
 
+function requestedTaskPlanClarification(
+  plan: AgentState["taskPlan"],
+  questionId: string | undefined
+) {
+  if (!plan || !questionId || plan.status !== "waiting_user_input") {
+    return false;
+  }
+  return plan.steps.some(
+    (step) =>
+      step.status === "waiting_user_input" &&
+      step.kind === "user_decision" &&
+      step.staticInput.questionId === questionId
+  );
+}
+
+function hasRecordedClarificationAnswer(
+  state: AgentState,
+  questionId: string
+) {
+  return Object.prototype.hasOwnProperty.call(state.answers, questionId) &&
+    typeof state.answers[questionId] === "string" &&
+    state.answers[questionId].trim().length > 0;
+}
+
+function fallbackClarificationForStep(
+  step: NonNullable<AgentState["taskPlan"]>["steps"][number],
+  questionId: string
+) {
+  const options = Array.isArray(step.staticInput.options)
+    ? step.staticInput.options.filter(
+        (option): option is string => typeof option === "string"
+      )
+    : [];
+  return {
+    id: questionId,
+    prompt: step.title,
+    reason: step.description,
+    required: step.staticInput.required !== false,
+    options
+  };
+}
+
 function proposalFromTaskPlan(plan: NonNullable<AgentState["taskPlan"]>) {
   return {
     objective: plan.objective,
@@ -702,11 +744,16 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
 
     case "SUBMIT_TASK": {
       const task = event.task.trim();
+      const canStartNewTask = [
+        "intake",
+        "unsupported",
+        "result",
+        "handoff",
+        "cancelled"
+      ].includes(state.phase);
       if (
         !task ||
-        state.phase === "downloading" ||
-        state.phase === "verifying" ||
-        state.phase === "exporting" ||
+        !canStartNewTask ||
         state.githubPublish.status === "publishing"
       ) {
         return state;
@@ -924,6 +971,53 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         event.reason
       );
 
+    case "ROUTE_FAILED":
+      if (state.phase !== "routing") return state;
+      return withLog(
+        {
+          ...state,
+          phase: "cancelled",
+          route: null,
+          routeDecision: null,
+          taskPlan: null,
+          taskPlanValidation: null,
+          agentRun: { ...state.agentRun, status: "failed" },
+          workspace: {
+            ...state.workspace,
+            nextAction: "重新执行本地任务路由，或放弃本次任务。"
+          }
+        },
+        "error",
+        `任务路由失败：${event.reason}`
+      );
+
+    case "RETRY_ROUTING":
+      if (
+        state.phase !== "cancelled" ||
+        state.routeDecision !== null ||
+        state.taskPlan !== null ||
+        state.agentRun.status !== "failed" ||
+        !state.task.trim()
+      ) {
+        return state;
+      }
+      return withLog(
+        {
+          ...state,
+          phase: "routing",
+          route: null,
+          routeDecision: null,
+          taskPlanValidation: null,
+          agentRun: { ...state.agentRun, status: "thinking" },
+          workspace: {
+            ...state.workspace,
+            nextAction: "正在重新执行本地任务路由。"
+          }
+        },
+        "info",
+        "用户要求重新执行本地任务路由。"
+      );
+
     case "ROUTE_RESOLVED":
       if (state.phase !== "routing") return state;
       if (event.decision.status === "unsupported") {
@@ -1063,13 +1157,18 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       const requiresClarification =
         !recovering &&
         state.clarificationIndex < state.clarifications.length;
+      const nextClarification = state.clarifications[state.clarificationIndex];
       const confirmedTaskPlan = requiresClarification
         ? requestNextPlannedClarification(
             taskPlan,
-            state.clarifications[0]?.id,
+            nextClarification?.id,
             event.confirmedAt
           )
         : taskPlan;
+      const clarificationRequested = requestedTaskPlanClarification(
+        confirmedTaskPlan,
+        nextClarification?.id
+      );
       const localEnvironmentInspection =
         [
           "local-development-environment-inspection",
@@ -1089,13 +1188,13 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
             ? "replanning"
             : preparedExtension
               ? "waiting_approval"
-            : requiresClarification
+            : clarificationRequested
               ? "clarifying"
               : "planning",
           taskPlan: confirmedTaskPlan,
           agentRun: {
             ...state.agentRun,
-            status: requiresClarification ? "idle" : "thinking",
+            status: clarificationRequested ? "idle" : "thinking",
             agentLoop: null
           },
           workspace: {
@@ -1104,7 +1203,7 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
               ? "按确认后的 Task Plan 生成新的资源计划 revision。"
               : preparedExtension
                 ? "Task Plan 已确认，等待当前资源 revision 的独立审批。"
-              : requiresClarification
+              : clarificationRequested
               ? "按已确认的 Task Plan 完成关键需求澄清。"
               : readOnlyLocalEnvironmentPlan
                 ? [
@@ -1132,9 +1231,37 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         (candidate) => candidate.id === event.stepId
       );
       if (!step) return state;
+      const questionId = step.kind === "user_decision" &&
+          typeof step.staticInput.questionId === "string"
+        ? step.staticInput.questionId
+        : null;
+      const recordedAnswer = questionId &&
+          hasRecordedClarificationAnswer(state, questionId)
+        ? state.answers[questionId]
+        : null;
+
+      // Executor commands can be delivered more than once around persistence
+      // and renderer reconnect boundaries. A waiting step is already in the
+      // requested state; only continue when an answer was recorded by an older
+      // (pre-DAG-scheduling) state and still needs to be consumed.
+      if (
+        step.status === "waiting_user_input" &&
+        recordedAnswer === null
+      ) {
+        return state;
+      }
+      if (
+        step.status !== "pending" &&
+        step.status !== "running" &&
+        step.status !== "waiting_user_input"
+      ) {
+        return state;
+      }
       let taskPlan;
       try {
-        taskPlan = step.status === "running"
+        taskPlan = step.status === "waiting_user_input"
+          ? state.taskPlan
+          : step.status === "running"
           ? suspendTaskPlanStepForInput(
               state.taskPlan,
               event.stepId,
@@ -1157,10 +1284,77 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
           return searchResult?.status === "success" &&
             isGitHubRepositorySearchOutput(searchResult.output);
         })();
+
+      if (questionId && recordedAnswer !== null) {
+        let completedTaskPlan;
+        try {
+          completedTaskPlan = completeTaskPlanStep(taskPlan, {
+            stepId: step.id,
+            completedAt: event.requestedAt,
+            result: {
+              reference: `user-answer:${questionId}`,
+              summary: recordedAnswer === "skipped"
+                ? "已复用此前记录的跳过决定。"
+                : `已复用此前记录的用户答案：${recordedAnswer}`,
+              output: { questionId, answer: recordedAnswer }
+            }
+          });
+        } catch {
+          return state;
+        }
+        const questionIndex = state.clarifications.findIndex(
+          (question) => question.id === questionId
+        );
+        const nextIndex = Math.max(
+          state.clarificationIndex,
+          questionIndex >= 0 ? questionIndex + 1 : state.clarificationIndex
+        );
+        const nextQuestion = state.clarifications[nextIndex];
+        const continuedTaskPlan = requestNextPlannedClarification(
+          completedTaskPlan,
+          nextQuestion?.id,
+          event.requestedAt
+        );
+        const nextClarificationRequested = requestedTaskPlanClarification(
+          continuedTaskPlan,
+          nextQuestion?.id
+        );
+        return withLog(
+          {
+            ...state,
+            taskPlan: continuedTaskPlan,
+            clarificationIndex: nextIndex,
+            phase: nextClarificationRequested ? "clarifying" : "planning",
+            agentRun: {
+              ...state.agentRun,
+              status: nextClarificationRequested ? "idle" : "thinking"
+            }
+          },
+          "info",
+          `Task Plan 步骤 ${step.title} 已复用此前记录的澄清答案。`
+        );
+      }
+
+      let clarifications = state.clarifications;
+      let clarificationIndex = state.clarificationIndex;
+      if (questionId) {
+        clarificationIndex = clarifications.findIndex(
+          (question) => question.id === questionId
+        );
+        if (clarificationIndex < 0) {
+          clarificationIndex = clarifications.length;
+          clarifications = [
+            ...clarifications,
+            fallbackClarificationForStep(step, questionId)
+          ];
+        }
+      }
       return withLog(
         {
           ...state,
           taskPlan,
+          clarifications,
+          clarificationIndex,
           phase: repositorySelection ? "result" : "clarifying",
           agentRun: { ...state.agentRun, status: "idle" }
         },
@@ -1307,7 +1501,6 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       if (!question || question.id !== event.questionId || !event.answer.trim()) return state;
       const answers = { ...state.answers, [question.id]: event.answer };
       const nextIndex = state.clarificationIndex + 1;
-      const nextPhase = nextIndex >= state.clarifications.length ? "planning" : "clarifying";
       const resolvedAt =
         event.answeredAt ?? state.taskPlan?.updatedAt ?? new Date(0).toISOString();
       const resolvedTaskPlan = resolveTaskPlanClarification(
@@ -1321,8 +1514,22 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         state.clarifications[nextIndex]?.id,
         resolvedAt
       );
+      const nextPhase = requestedTaskPlanClarification(
+        taskPlan,
+        state.clarifications[nextIndex]?.id
+      ) ? "clarifying" : "planning";
       return withLog(
-        { ...state, answers, clarificationIndex: nextIndex, phase: nextPhase, taskPlan },
+        {
+          ...state,
+          answers,
+          clarificationIndex: nextIndex,
+          phase: nextPhase,
+          taskPlan,
+          agentRun: {
+            ...state.agentRun,
+            status: nextPhase === "clarifying" ? "idle" : "thinking"
+          }
+        },
         "info",
         nextPhase === "planning" ? "澄清完成，正在生成资源计划。" : "已记录澄清答案，准备下一项关键问题。"
       );
@@ -1333,7 +1540,6 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       if (!question || question.id !== event.questionId || question.required) return state;
       const answers = { ...state.answers, [question.id]: "skipped" as const };
       const nextIndex = state.clarificationIndex + 1;
-      const nextPhase = nextIndex >= state.clarifications.length ? "planning" : "clarifying";
       const resolvedAt =
         event.skippedAt ?? state.taskPlan?.updatedAt ?? new Date(0).toISOString();
       const resolvedTaskPlan = resolveTaskPlanClarification(
@@ -1347,8 +1553,22 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         state.clarifications[nextIndex]?.id,
         resolvedAt
       );
+      const nextPhase = requestedTaskPlanClarification(
+        taskPlan,
+        state.clarifications[nextIndex]?.id
+      ) ? "clarifying" : "planning";
       return withLog(
-        { ...state, answers, clarificationIndex: nextIndex, phase: nextPhase, taskPlan },
+        {
+          ...state,
+          answers,
+          clarificationIndex: nextIndex,
+          phase: nextPhase,
+          taskPlan,
+          agentRun: {
+            ...state.agentRun,
+            status: nextPhase === "clarifying" ? "idle" : "thinking"
+          }
+        },
         "info",
         nextPhase === "planning" ? "已跳过非必填澄清，正在生成资源计划。" : "已跳过非必填澄清。"
       );
@@ -2606,7 +2826,12 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       );
 
     case "MANIFEST_SNAPSHOT_WRITTEN":
-      if (event.manifestRevision <= state.workspace.manifestRevision) return state;
+      if (
+        state.phase === "cancelled" ||
+        event.taskId !== state.taskId ||
+        event.planRevision !== state.revision ||
+        event.manifestRevision <= state.workspace.manifestRevision
+      ) return state;
       return {
         ...state,
         workspace: {
@@ -2672,6 +2897,29 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
 
     case "TASK_STATE_RESTORED": {
       if (state.phase !== "intake" || !event.state.task.trim()) return state;
+      if (
+        ["routing", "task_planning", "replanning"].includes(
+          event.state.phase
+        ) ||
+        (event.state.phase === "planning" && !event.state.agentRun.agentLoop)
+      ) {
+        const interrupted = transition(event.state, {
+          type: "CANCEL_TASK",
+          cancelledAt:
+            event.state.taskPlan?.updatedAt ?? new Date(0).toISOString()
+        });
+        return withLog(
+          {
+            ...interrupted,
+            agentRun: {
+              ...interrupted.agentRun,
+              status: "failed"
+            }
+          },
+          "warning",
+          "检测到上次退出时仍在路由或规划；该运行已安全停止，不会在重启后自动重新调用模型。"
+        );
+      }
       const restored =
         event.state.phase === "exporting"
           ? {
@@ -2713,7 +2961,29 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
               )
             : state.taskPlan;
       return withLog(
-        { ...state, phase: "cancelled", activeResourceId: null, taskPlan },
+        {
+          ...state,
+          phase: "cancelled",
+          approvedRevision: null,
+          activeResourceId: null,
+          taskPlan,
+          agentRun: {
+            ...state.agentRun,
+            status: "idle",
+            agentLoop:
+              state.agentRun.agentLoop &&
+              ["running", "waiting_user_input"].includes(
+                state.agentRun.agentLoop.status
+              )
+                ? {
+                    ...state.agentRun.agentLoop,
+                    status: "aborted",
+                    finishedAt:
+                      event.cancelledAt ?? state.taskPlan?.updatedAt ?? null
+                  }
+                : state.agentRun.agentLoop
+          }
+        },
         "warning",
         "用户取消了当前任务。"
       );

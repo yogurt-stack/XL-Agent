@@ -12,6 +12,7 @@ import {
   isLocalRepositoryTreeOutput,
   isProjectRequirementsOutput
 } from "./projectRequirements";
+import type { CandidateSelector } from "./intentClassifier";
 import type {
   AgentPolicy,
   AgentToolExecutionOptions,
@@ -311,7 +312,8 @@ export class InMemoryAgentToolExecutor implements AgentToolExecutor {
     private readonly inspectDevelopmentEnvironment: LocalDevelopmentEnvironmentInspector =
       fallbackDevelopmentEnvironmentInspection,
     private readonly localRepositoryTools?: LocalRepositoryAgentToolRunners,
-    private readonly githubRepositoryTools?: GitHubRepositoryAgentToolRunners
+    private readonly githubRepositoryTools?: GitHubRepositoryAgentToolRunners,
+    private readonly candidateSelector?: CandidateSelector
   ) {
     for (const name of [
       "read_system_profile",
@@ -671,7 +673,51 @@ export class InMemoryAgentToolExecutor implements AgentToolExecutor {
             result.error.retriable
           );
         }
-        return successResult(call, state, result.output);
+        let output = result.output;
+        if (
+          this.candidateSelector &&
+          (call.input.mode === "discovery" || call.input.mode === "name") &&
+          output.repositories.length > 1
+        ) {
+          try {
+            const selection = await this.candidateSelector.select({
+              task: state.task,
+              candidates: output.repositories.map((repository) => ({
+                fullName: repository.fullName,
+                description: repository.description,
+                stars: repository.stars,
+                language: repository.language,
+                topics: [...repository.topics]
+              }))
+            }, options?.signal);
+            const availableNames = new Set(
+              output.repositories.map((repository) => repository.fullName)
+            );
+            const selectedFullNames = [
+              ...new Set(selection.selectedFullNames)
+            ];
+            if (
+              selectedFullNames.length > 0 &&
+              selectedFullNames.length <= 3 &&
+              selectedFullNames.every((fullName) =>
+                availableNames.has(fullName)
+              )
+            ) {
+              output = {
+                ...output,
+                recommendation: {
+                  selectedFullNames,
+                  reason: selection.reason,
+                  source: "remote-llm"
+                }
+              };
+            }
+          } catch {
+            // Candidate ranking is optional enrichment. The audited GitHub API
+            // result remains usable when the model is offline, invalid or slow.
+          }
+        }
+        return successResult(call, state, output);
       } catch {
         return errorResult(
           call,

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DefaultAgentPolicy, InMemoryAgentToolExecutor } from "./agentServices";
 import { createInitialAgentState, transition } from "./machine";
 import { ExtensibleAgentRouter } from "./router";
+import { githubSearchInputFromState } from "./githubSearch";
 import { createSystemProfileToolOutput } from "./systemProfile";
 import { confirmTaskPlanForTest } from "./taskPlanTestSupport";
 import type { AgentAction, AgentState, HostSystemProfile } from "./types";
@@ -137,13 +138,7 @@ describe("default agent policy", () => {
       call: {
         callId: "github-search",
         name: "search_github_repositories",
-        input: {
-          mode: "discovery",
-          keywords: "",
-          createdWithinDays: 30,
-          sort: "stars",
-          limit: 10
-        }
+        input: githubSearchInputFromState(state)
       }
     };
     const finish: AgentAction = {

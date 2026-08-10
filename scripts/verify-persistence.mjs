@@ -376,8 +376,17 @@ try {
     approvalTtlMs: 1_000,
     now: () => nowMs
   });
+  assert(
+    (await reopened.loadLatestUnfinished()) === null,
+    "The latest terminal task must tombstone older unfinished history"
+  );
+  nowMs += 100;
+  await reopened.saveSnapshot(exportSnapshot);
   const restored = await reopened.loadLatestUnfinished();
-  assert(restored?.state.taskId === exportSnapshot.taskId, "Restart must restore the unfinished task");
+  assert(
+    restored?.state.taskId === exportSnapshot.taskId,
+    "A newer unfinished task must remain recoverable"
+  );
   await reopened.saveSnapshot(createSnapshot({
     phase: "handoff",
     workspace: {

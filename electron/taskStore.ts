@@ -1384,21 +1384,22 @@ export class TaskStore {
 
   async loadLatestUnfinished(): Promise<RestoredTask | null> {
     return this.enqueue(async () => {
-      const placeholders = [...terminalPhases].map(() => "?").join(", ");
       const row = firstRow(
         this.database,
         `SELECT task_id, revision, state_json, updated_at
          FROM task_snapshots
-         WHERE phase NOT IN (${placeholders})
-         ORDER BY updated_at DESC
-         LIMIT 1`,
-        [...terminalPhases]
+         ORDER BY updated_at DESC, rowid DESC
+         LIMIT 1`
       );
       if (!row) return null;
       const stateJson = asString(row.state_json);
       if (!stateJson) return null;
       const state = parseJson(stateJson);
       if (!isPersistedAgentState(state)) return null;
+      // This desktop runtime owns at most one active task. A terminal latest
+      // snapshot is therefore a tombstone for the active slot: never skip it
+      // and resurrect an older planning/clarifying snapshot from task history.
+      if (terminalPhases.has(state.phase)) return null;
       const approval = this.approvalRecord(state.taskId, state.revision);
       return {
         state,

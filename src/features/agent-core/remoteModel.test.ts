@@ -471,4 +471,52 @@ describe("remote model runtime", () => {
     expect(onPrimaryFailure).not.toHaveBeenCalled();
     expect(fallbackGenerate).not.toHaveBeenCalled();
   });
+
+  it("does not treat caller cancellation of decide as a remote failure or invoke fallback", async () => {
+    const aborted = new DOMException("Aborted", "AbortError");
+    let receivedSignal: AbortSignal | undefined;
+    let notifyPrimaryStarted!: () => void;
+    const primaryStarted = new Promise<void>((resolve) => {
+      notifyPrimaryStarted = resolve;
+    });
+    const primaryDecide = vi.fn((
+      _context: ModelContext,
+      signal?: AbortSignal
+    ): Promise<never> => {
+      receivedSignal = signal;
+      notifyPrimaryStarted();
+      if (!signal) return Promise.reject(aborted);
+      if (signal.aborted) return Promise.reject(aborted);
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(aborted), { once: true });
+      });
+    });
+    const fallbackDecide = vi.fn((context: ModelContext) =>
+      new LocalRuleModelRuntime().decide(context)
+    );
+    const onPrimaryFailure = vi.fn();
+    const model = new FallbackModelRuntime(
+      { decide: primaryDecide } satisfies ModelRuntime,
+      { decide: fallbackDecide } satisfies ModelRuntime,
+      { onPrimaryFailure }
+    );
+    const controller = new AbortController();
+    const decideWithSignal = model.decide.bind(model) as unknown as (
+      context: ModelContext,
+      signal: AbortSignal
+    ) => Promise<unknown>;
+
+    const pending = decideWithSignal(fullStackPlanningContext(), controller.signal);
+    await primaryStarted;
+    controller.abort();
+    const outcome = await pending.then(
+      (value) => ({ value, error: null }),
+      (error: unknown) => ({ value: null, error })
+    );
+
+    expect.soft(receivedSignal).toBe(controller.signal);
+    expect.soft(outcome.error).toBe(aborted);
+    expect.soft(onPrimaryFailure).not.toHaveBeenCalled();
+    expect(fallbackDecide).not.toHaveBeenCalled();
+  });
 });
