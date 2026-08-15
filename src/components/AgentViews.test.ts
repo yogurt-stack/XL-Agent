@@ -96,7 +96,12 @@ describe("clarification view", () => {
       workspaceTemplates: [
         { id: "ai-development-workspace" },
         { id: "research-data-workspace" }
-      ]
+      ],
+      downloadTransport: {
+        mode: "http" as const,
+        sdkConfigured: false,
+        label: "受控 HTTPS 下载"
+      }
     };
     const homeHtml = renderToStaticMarkup(
       createElement(AgentHomeView, {
@@ -500,6 +505,7 @@ describe("clarification view", () => {
     const initial = createInitialAgentState();
     const resource = catalogById.get("python-312")!;
     const completedHtml = renderToStaticMarkup(createElement(ExecutionView, {
+      capabilities: { domainSkills: [], sourceProviders: [], workspaceTemplates: [], downloadTransport: { mode: "http", sdkConfigured: false, label: "受控 HTTPS 下载" } },
       dispatch: async () => initial,
       modelConnection: localModelConnection,
       onNavigate: () => undefined,
@@ -520,6 +526,7 @@ describe("clarification view", () => {
       }
     }));
     const activeHtml = renderToStaticMarkup(createElement(ExecutionView, {
+      capabilities: { domainSkills: [], sourceProviders: [], workspaceTemplates: [], downloadTransport: { mode: "http", sdkConfigured: false, label: "受控 HTTPS 下载" } },
       dispatch: async () => initial,
       modelConnection: localModelConnection,
       onNavigate: () => undefined,
@@ -560,6 +567,7 @@ describe("clarification view", () => {
       }
     };
     const html = renderToStaticMarkup(createElement(ExecutionView, {
+      capabilities: { domainSkills: [], sourceProviders: [], workspaceTemplates: [], downloadTransport: { mode: "http", sdkConfigured: false, label: "受控 HTTPS 下载" } },
       dispatch: async (event) => transition(state, event),
       modelConnection: localModelConnection,
       onNavigate: () => undefined,
@@ -581,6 +589,7 @@ describe("clarification view", () => {
     state = transition(state, new ExtensibleAgentRouter().route(state)!);
     state = confirmTaskPlanForTest(state);
     const html = renderToStaticMarkup(createElement(ExecutionView, {
+      capabilities: { domainSkills: [], sourceProviders: [], workspaceTemplates: [], downloadTransport: { mode: "http", sdkConfigured: false, label: "受控 HTTPS 下载" } },
       dispatch: async (event) => transition(state, event),
       modelConnection: localModelConnection,
       onNavigate: () => undefined,

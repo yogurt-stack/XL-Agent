@@ -159,11 +159,17 @@ function explicitRepositoryName(task: string) {
     /(?:在\s*)?github\s*(?:上|中|里)?\s*(?:搜索|查找|寻找|检索|搜|找)\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_.-]{0,99})/iu,
     /(?:搜索|查找|寻找|检索|搜|找)\s*github\s*(?:上|中|里)?\s*(?:的|for)?\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_.-]{0,99})/iu,
     /(?:搜索|查找|寻找|检索|搜|找)\s*(?:一个|一下)?\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_.-]{0,99})\s*(?:的)?\s*(?:开源)?(?:项目|仓库|repo(?:sitory)?)/iu,
-    /(?:搜索|查找|寻找|检索|搜|找)\s*(?:一个|一下)?\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_.-]{0,99})\s*[”"'」』]?\s*[。.!！?？]*$/iu,
-    /\b(?:search|find|locate)\s+github\s+(?:for\s+)?[“"']?([A-Za-z0-9][A-Za-z0-9_.-]{0,99})/iu
+    /(?:搜索|查找|寻找|检索|搜|找)\s*(?:一个|一下)?\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_. -]{0,99})\s*[”"'」』]?\s*[。.!！?？]*$/iu,
+    /\b(?:search|find|locate|download|clone|fetch)\s+github\s+(?:for\s+)?[“"']?([A-Za-z0-9][A-Za-z0-9_. -]{0,99})/iu,
+    // “下载/克隆 X”与“GitHub 上的 X”：X 可能是多词描述（如 deepseek harness），
+    // 取最后一个合法 token 作为仓库名。
+    /(?:下载|克隆|拉取|获取|clone|fetch|get)\s*(?:github\s*(?:上|中|里|的)?)?\s*(?:的|for)?\s*(?:这个|那个)?\s*(?:项目|仓库|repo(?:sitory)?)?\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_. -]{0,99})/iu,
+    /github\s*(?:上|中|里)?\s*(?:的)?\s*(?:这个|那个)?\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_. -]{0,99})\s*$/iu
   ];
   for (const pattern of patterns) {
-    const candidate = cleanNameCandidate(task.match(pattern)?.[1]);
+    const matched = task.match(pattern)?.[1];
+    const candidate =
+      cleanNameCandidate(matched) ?? lastTokenCandidate(matched);
     if (candidate && !genericRepositoryNames.has(candidate.toLowerCase())) {
       return candidate;
     }
@@ -175,6 +181,25 @@ function explicitRepositoryName(task: string) {
     !ambiguousBareTechnologyNames.has(bareCandidate.toLowerCase())
   ) {
     return bareCandidate;
+  }
+  return null;
+}
+
+/**
+ * 多词候选（如 “deepseek harness”）取最后一个合法 token 作为仓库名。
+ */
+function lastTokenCandidate(raw: string | undefined) {
+  if (!raw) return null;
+  const tokens = raw.split(/\s+/).filter(Boolean);
+  for (let i = tokens.length - 1; i >= 0; i -= 1) {
+    const candidate = cleanNameCandidate(tokens[i]);
+    if (
+      candidate &&
+      !genericRepositoryNames.has(candidate.toLowerCase()) &&
+      !ambiguousBareTechnologyNames.has(candidate.toLowerCase())
+    ) {
+      return candidate;
+    }
   }
   return null;
 }

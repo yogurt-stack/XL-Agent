@@ -21,7 +21,12 @@ export type PersistenceViewState = {
 const browserCapabilities: PlatformCapabilitySummary = {
   domainSkills: [],
   sourceProviders: [],
-  workspaceTemplates: []
+  workspaceTemplates: [],
+  downloadTransport: {
+    mode: "http",
+    sdkConfigured: false,
+    label: "受控 HTTPS 下载"
+  }
 };
 
 function createInitialModelConnectionState(

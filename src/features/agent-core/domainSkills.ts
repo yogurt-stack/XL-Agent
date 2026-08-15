@@ -549,6 +549,14 @@ export class AiDevelopmentEnvironmentSkill implements DomainSkill {
 
   matches(goal: UserGoal) {
     const task = ` ${normalizedTask(goal.text)} `;
+    // 明确提到 GitHub 或携带仓库链接的任务交给 GitHub 检索/分析 Skill，
+    // 避免 aiDevelopmentKeywords 中 “git” 子串匹配误抢（“github” 含 “git”）。
+    if (
+      goal.text.toLowerCase().includes("github") ||
+      goal.links.some((link) => githubFullNameFromUrl(link) !== null)
+    ) {
+      return false;
+    }
     return (
       inferLocalTaskIntent(goal.text) !== "ambiguous" ||
       aiDevelopmentKeywords.some((keyword) => task.includes(keyword))

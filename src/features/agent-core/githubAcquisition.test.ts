@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DefaultAgentPolicy, InMemoryAgentToolExecutor } from "./agentServices";
+import { validateGitHubAcquisitionPlan } from "./githubAcquisition";
 import type { AgentScheduler } from "./interfaces";
 import { LocalRuleModelRuntime } from "./localRuleModel";
 import { createInitialAgentState, transition } from "./machine";
@@ -7,11 +8,13 @@ import { FixedWindowsPlanner, MockVerifier } from "./mockServices";
 import { ExtensibleAgentRouter } from "./router";
 import { AgentRuntime } from "./runtime";
 import {
+  approveTaskPlanStep,
   completeTaskPlanStep,
   confirmTaskPlan,
   createTaskPlan,
   defaultTaskPlanToolPolicies,
   prepareTaskPlanForConfirmation,
+  requestTaskPlanStepApproval,
   startTaskPlanStep,
   validateTaskPlan
 } from "./taskPlan";
@@ -438,5 +441,220 @@ describe("GitHub source and npm dependency revisions", () => {
     expect(
       approved.resources.find((resource) => resource.github)?.status
     ).toBe("verified");
+  });
+});
+
+describe("acquisition after environment compatibility analysis", () => {
+  it("accepts GITHUB_ACQUISITION_PREPARED on the analysis result page", () => {
+    const validationContext = {
+      tools: defaultTaskPlanToolPolicies,
+      requireInitialConfirmation: true
+    };
+    const createdAt = "2026-08-15T00:00:00.000Z";
+    const draft = createTaskPlan({
+      planId: "github-analysis-plan",
+      taskId: "github-analysis-task",
+      createdBy: "local-rule",
+      createdAt,
+      proposal: {
+        objective: "分析 openai/example 的运行要求",
+        deliverables: ["兼容性报告"],
+        assumptions: [],
+        constraints: ["只读分析"],
+        steps: [{
+          id: "present-analysis",
+          title: "展示兼容性报告",
+          description: "展示分析结果。",
+          kind: "handoff",
+          tool: null,
+          dependsOn: [],
+          staticInput: {},
+          inputBindings: {},
+          expectedOutput: "兼容性报告",
+          risk: "read_only",
+          approval: { required: false, reason: null }
+        }],
+        confirmation: { required: true, reason: "确认分析流程。" }
+      }
+    });
+    let taskPlan = confirmTaskPlan(
+      prepareTaskPlanForConfirmation(draft, validationContext, createdAt),
+      { revision: 1, confirmedAt: createdAt }
+    );
+    taskPlan = completeTaskPlanStep(
+      startTaskPlanStep(taskPlan, "present-analysis", createdAt),
+      {
+        stepId: "present-analysis",
+        completedAt: createdAt,
+        result: { reference: "analysis:report", summary: "兼容性报告已展示。" }
+      }
+    );
+    const initial = createInitialAgentState();
+    const resultState = {
+      ...initial,
+      taskId: "github-analysis-task",
+      task: "分析 openai/example 的运行要求",
+      phase: "result" as const,
+      route: "github-project-environment-compatibility",
+      routeDecision: {
+        status: "supported" as const,
+        reason: "matched",
+        skillId: "github-project-environment-compatibility",
+        sourceProviderId: "github-api",
+        userLinks: [],
+        resourceIds: [],
+        clarifications: [],
+        requirements: null
+      },
+      githubRepository: {
+        repositoryHandleId: "openai-example-aaaaaaaa",
+        fullName: "openai/example",
+        displayName: "openai/example",
+        defaultBranch: "main",
+        commitSha,
+        treeSha: "b".repeat(40),
+        trackedFileCount: 1,
+        treeTruncated: false,
+        inspectedAt: createdAt,
+        analysis: {
+          ecosystems: ["node" as const],
+          manifests: ["package.json"],
+          lockfiles: ["package-lock.json"],
+          runtimeHints: ["Node.js"],
+          nodeOfflinePreparation: "package-lock-supported" as const,
+          nodeOfflinePackageCount: 1,
+          nodeOfflineBlockers: [],
+          treeTruncated: false
+        }
+      },
+      taskPlan,
+      taskPlanValidation: validateTaskPlan(taskPlan, validationContext)
+    };
+    const extended = transition(resultState, {
+      type: "GITHUB_ACQUISITION_PREPARED",
+      resources: [sourceResource()],
+      explanation: "分析完成后固定提交并创建资源计划。"
+    });
+
+    expect(extended).toMatchObject({
+      phase: "waiting_task_plan_confirmation",
+      revision: 1,
+      taskPlan: {
+        revision: 2,
+        previousRevision: 1,
+        status: "waiting_confirmation"
+      }
+    });
+    expect(
+      extended.resources.find((resource) => resource.github)?.github?.fullName
+    ).toBe("openai/example");
+  });
+});
+
+describe("acquisition approval on the analysis route", () => {
+  it("approves a pinned GitHub plan when the route came from environment analysis", () => {
+    const validationContext = {
+      tools: defaultTaskPlanToolPolicies,
+      requireInitialConfirmation: true
+    };
+    const createdAt = "2026-08-15T00:00:00.000Z";
+    const draft = createTaskPlan({
+      planId: "analysis-acquire-plan",
+      taskId: "analysis-acquire-task",
+      createdBy: "local-rule",
+      createdAt,
+      proposal: {
+        objective: "准备 openai/example 到本地",
+        deliverables: ["源码快照"],
+        assumptions: [],
+        constraints: ["受控下载"],
+        steps: [{
+          id: "acquire-source",
+          title: "下载源码",
+          description: "下载固定 commit 源码。",
+          kind: "write_tool",
+          tool: "controlled_download",
+          dependsOn: [],
+          staticInput: {},
+          inputBindings: {},
+          expectedOutput: "源码归档",
+          risk: "local_write",
+          approval: { required: true, reason: "本地写入" }
+        }],
+        confirmation: { required: true, reason: "确认获取流程。" }
+      }
+    });
+    let taskPlan = confirmTaskPlan(
+      prepareTaskPlanForConfirmation(draft, validationContext, createdAt),
+      { revision: 1, confirmedAt: createdAt }
+    );
+    taskPlan = approveTaskPlanStep(
+      requestTaskPlanStepApproval(
+        taskPlan,
+        "acquire-source",
+        createdAt
+      ),
+      { stepId: "acquire-source", revision: 1, approvedAt: createdAt }
+    );
+    const source = sourceResource();
+    const initial = createInitialAgentState();
+    const approvalState = {
+      ...initial,
+      taskId: "analysis-acquire-task",
+      task: "准备 openai/example 到本地",
+      phase: "waiting_approval" as const,
+      revision: 1,
+      route: "github-project-environment-compatibility",
+      routeDecision: {
+        status: "supported" as const,
+        reason: "matched",
+        skillId: "github-project-environment-compatibility",
+        sourceProviderId: "github-api",
+        userLinks: [],
+        resourceIds: [],
+        clarifications: [],
+        requirements: {
+          intent: "user-links" as const,
+          label: "GitHub 固定提交源码快照",
+          requiredCapabilities: ["project-source" as const]
+        }
+      },
+      resources: [
+        {
+          ...source,
+          selected: true,
+          status: "pending" as const,
+          progress: 0,
+          attempts: 0
+        }
+      ],
+      taskRequirements: {
+        intent: "user-links" as const,
+        label: "GitHub 固定提交源码快照",
+        requiredCapabilities: ["project-source" as const]
+      },
+      planValidation: validateGitHubAcquisitionPlan(
+        [{
+          ...source,
+          selected: true,
+          status: "pending" as const,
+          progress: 0,
+          attempts: 0
+        }],
+        1
+      ),
+      taskPlan,
+      approvedRevision: null
+    };
+    const approved = transition(approvalState, {
+      type: "APPROVE_PLAN",
+      revision: 1
+    });
+
+    expect(approved.phase).toBe("downloading");
+    expect(approved.approvedRevision).toBe(1);
+    expect(
+      approved.planValidation?.issues?.some((item) => item.code === "UNKNOWN_RESOURCE")
+    ).toBe(false);
   });
 });

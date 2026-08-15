@@ -149,6 +149,12 @@ export type PlatformCapabilitySummary = {
     credentialBoundary: "separate-write-token";
     existingRepositoryPolicy: "create-only";
   };
+  /** 当前生效的下载传输通道：配置了迅雷凭证时由 Main 报告为迅雷 P2SP。 */
+  downloadTransport: {
+    mode: "xunlei-p2sp" | "http";
+    sdkConfigured: boolean;
+    label: string;
+  };
 };
 
 export type AgentRuntimeSnapshot = {

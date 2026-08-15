@@ -257,6 +257,12 @@ describe("active planning cancellation", () => {
     );
     const onNavigate = vi.fn();
     const view = ExecutionView({
+      capabilities: {
+        domainSkills: [],
+        sourceProviders: [],
+        workspaceTemplates: [],
+        downloadTransport: { mode: "http" as const, sdkConfigured: false, label: "受控 HTTPS 下载" }
+      },
       dispatch,
       modelConnection: {
         status: "unconfigured",
@@ -293,7 +299,8 @@ describe("active planning cancellation", () => {
         capabilities: {
           domainSkills: [],
           sourceProviders: [],
-          workspaceTemplates: []
+          workspaceTemplates: [],
+          downloadTransport: { mode: "http" as const, sdkConfigured: false, label: "受控 HTTPS 下载" }
         },
         dispatch: async (event) => transition(active, event),
         onNavigate: () => undefined,

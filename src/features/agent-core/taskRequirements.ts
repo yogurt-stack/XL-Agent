@@ -30,7 +30,19 @@ export function inferLocalTaskIntent(task: string, workloadAnswer?: string): Loc
   ) {
     return "python-ai";
   }
-  if (includesAny(normalized, ["基础工具", "基础开发", "开发工具", "git", "vscode", "visual studio code", "basic tools"])) {
+  if (
+    includesAny(normalized, [
+      "基础工具",
+      "基础开发",
+      "开发工具",
+      "vscode",
+      "visual studio code",
+      "basic tools"
+    ]) ||
+    // “github” 包含子串 “git”，必须排除，否则含 GitHub 的任务会被
+    // 误判为基础开发意图并被 AI 开发环境 Skill 抢占。
+    (normalized.includes("git") && !normalized.includes("github"))
+  ) {
     return "base-development";
   }
   return "ambiguous";
