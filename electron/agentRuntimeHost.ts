@@ -108,6 +108,8 @@ export type AgentRuntimeHostOptions = {
   stepDelayMs?: number;
   createTaskId?: () => string;
   cleanupManagedDemoFiles?: () => Promise<void>;
+  /** 迅雷 SDK 传输是否已启用（由 Main 在启动时根据环境变量与凭证决定）。 */
+  xunleiTransportConfigured?: boolean;
 };
 
 function controlledDownloadError(
@@ -401,7 +403,18 @@ export class AgentRuntimeHost {
         ),
         credentialBoundary: "separate-write-token",
         existingRepositoryPolicy: "create-only"
-      }
+      },
+      downloadTransport: this.options.xunleiTransportConfigured
+        ? {
+            mode: "xunlei-p2sp",
+            sdkConfigured: true,
+            label: "迅雷 P2SP 网络（C++ SDK）"
+          }
+        : {
+            mode: "http",
+            sdkConfigured: false,
+            label: "受控 HTTPS 下载"
+          }
     };
   }
 
@@ -471,22 +484,40 @@ export class AgentRuntimeHost {
       return this.getSnapshot();
     }
     if (event.type === "PREPARE_GITHUB_REPOSITORY") {
+      // 两个来源都可以准备到本地：
+      // 1. GitHub 搜索结果页（github-project-discovery，从搜索输出定位）；
+      // 2. 环境兼容性分析结果页（github-project-environment-compatibility，
+      //    从固定 commit 分析会话定位仓库，此时不再有搜索输出）。
+      const analysisResultSkill =
+        state.routeDecision?.skillId ===
+        "github-project-environment-compatibility";
       const searchResult = latestGitHubRepositorySearchResult(state);
       const output =
         searchResult?.status === "success" &&
         isGitHubRepositorySearchOutput(searchResult.output)
           ? searchResult.output
           : null;
-      const selected = output?.repositories.find(
+      const selectedFromSearch = output?.repositories.find(
         (repository) =>
           repository.fullName.toLowerCase() === event.fullName.toLowerCase()
       );
-      if (
-        state.phase !== "result" ||
-        state.routeDecision?.skillId !== "github-project-discovery" ||
-        !selected
-      ) {
-        throw new Error("只能准备当前 GitHub 查询结果中明确选择的仓库。");
+      const selectedFromAnalysis =
+        analysisResultSkill &&
+        state.githubRepository?.fullName.toLowerCase() ===
+          event.fullName.toLowerCase()
+          ? state.githubRepository
+          : undefined;
+      const selected = selectedFromSearch ?? selectedFromAnalysis;
+      const prepareAllowed =
+        state.phase === "result" &&
+        (state.routeDecision?.skillId === "github-project-discovery" ||
+          analysisResultSkill) &&
+        Boolean(selected);
+      if (!prepareAllowed) {
+        throw new Error("只能准备当前 GitHub 查询结果或已分析仓库中明确选择的仓库。");
+      }
+      if (!selected) {
+        throw new Error("无法定位要准备的 GitHub 仓库。");
       }
       const sourceTaskId = state.taskId;
       const inspection = await this.options.inspectGitHubRepository(
@@ -498,20 +529,34 @@ export class AgentRuntimeHost {
         );
       }
       const currentState = this.runtime.getState();
-      const currentResult = latestGitHubRepositorySearchResult(currentState);
-      const currentOutput =
-        currentResult?.status === "success" &&
-        isGitHubRepositorySearchOutput(currentResult.output)
-          ? currentResult.output
-          : null;
-      const stillSelected = currentOutput?.repositories.some(
-        (repository) =>
-          repository.fullName.toLowerCase() === selected.fullName.toLowerCase()
-      );
+      const currentSkill =
+        currentState.routeDecision?.skillId ?? "";
+      const allowedCurrentSkill =
+        currentSkill === "github-project-discovery" ||
+        currentSkill === "github-project-environment-compatibility";
+      const stillSelected =
+        currentState.githubRepository?.fullName.toLowerCase() ===
+          selected.fullName.toLowerCase() ||
+        (() => {
+          const currentResult =
+            latestGitHubRepositorySearchResult(currentState);
+          const currentOutput =
+            currentResult?.status === "success" &&
+            isGitHubRepositorySearchOutput(currentResult.output)
+              ? currentResult.output
+              : null;
+          return (
+            currentOutput?.repositories.some(
+              (repository) =>
+                repository.fullName.toLowerCase() ===
+                selected.fullName.toLowerCase()
+            ) ?? false
+          );
+        })();
       if (
         currentState.taskId !== sourceTaskId ||
         currentState.phase !== "result" ||
-        currentState.routeDecision?.skillId !== "github-project-discovery" ||
+        !allowedCurrentSkill ||
         !stillSelected
       ) {
         throw new Error("固定 GitHub commit 期间任务上下文已变化，请重新选择仓库。");

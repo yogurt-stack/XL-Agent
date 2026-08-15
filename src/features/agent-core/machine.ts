@@ -42,6 +42,20 @@ import type {
 
 const primaryCatalogIds = ["python-312", "vscode", "git", "node-lts", "sample-project"];
 
+/**
+ * 当前计划是否为 GitHub 固定 commit 源码获取计划：
+ * 搜索路径（github-project-discovery）或分析路径
+ * （github-project-environment-compatibility）都会生成动态 GitHub 资源，
+ * 必须使用 acquisition 专用校验，而不是静态可信目录校验。
+ */
+function isGitHubAcquisitionRoute(state: AgentState) {
+  return (
+    state.routeDecision?.skillId === "github-project-discovery" ||
+    state.routeDecision?.skillId ===
+      "github-project-environment-compatibility"
+  );
+}
+
 const handoffFiles = [
   "README.md",
   "RESOURCE_MANIFEST.md",
@@ -1610,7 +1624,10 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
     case "GITHUB_ACQUISITION_PREPARED": {
       if (
         state.phase !== "result" ||
-        state.routeDecision?.skillId !== "github-project-discovery"
+        ![
+          "github-project-discovery",
+          "github-project-environment-compatibility"
+        ].includes(state.routeDecision?.skillId ?? "")
       ) return state;
       const revision = state.revision + 1;
       const resources = event.resources.map((resource) => ({
@@ -2003,11 +2020,13 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       const revision = state.revision + 1;
       const resources = buildReplacementPlan(state, event.strategy);
       const taskRequirements = state.taskRequirements ?? deriveTaskRequirements(state);
-      const planValidation = validatePlannedResources(resources, {
-        requirements: taskRequirements,
-        systemProfile: state.systemProfile,
-        revision
-      });
+      const planValidation = isGitHubAcquisitionRoute(state)
+        ? validateGitHubAcquisitionPlan(resources, revision)
+        : validatePlannedResources(resources, {
+            requirements: taskRequirements,
+            systemProfile: state.systemProfile,
+            revision
+          });
       if (!planValidation.valid) {
         return withLog(
           { ...state, taskRequirements, planValidation, approvedRevision: null },
@@ -2106,14 +2125,13 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
         item.id === event.resourceId ? { ...item, selected: event.selected } : item
       );
       const taskRequirements = state.taskRequirements ?? deriveTaskRequirements(state);
-      const planValidation =
-        state.routeDecision?.skillId === "github-project-discovery"
-          ? validateGitHubAcquisitionPlan(resources, state.revision)
-          : validatePlannedResources(resources, {
-              requirements: taskRequirements,
-              systemProfile: state.systemProfile,
-              revision: state.revision
-            });
+      const planValidation = isGitHubAcquisitionRoute(state)
+        ? validateGitHubAcquisitionPlan(resources, state.revision)
+        : validatePlannedResources(resources, {
+            requirements: taskRequirements,
+            systemProfile: state.systemProfile,
+            revision: state.revision
+          });
       return withLog(
         {
           ...state,
@@ -2251,8 +2269,7 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
     case "APPROVE_PLAN": {
       if (state.phase !== "waiting_approval") return state;
       const taskRequirements = state.taskRequirements ?? deriveTaskRequirements(state);
-      const githubPlan =
-        state.routeDecision?.skillId === "github-project-discovery";
+      const githubPlan = isGitHubAcquisitionRoute(state);
       const currentPlanValidation = githubPlan
         ? validateGitHubAcquisitionPlan(state.resources, state.revision)
         : validatePlannedResources(state.resources, {
@@ -2584,11 +2601,13 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       const revision = state.revision + 1;
       const resources = buildReplacementPlan(state, event.strategy);
       const taskRequirements = state.taskRequirements ?? deriveTaskRequirements(state);
-      const planValidation = validatePlannedResources(resources, {
-        requirements: taskRequirements,
-        systemProfile: state.systemProfile,
-        revision
-      });
+      const planValidation = isGitHubAcquisitionRoute(state)
+        ? validateGitHubAcquisitionPlan(resources, revision)
+        : validatePlannedResources(resources, {
+            requirements: taskRequirements,
+            systemProfile: state.systemProfile,
+            revision
+          });
       if (!planValidation.valid) {
         return withLog(
           { ...state, taskRequirements, planValidation, approvedRevision: null },
@@ -2696,8 +2715,7 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
             ready: true,
             generatedAt: event.output.generatedAt,
             files: event.output.files.map((file) => file.relativePath),
-            nextAction:
-              state.routeDecision?.skillId === "github-project-discovery"
+            nextAction: isGitHubAcquisitionRoute(state)
                 ? "核对固定 commit、sources/ 源码归档和 dependencies/npm/ 锁文件依赖，再运行 Agent B 只读检查。"
                 : "核对 resource-manifest.json 与 downloads/ 校验信息，再按 README.md 人工处理资源。",
             exportStatus: "ready",

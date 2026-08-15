@@ -2122,7 +2122,7 @@ textarea:focus-visible {
 
 .execution-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 1px;
   overflow: hidden;
 }
@@ -2135,6 +2135,18 @@ textarea:focus-visible {
 .execution-summary span,
 .execution-summary strong {
   display: block;
+}
+
+.execution-summary .transport-xunlei {
+  color: #ff9f1c;
+  font-weight: 700;
+}
+
+.execution-summary .transport-xunlei::after {
+  content: " · C++ SDK";
+  font-size: 0.8em;
+  font-weight: 500;
+  color: rgb(255 159 28 / 72%);
 }
 
 .task-plan-execution-panel {

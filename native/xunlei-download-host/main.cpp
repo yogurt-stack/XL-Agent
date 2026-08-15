@@ -45,7 +45,7 @@ int init_sdk() {
             {"type", "error"},
             {"requestId", ""},
             {"code", -1},
-            {"message", "迅雷 SDK 需要 XL_AGENT_XUNLEI_APP_ID、XL_AGENT_XUNLEI_API_KEY 和 XL_AGENT_XUNLEI_CONFIG_DIR。"}
+            {"message", "Xunlei SDK requires XL_AGENT_XUNLEI_APP_ID, XL_AGENT_XUNLEI_API_KEY, and XL_AGENT_XUNLEI_CONFIG_DIR."}
         });
         return 1;
     }
@@ -142,7 +142,7 @@ void run_download(const nlohmann::json& request) {
             return;
         }
         if (state.state_code == XL_DL_TASK_STATUS_FAILED) {
-            emit_error(request_id, state.task_err_code, "迅雷下载任务失败");
+            emit_error(request_id, state.task_err_code, "Xunlei download task failed");
             return;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -164,7 +164,7 @@ int main() {
             const std::string action = request.value("action", "");
             if (action == "download") {
                 if (active.load()) {
-                    emit_error(request.value("requestId", ""), XL_DL_ERROR_TOO_MUCH_TASK, "迅雷 SDK 宿主一次只处理一个下载任务");
+                    emit_error(request.value("requestId", ""), XL_DL_ERROR_TOO_MUCH_TASK, "Xunlei SDK host can only process one download task at a time");
                     continue;
                 }
                 if (worker.joinable()) worker.join();

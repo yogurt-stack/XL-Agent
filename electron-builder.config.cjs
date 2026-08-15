@@ -6,7 +6,18 @@ const extraResources = fs.existsSync(nativeHostRoot)
       {
         from: nativeHostRoot,
         to: "xunlei-sdk",
-        filter: ["xunlei-download-host.exe", "dk.dll"]
+        // xunlei-download-host.exe 依赖 dk.dll（迅雷 SDK）、libcurl.dll（依赖 z.dll）
+        // 以及 VC++ 运行库（msvcp140/vcruntime140/vcruntime140_1）。
+        // 全部一起打包，否则宿主在安装包内启动失败。
+        filter: [
+          "xunlei-download-host.exe",
+          "dk.dll",
+          "libcurl.dll",
+          "z.dll",
+          "msvcp140.dll",
+          "vcruntime140.dll",
+          "vcruntime140_1.dll"
+        ]
       }
     ]
   : [];

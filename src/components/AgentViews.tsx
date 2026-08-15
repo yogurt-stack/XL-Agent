@@ -882,6 +882,11 @@ function LocalProjectCompatibilityResults({
 }) {
   const githubMode = state.routeDecision?.skillId ===
     "github-project-environment-compatibility";
+  const [preparing, setPreparing] = useState(false);
+  const [preparationError, setPreparationError] = useState<string | null>(null);
+  const githubFullName = githubMode
+    ? state.githubRepository?.fullName ?? null
+    : null;
   const step = state.taskPlan?.steps.find((candidate) =>
     candidate.id === (githubMode
       ? "analyze-github-project-environment"
@@ -961,10 +966,64 @@ function LocalProjectCompatibilityResults({
       ) : null}
       <footer className="github-results-footer">
         <span>{githubMode ? "GitHub 固定 Tree/Blob" : "固定 HEAD"} 白名单证据 · 仓库内容按不可信数据处理</span>
-        <button className="btn btn-primary" type="button" onClick={() => {
-          void dispatch({ type: "RESET" });
-          onNavigate("home");
-        }}>开始新任务</button>
+        <div className="failure-actions">
+          {githubMode && githubFullName ? (
+            <button
+              className="btn btn-secondary"
+              disabled={preparing}
+              type="button"
+              title="固定当前 commit，生成可审批的源码快照计划（需再次确认）"
+              onClick={async () => {
+                setPreparing(true);
+                setPreparationError(null);
+                try {
+                  const nextState = await dispatch({
+                    type: "PREPARE_GITHUB_REPOSITORY",
+                    fullName: githubFullName
+                  });
+                  const prepared = nextState.resources.some(
+                    (resource) =>
+                      resource.github?.fullName === githubFullName
+                  );
+                  if (prepared && nextState.phase === "waiting_approval") {
+                    onNavigate("plan");
+                  } else if (
+                    prepared &&
+                    nextState.phase === "waiting_task_plan_confirmation"
+                  ) {
+                    onNavigate("clarification");
+                  } else {
+                    setPreparationError(
+                      `未能为 ${githubFullName} 生成可审批的固定提交计划，请检查操作日志后重试。`
+                    );
+                  }
+                } catch (error) {
+                  setPreparationError(
+                    error instanceof Error
+                      ? error.message
+                      : `为 ${githubFullName} 固定提交失败。`
+                  );
+                } finally {
+                  setPreparing(false);
+                }
+              }}
+            >
+              {preparing ? (
+                <Loader2 className="spin" size={14} />
+              ) : (
+                <PackageCheck size={14} />
+              )}
+              {preparing ? "固定提交中" : "准备到本地"}
+            </button>
+          ) : null}
+          <button className="btn btn-primary" type="button" onClick={() => {
+            void dispatch({ type: "RESET" });
+            onNavigate("home");
+          }}>开始新任务</button>
+        </div>
+        {preparationError ? (
+          <small className="agent-empty-copy" role="alert">{preparationError}</small>
+        ) : null}
       </footer>
     </section>
   );
@@ -1748,7 +1807,7 @@ export function ResourcePlanView({
   );
 }
 
-export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: { state: AgentState; dispatch: Dispatch; onNavigate: Navigate; modelConnection: ModelConnectionState }) {
+export function ExecutionView({ state, dispatch, onNavigate, modelConnection, capabilities }: { state: AgentState; dispatch: Dispatch; onNavigate: Navigate; modelConnection: ModelConnectionState; capabilities: PlatformCapabilitySummary }) {
   const isWorking = taskCanBeCancelled(state);
   const handoffComplete = state.phase === "handoff" && state.workspace.ready;
   const failedResource = state.resources.find((resource) => resource.status === "failed");
@@ -1764,7 +1823,9 @@ export function ExecutionView({ state, dispatch, onNavigate, modelConnection }: 
   return (
     <section className="agent-view execution-view">
       <div className="agent-page-heading"><div><span>执行监控</span><h1>{handoffComplete ? "Agent 已完成工作区交接" : `Agent 正在${phaseLabel(state.phase)}`}</h1></div><button className="btn btn-ghost" data-testid="cancel-active-task" disabled={!isWorking} type="button" onClick={() => { void cancelActiveTaskAndReturnHome(dispatch, onNavigate).catch(() => undefined); }}><XCircle size={16} />取消任务</button></div>
-      <div className="execution-summary"><div><span>总体进度</span><strong>{overallProgress(state)}%</strong></div><div><span>本轮模型步骤</span><strong>{state.agentRun.step}/{state.agentRun.maxSteps}</strong></div><div><span>模型来源</span><strong>{modelConnection.activeProvider === "remote-llm" ? "远程 LLM" : "本地规则"}</strong></div><div><span>计划修订</span><strong>r{state.revision}</strong></div></div>
+      <div className="execution-summary"><div><span>总体进度</span><strong>{overallProgress(state)}%</strong></div><div><span>本轮模型步骤</span><strong>{state.agentRun.step}/{state.agentRun.maxSteps}</strong></div><div><span>模型来源</span><strong>{modelConnection.activeProvider === "remote-llm" ? "远程 LLM" : "本地规则"}</strong></div><div><span>下载通道</span><strong className={capabilities.downloadTransport?.mode === "xunlei-p2sp" ? "transport-xunlei" : undefined}>
+            {capabilities.downloadTransport?.mode === "xunlei-p2sp" ? "迅雷 P2SP" : "受控 HTTPS"}
+          </strong></div><div><span>计划修订</span><strong>r{state.revision}</strong></div></div>
       <TaskPlanExecutionPanel state={state} />
       {modelConnection.status === "fallback_local" && modelConnection.error ? <section className="model-fallback-notice" role="status" aria-live="polite"><WifiOff size={17} /><div><strong>远程模型不可用，任务已切换到本地规则模型</strong><span>{modelConnection.error.message}</span></div><button className="btn btn-ghost" type="button" onClick={() => onNavigate("settings")}>查看连接</button></section> : null}
       {state.phase === "awaiting_failure_action" && failedResource ? (
@@ -1948,6 +2009,7 @@ export function SettingsView({
         </section>
         <section className="settings-section">
           <div className="settings-section-heading"><PackageCheck size={17} /><div><h2>可信目录与制品校验</h2><span>审批固定目录版本；Windows 制品在 SHA256 后继续校验系统 Authenticode 与发布者。</span></div></div>
+          <div className="settings-row"><div><strong>下载传输通道</strong><span>{capabilities.downloadTransport?.sdkConfigured ? "宿主导入 dk.dll 后由 Main 切换到迅雷 SDK 传输；下载仍受同一套受控下载与校验约束。" : "未配置迅雷凭证时使用受控 HTTPS 后端，传输层接口保持可插拔。"}</span></div><code>{capabilities.downloadTransport?.label ?? "受控 HTTPS 下载"}</code></div>
           <div className="settings-row"><div><strong>目录版本</strong><span>非 active 条目不会进入新计划。</span></div><code>{trustedCatalogMetadata.catalogVersion}</code></div>
           <div className="settings-row"><div><strong>目录来源哈希</strong><span>执行时必须与审批记录逐字一致。</span></div><code>{trustedCatalogMetadata.sourceSha256.slice(0, 16)}…</code></div>
           <div className="settings-row"><div><strong>签名边界</strong><span>不向 Agent 暴露 PowerShell、Shell 或任意命令能力。</span></div><code>fail closed</code></div>

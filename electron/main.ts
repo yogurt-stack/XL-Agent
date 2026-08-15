@@ -37,6 +37,28 @@ const remoteModelClient = new RemoteModelClient();
 const githubRepositorySearchClient = new GitHubRepositorySearchClient();
 const githubPublisher = new GitHubPublisher();
 let nativeXunleiClient: NativeXunleiDownloadClient | null | undefined;
+
+function isXunleiSdkConfigured() {
+  return (
+    process.env.XL_AGENT_XUNLEI_ENABLED === "1" &&
+    Boolean(process.env.XL_AGENT_XUNLEI_APP_ID?.trim()) &&
+    Boolean(process.env.XL_AGENT_XUNLEI_API_KEY?.trim())
+  );
+}
+
+/**
+ * 迅雷 SDK 配置目录：必须使用纯 ASCII 路径，否则 xl_dl_init 失败。
+ * 优先使用系统临时目录；若临时目录仍含非 ASCII 字符（例如中文用户名），
+ * 回退到系统盘根目录的纯 ASCII 目录。
+ */
+function xunleiSdkConfigRoot() {
+  const temp = app.getPath("temp");
+  if (!/[^\x00-\x7F]/.test(temp)) {
+    return path.join(temp, "xl-agent-xunlei-sdk");
+  }
+  const systemDrive = process.env.SYSTEMDRIVE ?? "C:";
+  return path.join(systemDrive, "xl-agent-xunlei-sdk");
+}
 const downloadFixtureAttempts = new Map<string, number>();
 let taskStorePromise: Promise<TaskStore> | null = null;
 let runtimeHostPromise: Promise<AgentRuntimeHost> | null = null;
@@ -225,7 +247,12 @@ async function performTrustedDownload(
             appId,
             apiKey,
             helperPath,
-            configRoot: path.join(app.getPath("userData"), "xunlei-sdk")
+            // SDK 的 xl_dl_init 无法处理含非 ASCII 字符的配置目录。
+            // userData 会随 app.setName("迅雷 AI Task Agent") 变成含中文/空格的
+            // AppData\Roaming\迅雷 AI Task Agent，因此改用系统临时目录（ASCII）。
+            // 下载临时文件同样只落在 ASCII 目录，避免 SDK 写盘失败。
+            configRoot: xunleiSdkConfigRoot(),
+            tempRoot: xunleiSdkConfigRoot()
           })
         : null;
     }
@@ -278,7 +305,8 @@ function getAgentRuntimeHost() {
         workspaceRoot: getWorkspaceRoot(),
         performDownload: performTrustedDownload,
         cleanupManagedDemoFiles,
-        onSnapshot: broadcastRuntimeSnapshot
+        onSnapshot: broadcastRuntimeSnapshot,
+        xunleiTransportConfigured: isXunleiSdkConfigured()
       })
     );
   }

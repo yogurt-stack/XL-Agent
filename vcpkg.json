@@ -1,0 +1,8 @@
+{
+  "name": "xl-agent-native-deps",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "curl"
+  ],
+  "builtin-baseline": "9c16a692ff11ec926f5dffe67c7b506329504227"
+}
