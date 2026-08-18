@@ -25,10 +25,26 @@ XL-Agent 关注的不是“帮用户找一个下载链接”，而是把一个�
 典型任务包括：
 
 - “检查本机 Node.js、Python、CUDA 和 CMake 环境。”
+
 - “我想使用 PyTorch，分析当前环境还缺少什么。”
-- “找到 GitHub 上的 `taubyte/tau`，分析它的运行要求，不要下载。”
+
+- “找到 GitHub 上的 `xxx项目`，分析它的运行要求，不要下载。”
+
 - “把固定 commit 的项目源码准备到指定工作区。”
+
 - “导入这个本地 Git 仓库，对比项目依赖与本机环境。”
+
+  
+
+   项目内置了 7 个 Skill（createDefaultDomainSkillRegistry()）：
+
+   1. local-environment-compatibility-assessment（本地环境兼容性评估）
+   2. local-project-environment-compatibility（本地项目兼容性分析）
+   3. github-project-environment-compatibility（GitHub 项目兼容性分析）
+   4. local-development-environment-inspection（本地开发环境只读盘点）
+   5. github-project-discovery（GitHub 开源项目检索）
+   6. research-data-environment（科研数据环境）
+   7. ai-development-environment（AI 开发环境）
 
 ## 主要功能
 
