@@ -114,6 +114,101 @@ describe("default agent policy", () => {
     expect(policy.evaluate(activeDownload, { ...approved, approvedRevision: null }).outcome).toBe("deny");
   });
 
+  it("permits only one fixed local tree listing for repository structure analysis", () => {
+    const repositoryHandleId = "local-repo-structure-policy";
+    const state: AgentState = {
+      ...createInitialAgentState(),
+      phase: "planning",
+      task: "分析当前仓库的项目结构",
+      routeDecision: {
+        status: "supported",
+        reason: "structure fixture",
+        skillId: "local-repository-structure-analysis",
+        sourceProviderId: "local-git",
+        userLinks: [],
+        resourceIds: [],
+        clarifications: [],
+        requirements: null
+      },
+      localRepository: {
+        repositoryHandleId,
+        displayName: "structure-policy-fixture",
+        fingerprint: "f".repeat(64),
+        commitSha: "a".repeat(40),
+        branch: "main",
+        detached: false,
+        clean: true,
+        status: {
+          modified: 0,
+          deleted: 0,
+          untracked: 0,
+          conflicted: 0,
+          ahead: 0,
+          behind: 0
+        },
+        fileCount: 1,
+        trackedFileCount: 1,
+        hasSubmodules: false,
+        hasSymlinks: false,
+        inspectedAt: "2026-08-07T00:00:00.000Z",
+        analysis: {
+          ecosystems: [],
+          manifests: [],
+          lockfiles: [],
+          runtimeHints: [],
+          nodeOfflinePreparation: "not-node",
+          nodeOfflinePackageCount: 0,
+          nodeOfflineBlockers: [],
+          treeTruncated: false
+        }
+      }
+    };
+    const listTree: AgentAction = {
+      actionId: "list-local-tree",
+      type: "call_tool",
+      purpose: "列出固定仓库 Tree。",
+      call: {
+        callId: "list-local-tree",
+        name: "list_local_repository_tree",
+        input: { repositoryHandleId, maxEntries: 500 }
+      }
+    };
+    const readFile: AgentAction = {
+      actionId: "read-local-file",
+      type: "call_tool",
+      purpose: "不应读取文件正文。",
+      call: {
+        callId: "read-local-file",
+        name: "read_local_repository_file",
+        input: { repositoryHandleId, relativePath: "README.md" }
+      }
+    };
+    const createPlan: AgentAction = {
+      actionId: "structure-resource-plan",
+      type: "create_plan",
+      resourceIds: ["git"],
+      explanation: "结构分析不应创建资源计划。"
+    };
+
+    expect(policy.evaluate(listTree, state).outcome).toBe("allow");
+    expect(policy.evaluate(readFile, state).outcome).toBe("deny");
+    expect(policy.evaluate(createPlan, state).outcome).toBe("deny");
+    expect(policy.evaluate(listTree, {
+      ...state,
+      agentRun: {
+        ...state.agentRun,
+        toolResults: [{
+          callId: "list-local-tree",
+          tool: "list_local_repository_tree",
+          status: "success",
+          output: {},
+          startedAt: "start",
+          finishedAt: "finish"
+        }]
+      }
+    }).outcome).toBe("deny");
+  });
+
   it("contains GitHub discovery to one read-only search before finish", () => {
     let state = transition(createInitialAgentState(), {
       type: "SUBMIT_TASK",

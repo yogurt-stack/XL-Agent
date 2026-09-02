@@ -424,10 +424,14 @@ export class InMemoryAgentToolExecutor implements AgentToolExecutor {
       call.name === "inspect_project_requirements"
     ) {
       const repository = state.localRepository;
+      const structureAnalysis = state.routeDecision?.skillId ===
+        "local-repository-structure-analysis";
+      const supportedSkill = state.routeDecision?.skillId ===
+          "local-project-environment-compatibility" ||
+        (structureAnalysis && call.name === "list_local_repository_tree");
       if (
         state.phase !== "planning" ||
-        state.routeDecision?.skillId !==
-          "local-project-environment-compatibility" ||
+        !supportedSkill ||
         !repository ||
         call.input.repositoryHandleId !== repository.repositoryHandleId ||
         !this.localRepositoryTools
@@ -436,7 +440,7 @@ export class InMemoryAgentToolExecutor implements AgentToolExecutor {
           call,
           state,
           "LOCAL_REPOSITORY_TOOL_NOT_AUTHORIZED",
-          "本地仓库只读工具只能在绑定当前仓库句柄的项目兼容性任务中执行。",
+          "本地仓库只读工具只能在绑定当前仓库句柄的项目兼容性或结构分析任务中执行。",
           false
         );
       }
@@ -521,10 +525,14 @@ export class InMemoryAgentToolExecutor implements AgentToolExecutor {
       call.name === "inspect_github_project_requirements"
     ) {
       const repository = state.githubRepository;
+      const structureAnalysis = state.routeDecision?.skillId ===
+        "github-repository-structure-analysis";
+      const supportedSkill = state.routeDecision?.skillId ===
+          "github-project-environment-compatibility" ||
+        (structureAnalysis && call.name === "list_github_repository_tree");
       if (
         state.phase !== "planning" ||
-        state.routeDecision?.skillId !==
-          "github-project-environment-compatibility" ||
+        !supportedSkill ||
         !repository ||
         call.input.repositoryHandleId !== repository.repositoryHandleId ||
         !this.githubRepositoryTools
@@ -533,7 +541,7 @@ export class InMemoryAgentToolExecutor implements AgentToolExecutor {
           call,
           state,
           "GITHUB_REPOSITORY_TOOL_NOT_AUTHORIZED",
-          "GitHub 仓库只读工具只能在绑定当前固定 commit 的项目兼容性任务中执行。",
+          "GitHub 仓库只读工具只能在绑定当前固定 commit 的项目兼容性或结构分析任务中执行。",
           false
         );
       }
@@ -919,6 +927,8 @@ export class DefaultAgentPolicy implements AgentPolicy {
         [
           "local-development-environment-inspection",
           "local-environment-compatibility-assessment",
+          "local-repository-structure-analysis",
+          "github-repository-structure-analysis",
           "local-project-environment-compatibility",
           "github-project-environment-compatibility"
         ].includes(state.routeDecision?.skillId ?? "")
@@ -975,10 +985,10 @@ export class DefaultAgentPolicy implements AgentPolicy {
         if (
           state.phase !== "planning" ||
           ![
-          "local-development-environment-inspection",
-          "local-environment-compatibility-assessment",
-          "local-project-environment-compatibility",
-          "github-project-environment-compatibility"
+            "local-development-environment-inspection",
+            "local-environment-compatibility-assessment",
+            "local-project-environment-compatibility",
+            "github-project-environment-compatibility"
           ].includes(state.routeDecision?.skillId ?? "") ||
           alreadyCalled
         ) {
@@ -1006,18 +1016,22 @@ export class DefaultAgentPolicy implements AgentPolicy {
         const existing = state.agentRun.toolResults.filter(
           (result) => result.tool === call.name
         );
+        const structureAnalysis = state.routeDecision?.skillId ===
+          "local-repository-structure-analysis";
+        const supportedSkill = state.routeDecision?.skillId ===
+            "local-project-environment-compatibility" ||
+          (structureAnalysis && call.name === "list_local_repository_tree");
         const callLimit = call.name === "read_local_repository_file" ? 6 : 1;
         if (
           state.phase !== "planning" ||
-          state.routeDecision?.skillId !==
-            "local-project-environment-compatibility" ||
+          !supportedSkill ||
           !sameHandle ||
           existing.length >= callLimit
         ) {
           return {
             outcome: "deny",
             risk: "high",
-            reason: "本地仓库只读工具超出当前项目兼容性任务的句柄、阶段或调用次数边界。"
+            reason: "本地仓库只读工具超出当前兼容性或结构分析任务的句柄、阶段或调用次数边界。"
           };
         }
         return {
@@ -1038,18 +1052,22 @@ export class DefaultAgentPolicy implements AgentPolicy {
         const existing = state.agentRun.toolResults.filter(
           (result) => result.tool === call.name
         );
+        const structureAnalysis = state.routeDecision?.skillId ===
+          "github-repository-structure-analysis";
+        const supportedSkill = state.routeDecision?.skillId ===
+            "github-project-environment-compatibility" ||
+          (structureAnalysis && call.name === "list_github_repository_tree");
         const callLimit = call.name === "read_github_repository_file" ? 6 : 1;
         if (
           state.phase !== "planning" ||
-          state.routeDecision?.skillId !==
-            "github-project-environment-compatibility" ||
+          !supportedSkill ||
           !sameHandle ||
           existing.length >= callLimit
         ) {
           return {
             outcome: "deny",
             risk: "high",
-            reason: "GitHub 仓库只读工具超出当前固定 commit、阶段或调用次数边界。"
+            reason: "GitHub 仓库只读工具超出当前兼容性或结构分析任务的固定 commit、阶段或调用次数边界。"
           };
         }
         return {

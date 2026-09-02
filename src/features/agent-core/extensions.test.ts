@@ -194,6 +194,151 @@ describe("extensible routing and registries", () => {
     });
   });
 
+  it("routes a fixed local repository structure request to a one-tool read-only plan", () => {
+    const imported = transition(createInitialAgentState(), {
+      type: "LOCAL_REPOSITORY_IMPORTED",
+      taskId: "local-repository-structure-import",
+      repository: {
+        repositoryHandleId: "local-repo-structure-fixture",
+        displayName: "structure-fixture",
+        fingerprint: "f".repeat(64),
+        commitSha: "a".repeat(40),
+        branch: "main",
+        detached: false,
+        clean: true,
+        status: {
+          modified: 0,
+          deleted: 0,
+          untracked: 0,
+          conflicted: 0,
+          ahead: 0,
+          behind: 0
+        },
+        fileCount: 3,
+        trackedFileCount: 3,
+        hasSubmodules: false,
+        hasSymlinks: false,
+        inspectedAt: "2026-08-07T00:00:00.000Z",
+        analysis: {
+          ecosystems: ["node"],
+          manifests: ["package.json"],
+          lockfiles: [],
+          runtimeHints: ["Node.js"],
+          nodeOfflinePreparation: "lockfile-unsupported",
+          nodeOfflinePackageCount: 0,
+          nodeOfflineBlockers: [],
+          treeTruncated: false
+        }
+      }
+    });
+    const taskPlanning = transition(imported, {
+      type: "SUBMIT_TASK",
+      task: "分析当前项目的目录结构和模块布局",
+      taskId: "local-repository-structure-task"
+    });
+    const routed = new ExtensibleAgentRouter().route(taskPlanning);
+
+    expect(routed?.decision).toMatchObject({
+      status: "supported",
+      skillId: "local-repository-structure-analysis",
+      sourceProviderId: "local-git"
+    });
+
+    const proposed = proposeTaskPlanForTest(transition(taskPlanning, routed!));
+    expect(proposed.taskPlan?.steps).toHaveLength(2);
+    expect(proposed.taskPlan?.steps[0]).toMatchObject({
+      id: "analyze-local-repository-structure",
+      kind: "analysis",
+      execution: {
+        mode: "agent_loop",
+        allowedTools: ["list_local_repository_tree"],
+        maxToolCalls: 1
+      }
+    });
+    const localExecution = proposed.taskPlan?.steps[0]?.execution;
+    expect(localExecution?.mode).toBe("agent_loop");
+    if (localExecution?.mode === "agent_loop") {
+      expect(localExecution.allowedTools).not.toContain(
+        "read_local_repository_file"
+      );
+    }
+  });
+
+  it("routes a fixed GitHub repository structure request to a one-tool read-only plan", () => {
+    const searchResultState: AgentState = {
+      ...createInitialAgentState(),
+      taskId: "github-repository-structure-search",
+      phase: "result",
+      route: "github-project-discovery",
+      routeDecision: {
+        status: "supported",
+        reason: "matched",
+        skillId: "github-project-discovery",
+        sourceProviderId: "github-api",
+        userLinks: [],
+        resourceIds: [],
+        clarifications: [],
+        requirements: null
+      }
+    };
+    const attached = transition(searchResultState, {
+      type: "GITHUB_REPOSITORY_ANALYSIS_ATTACHED",
+      taskId: "github-repository-structure-attached",
+      repository: {
+        repositoryHandleId: "github-repo-structure-fixture",
+        fullName: "owner/structure-fixture",
+        displayName: "owner/structure-fixture",
+        defaultBranch: "main",
+        commitSha: "a".repeat(40),
+        treeSha: "b".repeat(40),
+        trackedFileCount: 3,
+        treeTruncated: false,
+        inspectedAt: "2026-08-07T00:00:00.000Z",
+        analysis: {
+          ecosystems: ["node"],
+          manifests: ["package.json"],
+          lockfiles: [],
+          runtimeHints: ["Node.js"],
+          nodeOfflinePreparation: "lockfile-unsupported",
+          nodeOfflinePackageCount: 0,
+          nodeOfflineBlockers: [],
+          treeTruncated: false
+        }
+      }
+    });
+    const taskPlanning = transition({ ...attached, phase: "result" }, {
+      type: "SUBMIT_TASK",
+      task: "请给出当前仓库的文件树和项目结构",
+      taskId: "github-repository-structure-task"
+    });
+    const routed = new ExtensibleAgentRouter().route(taskPlanning);
+
+    expect(routed?.decision).toMatchObject({
+      status: "supported",
+      skillId: "github-repository-structure-analysis",
+      sourceProviderId: "github-api"
+    });
+
+    const proposed = proposeTaskPlanForTest(transition(taskPlanning, routed!));
+    expect(proposed.taskPlan?.steps).toHaveLength(2);
+    expect(proposed.taskPlan?.steps[0]).toMatchObject({
+      id: "analyze-github-repository-structure",
+      kind: "analysis",
+      execution: {
+        mode: "agent_loop",
+        allowedTools: ["list_github_repository_tree"],
+        maxToolCalls: 1
+      }
+    });
+    const githubExecution = proposed.taskPlan?.steps[0]?.execution;
+    expect(githubExecution?.mode).toBe("agent_loop");
+    if (githubExecution?.mode === "agent_loop") {
+      expect(githubExecution.allowedTools).not.toContain(
+        "read_github_repository_file"
+      );
+    }
+  });
+
   it("starts a separate read-only analysis plan from a fixed GitHub search result", () => {
     const initial = createInitialAgentState();
     const searchResultState: AgentState = {

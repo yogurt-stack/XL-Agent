@@ -250,6 +250,113 @@ const localProjectAssessmentSignals = [
   "build requirements"
 ];
 
+const repositoryStructureSignals = [
+  "项目结构",
+  "仓库结构",
+  "代码结构",
+  "目录结构",
+  "文件结构",
+  "模块结构",
+  "架构概览",
+  "目录树",
+  "文件树",
+  "有哪些文件",
+  "有哪些目录",
+  "项目模块",
+  "repository structure",
+  "repository tree",
+  "directory tree",
+  "codebase structure",
+  "module layout"
+];
+
+const repositoryStructurePatterns = [
+  /(?:项目|仓库|代码|目录|文件|模块)(?:的)?(?:结构|树|布局|概览)/u,
+  /(?:项目|仓库)(?:的)?(?:目录|文件|模块)(?:结构|树|布局|概览)/u
+];
+
+/** 识别针对当前已授权仓库的目录、文件与模块布局概览任务。 */
+export function isRepositoryStructureAnalysisGoal(text: string) {
+  const normalized = normalizedTask(text);
+  return repositoryStructureSignals.some((keyword) =>
+    normalized.includes(keyword)
+  ) || repositoryStructurePatterns.some((pattern) => pattern.test(normalized));
+}
+
+export class LocalRepositoryStructureAnalysisSkill implements DomainSkill {
+  readonly id = "local-repository-structure-analysis";
+  readonly displayName = "本地仓库结构分析";
+  readonly sourceProviderId = "local-git";
+
+  describeForModel() {
+    return "只读列出用户已导入本地仓库固定 HEAD 的已跟踪文件，基于路径、大小和固定 commit 输出目录与模块布局概览；不读取文件正文、不执行或修改仓库。";
+  }
+
+  matches(goal: UserGoal, state?: AgentState) {
+    return goal.links.length === 0 &&
+      Boolean(state?.localRepository) &&
+      isRepositoryStructureAnalysisGoal(goal.text);
+  }
+
+  clarify(_goal: UserGoal, _profile: SystemProfile) {
+    return [];
+  }
+
+  buildRequirements(_context: PlanningContext): ResourceRequirement[] {
+    return [];
+  }
+
+  generateGuide(_context: WorkspaceContext): WorkspaceGuide {
+    return {
+      title: "本地仓库结构概览",
+      summary:
+        "结论仅来自固定 HEAD 的文件清单、路径和大小；未读取任何文件正文，也未执行仓库内容。",
+      nextActions: [
+        "核对报告中的固定 commit、条目数量与截断状态。",
+        "如需检索符号或阅读源码，创建后续只读仓库阅读任务。",
+        "如需修改、运行或测试项目，另建需要审批的 Task Plan revision。"
+      ]
+    };
+  }
+}
+
+export class GitHubRepositoryStructureAnalysisSkill implements DomainSkill {
+  readonly id = "github-repository-structure-analysis";
+  readonly displayName = "GitHub 仓库结构分析";
+  readonly sourceProviderId = "github-api";
+
+  describeForModel() {
+    return "只读列出用户已经选择且固定 commit 的 GitHub Tree，基于路径、大小和 commit 输出目录与模块布局概览；不读取文件正文、不下载或执行仓库。";
+  }
+
+  matches(goal: UserGoal, state?: AgentState) {
+    return goal.links.length === 0 &&
+      Boolean(state?.githubRepository) &&
+      isRepositoryStructureAnalysisGoal(goal.text);
+  }
+
+  clarify(_goal: UserGoal, _profile: SystemProfile) {
+    return [];
+  }
+
+  buildRequirements(_context: PlanningContext): ResourceRequirement[] {
+    return [];
+  }
+
+  generateGuide(_context: WorkspaceContext): WorkspaceGuide {
+    return {
+      title: "GitHub 仓库结构概览",
+      summary:
+        "结论仅来自固定 commit/tree 的文件清单、路径和大小；未读取文件正文、下载或执行仓库。",
+      nextActions: [
+        "核对 fullName、commitSha、treeSha 与 Tree 截断状态。",
+        "如需检索符号或阅读源码，创建后续只读仓库阅读任务。",
+        "如需下载、修改或运行项目，另建需要审批的 Task Plan revision。"
+      ]
+    };
+  }
+}
+
 /** 识别针对当前已导入固定 HEAD 的项目要求与本机环境对比任务。 */
 export function isLocalProjectEnvironmentCompatibilityGoal(text: string) {
   const normalized = normalizedTask(text);
@@ -667,6 +774,8 @@ export class ResearchDataEnvironmentSkill implements DomainSkill {
 
 export function createDefaultDomainSkillRegistry() {
   return new DomainSkillRegistry([
+    new GitHubRepositoryStructureAnalysisSkill(),
+    new LocalRepositoryStructureAnalysisSkill(),
     new GitHubProjectEnvironmentCompatibilitySkill(),
     new LocalProjectEnvironmentCompatibilitySkill(),
     new LocalEnvironmentCompatibilityAssessmentSkill(),
