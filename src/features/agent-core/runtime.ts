@@ -1278,6 +1278,25 @@ export class AgentRuntime implements AgentRuntimePort {
     }
     if (
       [
+        "local-repository-structure-analysis",
+        "github-repository-structure-analysis"
+      ].includes(this.state.routeDecision?.skillId ?? "")
+    ) {
+      const requiredTool = this.state.routeDecision?.skillId ===
+        "github-repository-structure-analysis"
+        ? "list_github_repository_tree"
+        : "list_local_repository_tree";
+      if (!action.evidence?.some((evidence) => evidence.source === requiredTool)) {
+        return {
+          ok: false,
+          code: "REPOSITORY_TREE_EVIDENCE_INCOMPLETE",
+          message: `仓库结构概览必须引用 ${requiredTool} 的本轮成功观测。`
+        };
+      }
+      return { ok: true };
+    }
+    if (
+      [
         "local-project-environment-compatibility",
         "github-project-environment-compatibility"
       ].includes(this.state.routeDecision?.skillId ?? "")
@@ -1752,6 +1771,18 @@ export class AgentRuntime implements AgentRuntimePort {
   private availableToolsForCurrentState(): AgentToolName[] {
     if (
       this.state.routeDecision?.skillId ===
+      "github-repository-structure-analysis"
+    ) {
+      return ["list_github_repository_tree"];
+    }
+    if (
+      this.state.routeDecision?.skillId ===
+      "local-repository-structure-analysis"
+    ) {
+      return ["list_local_repository_tree"];
+    }
+    if (
+      this.state.routeDecision?.skillId ===
       "github-project-environment-compatibility"
     ) {
       return [
@@ -1871,6 +1902,46 @@ export class AgentRuntime implements AgentRuntimePort {
           step.staticInput.interaction === "repository_selection";
     });
     if (!decisionsValid) return false;
+    if (
+      this.state.routeDecision?.skillId ===
+      "local-repository-structure-analysis"
+    ) {
+      if (!this.state.localRepository) return false;
+      const analysisSteps = proposal.steps.filter(
+        (step) => step.kind === "analysis" && step.execution?.mode === "agent_loop"
+      );
+      const execution = analysisSteps[0]?.execution;
+      return proposal.steps.length === 2 &&
+        proposal.steps.filter((step) => step.kind === "handoff").length === 1 &&
+        analysisSteps.length === 1 &&
+        execution?.mode === "agent_loop" &&
+        execution.allowedTools.length === 1 &&
+        execution.allowedTools[0] === "list_local_repository_tree" &&
+        execution.maxToolCalls === 1 &&
+        proposal.steps.every(
+          (step) => step.risk === "read_only" && !step.approval.required
+        );
+    }
+    if (
+      this.state.routeDecision?.skillId ===
+      "github-repository-structure-analysis"
+    ) {
+      if (!this.state.githubRepository) return false;
+      const analysisSteps = proposal.steps.filter(
+        (step) => step.kind === "analysis" && step.execution?.mode === "agent_loop"
+      );
+      const execution = analysisSteps[0]?.execution;
+      return proposal.steps.length === 2 &&
+        proposal.steps.filter((step) => step.kind === "handoff").length === 1 &&
+        analysisSteps.length === 1 &&
+        execution?.mode === "agent_loop" &&
+        execution.allowedTools.length === 1 &&
+        execution.allowedTools[0] === "list_github_repository_tree" &&
+        execution.maxToolCalls === 1 &&
+        proposal.steps.every(
+          (step) => step.risk === "read_only" && !step.approval.required
+        );
+    }
     if (
       this.state.routeDecision?.skillId ===
       "local-project-environment-compatibility"

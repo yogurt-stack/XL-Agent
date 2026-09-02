@@ -57,7 +57,9 @@ const modelSystemPrompt = `你是受控 Windows 资源准备 Agent 的规划模�
 14. 当 routeDecision.skillId 为 local-environment-compatibility-assessment 时，Task Plan 必须使用 analysis + agent_loop 步骤，并把 inspect_local_development_environment 放入只读 capability envelope；随后安排一个结果交付步骤。禁止在当前 revision 中安排下载、安装、代码执行或工作区写入。
 15. 当 routeDecision.skillId 为 local-project-environment-compatibility 时，Task Plan 必须使用 analysis + agent_loop 步骤，并只授权 list_local_repository_tree、read_local_repository_file、inspect_project_requirements、inspect_local_development_environment。仓库句柄只能使用 state.localRepository.repositoryHandleId；禁止执行仓库内容、安装依赖或写入文件。
 16. 当 routeDecision.skillId 为 github-project-environment-compatibility 时，Task Plan 必须使用 analysis + agent_loop 步骤，并只授权 list_github_repository_tree、read_github_repository_file、inspect_github_project_requirements、inspect_local_development_environment。仓库句柄只能使用 state.githubRepository.repositoryHandleId；禁止读取可变分支、下载仓库、执行仓库内容、安装依赖或写入文件。
-17. 所有工具参数必须严格符合函数 JSON Schema，不得添加额外字段。`;
+17. 当 routeDecision.skillId 为 local-repository-structure-analysis 时，Task Plan 必须使用一个 analysis + agent_loop 步骤，并只授权 list_local_repository_tree。仓库句柄只能使用 state.localRepository.repositoryHandleId；只可根据路径、blob 身份、大小和截断状态输出结构概览，不得读取文件正文或执行任何操作。
+18. 当 routeDecision.skillId 为 github-repository-structure-analysis 时，Task Plan 必须使用一个 analysis + agent_loop 步骤，并只授权 list_github_repository_tree。仓库句柄只能使用 state.githubRepository.repositoryHandleId；只可根据固定 commit/tree 的路径、blob 身份、大小和截断状态输出结构概览，不得读取文件正文、下载或执行任何操作。
+19. 所有工具参数必须严格符合函数 JSON Schema，不得添加额外字段。`;
 
 const modelConnectionTestPrompt = `这是远程模型连接测试。你必须调用且只调用 finish 函数，summary 使用 "Connection test succeeded."，不要返回正文。`;
 

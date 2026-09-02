@@ -118,6 +118,14 @@ export class LocalRuleModelRuntime implements ModelRuntime {
         turnId
       );
     }
+    if (
+      context.availableTools.some((tool) =>
+        tool.name === "list_local_repository_tree" ||
+        tool.name === "list_github_repository_tree"
+      )
+    ) {
+      return this.generateRepositoryStructureTurn(context, turnId);
+    }
     const observation = [...context.transcript].reverse().find(
       (message): message is AgentLoopToolResultMessage<AgentToolName> =>
         message.role === "toolResult" &&
@@ -400,6 +408,126 @@ export class LocalRuleModelRuntime implements ModelRuntime {
             summary: `读取 ${environment.output.tools.length} 个固定本机工具状态。`
           }
         ]
+      }
+    };
+  }
+
+  private generateRepositoryStructureTurn(
+    context: AgentTurnContext<AgentToolName, unknown, TaskPlanProposal>,
+    turnId: string
+  ): AgentAssistantTurn<AgentToolName, unknown, TaskPlanProposal> {
+    const userContext = context.transcript
+      .filter((message) => message.role === "user")
+      .map((message) => message.content)
+      .join("\n");
+    const githubMode = context.availableTools.some(
+      (tool) => tool.name === "list_github_repository_tree"
+    );
+    const repositoryHandleId = userContext.match(
+      githubMode
+        ? /github-repo-[a-z0-9-]{1,120}/iu
+        : /local-repo-[a-z0-9-]{1,120}/iu
+    )?.[0];
+    const treeTool = githubMode
+      ? "list_github_repository_tree" as const
+      : "list_local_repository_tree" as const;
+    if (!repositoryHandleId) {
+      return {
+        turnId,
+        rationaleSummary: "当前结构分析缺少固定仓库句柄，无法安全列出文件清单。",
+        action: {
+          type: "ask_clarification",
+          questionId: githubMode
+            ? "reattach-github-repository"
+            : "reimport-local-repository",
+          question: githubMode
+            ? "请返回 GitHub 查询结果，重新选择需要分析结构的仓库。"
+            : "请重新导入需要分析结构的本地 Git 仓库。",
+          reason: "目录浏览工具必须绑定当前应用会话中的固定仓库句柄。",
+          required: true
+        }
+      };
+    }
+    const observations = context.transcript.filter(
+      (message): message is AgentLoopToolResultMessage<AgentToolName> =>
+        message.role === "toolResult"
+    );
+    const tree = [...observations].reverse().find(
+      (message) => message.tool === treeTool
+    );
+    if (!tree) {
+      return {
+        turnId,
+        rationaleSummary: "先列出固定仓库的文件清单，再依据路径层级形成结构概览。",
+        action: {
+          type: "tool_calls",
+          calls: [{
+            callId: `${turnId}-tree`.slice(0, 160),
+            name: treeTool,
+            input: { repositoryHandleId, maxEntries: 500 },
+            risk: "read_only"
+          }]
+        }
+      };
+    }
+    const treeOutput = githubMode
+      ? isGitHubRepositoryTreeOutput(tree.output) ? tree.output : null
+      : isLocalRepositoryTreeOutput(tree.output) ? tree.output : null;
+    if (tree.status !== "success" || !treeOutput) {
+      return {
+        turnId,
+        rationaleSummary: "固定仓库文件清单读取失败，不能根据不完整或未知数据编造结构结论。",
+        action: {
+          type: "ask_clarification",
+          questionId: githubMode
+            ? "reattach-github-repository"
+            : "reimport-local-repository",
+          question: githubMode
+            ? "GitHub 固定仓库会话已失效，请重新选择仓库后重试。"
+            : "本地固定仓库会话已失效，请重新导入后重试。",
+          reason: tree.error?.message ?? "仓库文件清单没有返回合法结果。",
+          required: true
+        }
+      };
+    }
+    const entries = treeOutput.entries;
+    const topLevelDirectories = [...new Set(entries
+      .map((entry) => entry.relativePath.split("/")[0])
+      .filter((name) => entries.some((entry) =>
+        entry.relativePath.startsWith(`${name}/`)
+      )))]
+      .sort((left, right) => left.localeCompare(right));
+    const topLevelFiles = entries
+      .filter((entry) => !entry.relativePath.includes("/"))
+      .map((entry) => entry.relativePath)
+      .sort((left, right) => left.localeCompare(right));
+    const scope = treeOutput.truncated
+      ? "返回结果已截断，概览只覆盖当前受控 Tree 响应。"
+      : "文件清单未截断，概览覆盖当前受控 Tree 返回的全部已跟踪条目。";
+    return {
+      turnId,
+      rationaleSummary: "已读取固定仓库文件清单；仅按路径层级、文件数量和截断状态形成结构概览。",
+      action: {
+        type: "complete_step",
+        summary:
+          `仓库结构概览完成：发现 ${treeOutput.totalMatchingEntries} 个匹配条目，` +
+          `返回 ${entries.length} 个条目；顶层目录 ${topLevelDirectories.join("、") || "无"}。${scope}`,
+        output: {
+          repository: treeOutput.repository,
+          pathPrefix: treeOutput.pathPrefix,
+          totalMatchingEntries: treeOutput.totalMatchingEntries,
+          returnedEntries: entries.length,
+          topLevelDirectories,
+          topLevelFiles,
+          truncated: treeOutput.truncated,
+          boundary: treeOutput.boundary,
+          contentRead: false
+        },
+        evidence: [{
+          source: tree.tool,
+          reference: tree.callId,
+          summary: `${githubMode ? "固定 GitHub Tree" : "固定 HEAD"} 返回 ${entries.length}/${treeOutput.totalMatchingEntries} 个文件条目。`
+        }]
       }
     };
   }

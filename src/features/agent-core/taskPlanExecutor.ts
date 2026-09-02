@@ -89,6 +89,8 @@ function commandForRunningStep(
       [
         "local-development-environment-inspection",
         "local-environment-compatibility-assessment",
+        "local-repository-structure-analysis",
+        "github-repository-structure-analysis",
         "local-project-environment-compatibility",
         "github-project-environment-compatibility"
       ].includes(state.routeDecision?.skillId ?? "");

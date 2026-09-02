@@ -357,6 +357,157 @@ describe("AgentRuntime TaskPlan analysis AgentLoop", () => {
       ]);
   });
 
+  it("lists a fixed local repository Tree once without reading file contents", async () => {
+    const { jobs, scheduler } = queuedScheduler();
+    const repositoryHandleId = "local-repo-structure-runtime";
+    const commitSha = "a".repeat(40);
+    const listTree = vi.fn(async () => ({
+      repository: {
+        repositoryHandleId,
+        displayName: "structure-runtime-fixture",
+        commitSha
+      },
+      pathPrefix: "",
+      entries: [{
+        relativePath: "README.md",
+        objectId: "b".repeat(40),
+        bytes: 100
+      }, {
+        relativePath: "package.json",
+        objectId: "c".repeat(40),
+        bytes: 200
+      }, {
+        relativePath: "docs/design.md",
+        objectId: "d".repeat(40),
+        bytes: 300
+      }, {
+        relativePath: "src/main.ts",
+        objectId: "e".repeat(40),
+        bytes: 400
+      }],
+      totalMatchingEntries: 6,
+      truncated: true,
+      boundary: "fixed-head-tracked-files-only" as const
+    }));
+    const readFile = vi.fn(async () => {
+      throw new Error("结构分析不应读取文件正文。");
+    });
+    const inspectRequirements = vi.fn(async () => {
+      throw new Error("结构分析不应提取项目运行要求。");
+    });
+    const tools = new InMemoryAgentToolExecutor(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { listTree, readFile, inspectRequirements }
+    );
+    const runtime = new AgentRuntime({
+      router: new ExtensibleAgentRouter(),
+      planner: new FixedWindowsPlanner(),
+      verifier: new MockVerifier(),
+      scheduler,
+      model: new LocalRuleModelRuntime(),
+      tools,
+      policy: new DefaultAgentPolicy(),
+      stepDelayMs: 0,
+      createTaskId: () => "runtime-local-repository-structure"
+    });
+    runtime.start();
+    runtime.reportExternalEvent({
+      type: "LOCAL_REPOSITORY_IMPORTED",
+      taskId: "local-repository-structure-import",
+      repository: {
+        repositoryHandleId,
+        displayName: "structure-runtime-fixture",
+        fingerprint: "f".repeat(64),
+        commitSha,
+        branch: "main",
+        detached: false,
+        clean: true,
+        status: {
+          modified: 0,
+          deleted: 0,
+          untracked: 0,
+          conflicted: 0,
+          ahead: 0,
+          behind: 0
+        },
+        fileCount: 6,
+        trackedFileCount: 6,
+        hasSubmodules: false,
+        hasSymlinks: false,
+        inspectedAt: "2026-08-07T00:00:00.000Z",
+        analysis: {
+          ecosystems: ["node"],
+          manifests: ["package.json"],
+          lockfiles: [],
+          runtimeHints: ["Node.js"],
+          nodeOfflinePreparation: "lockfile-unsupported",
+          nodeOfflinePackageCount: 0,
+          nodeOfflineBlockers: [],
+          treeTruncated: false
+        }
+      }
+    });
+    runtime.dispatch({
+      type: "SUBMIT_TASK",
+      task: "分析当前项目的结构、目录和模块"
+    });
+    await runUntil(
+      jobs,
+      runtime,
+      (state) => state.phase === "waiting_task_plan_confirmation",
+      30
+    );
+
+    expect(runtime.getState().taskPlan?.steps[0]).toMatchObject({
+      id: "analyze-local-repository-structure",
+      execution: {
+        mode: "agent_loop",
+        allowedTools: ["list_local_repository_tree"],
+        maxToolCalls: 1
+      }
+    });
+
+    runtime.dispatch({ type: "CONFIRM_TASK_PLAN", revision: 1 });
+    await runUntil(jobs, runtime, (state) => state.phase === "result", 30);
+
+    const structureStep = runtime.getState().taskPlan?.steps.find(
+      (step) => step.id === "analyze-local-repository-structure"
+    );
+    expect(runtime.getState()).toMatchObject({
+      phase: "result",
+      resources: [],
+      taskPlan: { status: "completed" },
+      agentRun: {
+        agentLoop: {
+          status: "completed",
+          usage: { turns: 2, toolCalls: 1, executedToolCalls: 1 }
+        }
+      }
+    });
+    expect(structureStep?.result?.output).toMatchObject({
+      result: {
+        repository: { repositoryHandleId, commitSha },
+        totalMatchingEntries: 6,
+        returnedEntries: 4,
+        topLevelDirectories: ["docs", "src"],
+        topLevelFiles: ["package.json", "README.md"],
+        truncated: true,
+        contentRead: false
+      }
+    });
+    expect(structureStep?.result?.summary).toContain("已截断");
+    expect(runtime.getState().agentRun.toolResults.map((result) => result.tool))
+      .toEqual(["list_local_repository_tree"]);
+    expect(listTree).toHaveBeenCalledTimes(1);
+    expect(readFile).not.toHaveBeenCalled();
+    expect(inspectRequirements).not.toHaveBeenCalled();
+  });
+
   it("runs fixed GitHub Tree requirement extraction and local comparison without downloading", async () => {
     const { jobs, scheduler } = queuedScheduler();
     const repositoryHandleId = "github-repo-runtimefixture";
