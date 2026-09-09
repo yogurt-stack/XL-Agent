@@ -62,6 +62,19 @@ function expectProtocolError(
 }
 
 describe("OpenAI-compatible Agent Loop model protocol", () => {
+  it("advertises and parses web tools without granting write capabilities", () => {
+    const names = ["search_web", "read_web_page"] as const;
+    const tools = createOpenAiAgentLoopTools(createOpenAiAgentTools([...names], []));
+    expect(tools.map((tool) => tool.function.name)).toEqual([...AGENT_LOOP_CONTROL_TOOL_NAMES, ...names]);
+    const search = parseOpenAiAgentTurn(nativeMessage(nativeCall("search_web", {
+      query: "offline RAG Windows 中文", limit: 5, purpose: "发现候选", explanation: "保留完整需求。"
+    }, "web-search")), "test-model", { availableRuntimeTools: [...names], maxCalls: 1 });
+    expect(search.action).toMatchObject({ type: "tool_calls", calls: [{ name: "search_web", input: { query: "offline RAG Windows 中文", limit: 5 }, risk: "read_only" }] });
+    const page = parseOpenAiAgentTurn(nativeMessage(nativeCall("read_web_page", {
+      url: "https://docs.python.org/3/", purpose: "核对正文", explanation: "根据搜索结果读取来源。"
+    }, "web-page")), "test-model", { availableRuntimeTools: [...names], maxCalls: 1 });
+    expect(page.action).toMatchObject({ type: "tool_calls", calls: [{ name: "read_web_page", input: { url: "https://docs.python.org/3/" } }] });
+  });
   it("reuses supplied runtime definitions and adds the three strict controls", () => {
     const legacyRuntimeTools = createOpenAiAgentTools(
       ["read_system_profile", "inspect_local_development_environment"],

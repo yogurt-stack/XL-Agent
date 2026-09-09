@@ -1,4 +1,5 @@
 import { githubSearchInputFromState } from "./githubSearch";
+import { webResearchInstructions } from "./webResearch";
 import type {
   AgentToolName,
   ModelContext,
@@ -748,6 +749,23 @@ function createResourceTaskPlan(context: ModelContext): TaskPlanProposal {
 export function createLocalTaskPlanProposal(
   context: ModelContext
 ): TaskPlanProposal {
+  if (context.state.routeDecision?.skillId === "web-research") {
+    const research = analysisStep("research-web", "搜索并核对网页来源", "按用户目标多轮搜索、读取正文、比较证据并给出来源。", ["search_web", "read_web_page"], [],
+      "结构化网页研究报告：status、summary、findings（claim 与 urls）、limitations", [webResearchInstructions]);
+    if (research.execution?.mode === "agent_loop") {
+      research.execution.maxTurns = 18;
+      research.execution.maxToolCalls = 15;
+      research.execution.maxWallTimeMs = 240000;
+    }
+    return {
+      objective: context.state.task,
+      deliverables: ["带网页引用和覆盖范围说明的研究结果"],
+      assumptions: ["仅查询公开网页；可在用户目标内调整关键词。"],
+      constraints: [webResearchInstructions],
+      steps: [research, passiveStep("present-web-research", "展示研究结果", "展示结论、来源和未能确认的信息。", "handoff", ["research-web"], "带引用的网页研究结果")],
+      confirmation: { required: true, reason: "确认本次公开网页研究目标和调用预算。" }
+    };
+  }
   if (
     context.state.routeDecision?.skillId ===
     "github-repository-structure-analysis"

@@ -157,7 +157,7 @@ describe("AgentRuntime routing recovery", () => {
     ["tau", "tau"],
     ["寻找tau", "tau"]
   ])(
-    "routes the fuzzy repository request %s to a GitHub name search",
+    "routes the fuzzy repository request %s to web research",
     (task, expectedQuery) => {
       const { runtime } = createRuntime(new ExtensibleAgentRouter());
       runtime.start();
@@ -166,11 +166,11 @@ describe("AgentRuntime routing recovery", () => {
 
       expect(state).toMatchObject({
         phase: "task_planning",
-        route: "github-project-discovery",
+        route: "web-research",
         routeDecision: {
           status: "supported",
-          skillId: "github-project-discovery",
-          sourceProviderId: "github-api",
+          skillId: "web-research",
+          sourceProviderId: "web-search",
           clarifications: []
         }
       });

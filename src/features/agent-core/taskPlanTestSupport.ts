@@ -9,6 +9,8 @@ import { createLocalTaskPlanProposal } from "./taskPlanTemplates";
 import type { AgentState, AgentToolName } from "./types";
 
 const testTools: AgentToolName[] = [
+  "search_web",
+  "read_web_page",
   "read_system_profile",
   "inspect_local_development_environment",
   "list_local_repository_tree",

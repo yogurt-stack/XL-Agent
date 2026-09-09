@@ -1,4 +1,5 @@
 import type { ModelRuntime } from "./interfaces";
+import { localWebResearchTurn } from "./webResearch";
 import type {
   AgentAssistantTurn,
   AgentLoopToolResultMessage,
@@ -107,6 +108,9 @@ export class LocalRuleModelRuntime implements ModelRuntime {
     const turnId = `local-loop-${context.runId}-${context.turn}`
       .replace(/[^a-z0-9._-]/giu, "-")
       .slice(0, 160);
+    if (context.availableTools.some((tool) => tool.name === "search_web")) {
+      return localWebResearchTurn(context, turnId);
+    }
     if (
       context.availableTools.some((tool) =>
         tool.name === "inspect_project_requirements" ||
@@ -687,7 +691,7 @@ export class LocalRuleModelRuntime implements ModelRuntime {
           type: "finish",
           summary:
             result.status === "success"
-              ? `GitHub 公开仓库检索完成，共返回 ${count} 个带明确开源许可证的项目。`
+              ? `GitHub 公开仓库检索完成，共返回 ${count} 个候选；许可证与归档状态请逐项核对。`
               : `GitHub 公开仓库检索未完成：${result.error?.message ?? "未知错误"}`
         },
         "GitHub API Tool 已返回候选仓库；用户可在结果页选择仓库并进入固定提交与审批下载流程。"

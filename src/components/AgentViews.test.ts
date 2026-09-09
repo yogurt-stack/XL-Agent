@@ -311,7 +311,7 @@ describe("clarification view", () => {
   it("reports an unrenderable GitHub decision as a plan recovery instead of an API failure", () => {
     let state = transition(createInitialAgentState(), {
       type: "SUBMIT_TASK",
-      task: "帮我在 GitHub 上找一个名叫 tau 的项目",
+      task: "使用 GitHub API，帮我在 GitHub 上找一个名叫 tau 的项目",
       taskId: "github-stalled-plan"
     });
     state = transition(state, new ExtensibleAgentRouter().route(state)!);

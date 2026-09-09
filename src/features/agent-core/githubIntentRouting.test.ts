@@ -15,6 +15,10 @@ function submitted(task: string) {
 }
 
 describe("GitHub natural-language intent routing", () => {
+  it("keeps both words in descriptive discovery and defaults to all creation dates", () => {
+    const input = githubSearchInputFromState(submitted("下载 deepseek harness"));
+    expect(input).toMatchObject({ mode: "discovery", keywords: expect.stringContaining("deepseek harness"), createdWithinDays: null });
+  });
   it("treats a bare repository token as a name query", () => {
     expect(inferGitHubSearchIntent({ text: "tau" })).toEqual({
       mode: "name",
@@ -46,12 +50,12 @@ describe("GitHub natural-language intent routing", () => {
     });
   });
 
-  it("recognizes an explicit project-name command as a name search", () => {
+  it("routes a project-name command to web research while retaining the legacy name parser", () => {
     const task = "帮我找 tau 项目";
     expect(new ExtensibleAgentRouter().route(submitted(task))?.decision)
       .toMatchObject({
         status: "supported",
-        skillId: "github-project-discovery",
+        skillId: "web-research",
         clarifications: []
       });
     expect(githubSearchInputFromState(submitted(task))).toEqual({

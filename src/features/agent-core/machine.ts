@@ -50,6 +50,7 @@ const primaryCatalogIds = ["python-312", "vscode", "git", "node-lts", "sample-pr
  */
 function isGitHubAcquisitionRoute(state: AgentState) {
   return (
+    state.routeDecision?.skillId === "web-research" ||
     state.routeDecision?.skillId === "github-project-discovery" ||
     state.routeDecision?.skillId ===
       "github-project-environment-compatibility"
@@ -1625,6 +1626,7 @@ export function transition(state: AgentState, event: AgentEvent): AgentState {
       if (
         state.phase !== "result" ||
         ![
+          "web-research",
           "github-project-discovery",
           "github-project-environment-compatibility"
         ].includes(state.routeDecision?.skillId ?? "")

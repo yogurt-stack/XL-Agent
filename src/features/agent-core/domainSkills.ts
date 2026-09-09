@@ -1,4 +1,5 @@
 import { clarificationQuestions } from "./catalog";
+import { publicWebUrl } from "./webResearch";
 import {
   deriveTaskRequirements,
   inferLocalTaskIntent
@@ -536,14 +537,14 @@ export class GitHubProjectDiscoverySkill implements DomainSkill {
   }
 
   clarify(goal: UserGoal, _profile: SystemProfile) {
-    if (inferGitHubSearchIntent(goal).mode !== "discovery") return [];
+    if (inferGitHubSearchIntent(goal).mode !== "discovery" || !/(最新|最近|新建|trending|latest|recent)/iu.test(goal.text)) return [];
     return [
       {
         id: "github-created-window",
         prompt: "要查看多长时间内新建的 GitHub 项目？",
         reason: "“最新”需要明确时间窗口，才能与 Star 热度一起稳定排序。",
         required: true,
-        options: ["最近 7 天新建", "最近 30 天新建", "最近 90 天新建"]
+        options: ["不限新建时间", "最近 7 天新建", "最近 30 天新建", "最近 90 天新建"]
       },
       {
         id: "github-sort",
@@ -778,10 +779,33 @@ export function createDefaultDomainSkillRegistry() {
     new LocalRepositoryStructureAnalysisSkill(),
     new GitHubProjectEnvironmentCompatibilitySkill(),
     new LocalProjectEnvironmentCompatibilitySkill(),
+    new WebResearchSkill(),
     new LocalEnvironmentCompatibilityAssessmentSkill(),
     new LocalDevelopmentEnvironmentInspectionSkill(),
     new GitHubProjectDiscoverySkill(),
     new ResearchDataEnvironmentSkill(),
     new AiDevelopmentEnvironmentSkill()
   ]);
+}
+
+export class WebResearchSkill implements DomainSkill {
+  readonly id = "web-research";
+  readonly displayName = "网页搜索与研究";
+  readonly sourceProviderId = "web-search";
+  describeForModel() { return "使用通用搜索引擎查找项目、文档、教程、新闻与公开资料；读取网页正文，多轮改写查询、核对需求并给出来源。"; }
+  matches(goal: UserGoal) {
+    const intent = inferGitHubSearchIntent(goal);
+    if (/github\s*api/iu.test(goal.text)) return false;
+    const explicitWeb = /(网页|文档|教程|官网|技术文章|新闻|全网|联网)/iu.test(goal.text);
+    if (!explicitWeb && isLocalDevelopmentEnvironmentInspectionGoal(goal.text)) return false;
+    // Explicit repositories retain their existing pinned-repository workflow.
+    if (intent.mode === "exact") return false;
+    return explicitWeb || intent.mode === "name" || goal.links.some((link) => publicWebUrl(link) !== null) ||
+      /(?:下载|克隆)\s*[A-Za-z0-9_.-]+\s+[A-Za-z0-9_.-]+/u.test(goal.text) ||
+      /(搜索|检索|查找|寻找|找一下|搜一下|帮我找|查询.*(?:资料|文档|项目)|查阅|阅读.*(?:网页|文章)|调研|教程|官网|新闻|全网|联网|比较.*项目|对比.*项目|\b(?:search|find|research|look up)\b)/iu.test(goal.text) ||
+      /github/iu.test(goal.text);
+  }
+  clarify() { return []; }
+  buildRequirements(): ResourceRequirement[] { return []; }
+  generateGuide(): WorkspaceGuide { return { title: "网页研究结果", summary: "通过搜索和正文阅读收集的有来源资料。", nextActions: ["核对引用与未确认条件，再选择需要深入分析的仓库。"] }; }
 }

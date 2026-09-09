@@ -1,4 +1,5 @@
 import { getTrustedCatalogStatus } from "./catalog";
+import { webPageAllowed, webPageOutputSchema, webSearchOutputSchema, type WebResearchTools } from "./webResearch";
 import { parseAgentToolCall } from "./agentSchemas";
 import {
   githubSearchInputFromState,
@@ -313,9 +314,12 @@ export class InMemoryAgentToolExecutor implements AgentToolExecutor {
       fallbackDevelopmentEnvironmentInspection,
     private readonly localRepositoryTools?: LocalRepositoryAgentToolRunners,
     private readonly githubRepositoryTools?: GitHubRepositoryAgentToolRunners,
-    private readonly candidateSelector?: CandidateSelector
+    private readonly candidateSelector?: CandidateSelector,
+    private readonly webTools?: WebResearchTools
   ) {
     for (const name of [
+      "search_web",
+      "read_web_page",
       "read_system_profile",
       "inspect_local_development_environment",
       "list_local_repository_tree",
@@ -349,6 +353,19 @@ export class InMemoryAgentToolExecutor implements AgentToolExecutor {
     state: AgentState,
     options?: AgentToolExecutionOptions
   ): Promise<ToolResult> {
+    if (call.name === "search_web" || call.name === "read_web_page") {
+      const decision = new DefaultAgentPolicy().evaluate({ actionId: call.callId, type: "call_tool", purpose: "网页研究", call }, state);
+      if (decision.outcome !== "allow") return errorResult(call, state, "WEB_POLICY_DENIED", decision.reason, false);
+      if (!this.webTools) return errorResult(call, state, "WEB_SEARCH_UNAVAILABLE", "当前宿主没有配置网页搜索服务。", false);
+      try {
+        const output = call.name === "search_web"
+          ? webSearchOutputSchema.parse(await this.webTools.search(call.input, options))
+          : webPageOutputSchema.parse(await this.webTools.readPage(call.input, options));
+        return successResult(call, state, output);
+      } catch (error) {
+        return errorResult(call, state, "WEB_REQUEST_FAILED", options?.signal?.aborted ? "网页请求已取消。" : error instanceof Error ? error.message.slice(0, 600) : "网页请求失败。", true);
+      }
+    }
     if (call.name === "read_system_profile") {
       try {
         return successResult(call, state, await this.readSystemProfile(options));
@@ -923,6 +940,7 @@ export class DefaultAgentPolicy implements AgentPolicy {
 
     if (action.type === "create_plan") {
       if (
+        state.routeDecision?.skillId === "web-research" ||
         state.routeDecision?.skillId === "github-project-discovery" ||
         [
           "local-development-environment-inspection",
@@ -1075,6 +1093,18 @@ export class DefaultAgentPolicy implements AgentPolicy {
           risk: "low",
           reason: "该工具仅通过 GitHub API 读取当前固定 Tree 中的白名单文本证据。"
         };
+      }
+
+      if (call.name === "search_web" || call.name === "read_web_page") {
+        const step = state.taskPlan?.steps.find((item) => item.status === "running");
+        const execution = step?.execution;
+        const allowed = state.phase === "planning" && state.routeDecision?.skillId === "web-research" &&
+          state.taskPlan?.confirmation.confirmedRevision === state.taskPlan?.revision && execution?.mode === "agent_loop" && execution.allowedTools.includes(call.name);
+        const count = state.agentRun.toolResults.filter((r) => r.tool === call.name).length;
+        if (!allowed || count >= (call.name === "search_web" ? 5 : 10) || (call.name === "read_web_page" && !webPageAllowed(state, call.input.url))) {
+          return { outcome: "deny", risk: "high", reason: "网页工具超出已确认的研究步骤、调用预算，或读取目标尚未由用户、搜索结果或正文链接提供。" };
+        }
+        return { outcome: "allow", risk: "low", reason: "在已确认的公开网页研究目标内进行有预算的只读检索。" };
       }
 
       if (call.name === "search_github_repositories") {

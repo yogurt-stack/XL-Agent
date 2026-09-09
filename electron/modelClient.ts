@@ -35,6 +35,7 @@ import type {
 } from "../src/features/agent-core/types";
 import { parseTaskPlanProposal } from "../src/features/agent-core/taskPlan";
 import { z } from "zod";
+import { webObservationForModel } from "../src/features/agent-core/webResearch";
 
 const modelSystemPrompt = `你是受控 Windows 资源准备 Agent 的规划模型。
 
@@ -59,7 +60,8 @@ const modelSystemPrompt = `你是受控 Windows 资源准备 Agent 的规划模�
 16. 当 routeDecision.skillId 为 github-project-environment-compatibility 时，Task Plan 必须使用 analysis + agent_loop 步骤，并只授权 list_github_repository_tree、read_github_repository_file、inspect_github_project_requirements、inspect_local_development_environment。仓库句柄只能使用 state.githubRepository.repositoryHandleId；禁止读取可变分支、下载仓库、执行仓库内容、安装依赖或写入文件。
 17. 当 routeDecision.skillId 为 local-repository-structure-analysis 时，Task Plan 必须使用一个 analysis + agent_loop 步骤，并只授权 list_local_repository_tree。仓库句柄只能使用 state.localRepository.repositoryHandleId；只可根据路径、blob 身份、大小和截断状态输出结构概览，不得读取文件正文或执行任何操作。
 18. 当 routeDecision.skillId 为 github-repository-structure-analysis 时，Task Plan 必须使用一个 analysis + agent_loop 步骤，并只授权 list_github_repository_tree。仓库句柄只能使用 state.githubRepository.repositoryHandleId；只可根据固定 commit/tree 的路径、blob 身份、大小和截断状态输出结构概览，不得读取文件正文、下载或执行任何操作。
-19. 所有工具参数必须严格符合函数 JSON Schema，不得添加额外字段。`;
+19. 所有工具参数必须严格符合函数 JSON Schema，不得添加额外字段。
+20. 当 routeDecision.skillId 为 web-research 时，使用一个 analysis + agent_loop 步骤，仅授权 search_web、read_web_page，再安排一个 handoff。预算上限为 maxTurns=18、maxToolCalls=15、maxRepeatedCalls=1、maxWallTimeMs=240000、allowParallelReads=false。允许研究中改写查询、翻译关键词、阅读正文和补充搜索；不要添加时间窗口澄清、下载或资源计划。输出为 {status: complete|partial|unavailable, summary, findings:[{claim,urls}], limitations}，每项结论都必须引用已读正文。`;
 
 const modelConnectionTestPrompt = `这是远程模型连接测试。你必须调用且只调用 finish 函数，summary 使用 "Connection test succeeded."，不要返回正文。`;
 
@@ -507,7 +509,7 @@ function transcriptMessages(
         tool_call_id: message.callId,
         content: boundedJson({
           status: message.status,
-          ...(message.output !== undefined ? { output: message.output } : {}),
+          ...(message.output !== undefined ? { output: webObservationForModel(message.tool, message.output) } : {}),
           ...(message.error ? { error: message.error } : {})
         })
       });

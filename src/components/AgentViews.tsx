@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { WebResearchResults } from "./WebResearchResults";
 import {
   AlertTriangle,
   Bot,
@@ -518,26 +519,26 @@ function GitHubRepositoryResults({
       `${output.repositories.length} 个结果 · 仓库名精确匹配优先`;
     primaryCriteria = { label: "搜索方式", value: "按仓库名称" };
     emptySuggestion =
-      "请检查仓库名称拼写；结果只展示带明确开源许可证的公开仓库。";
+      "请检查仓库名称拼写，或使用网页搜索继续查找。";
   } else if (criteria.mode === "exact") {
     resultHeading = `GitHub 仓库 ${criteria.fullName}`;
     resultDescription =
       `${output.repositories.length} 个结果 · 按 owner/repo 精确定位`;
     primaryCriteria = { label: "目标仓库", value: criteria.fullName };
     emptySuggestion =
-      "请检查 owner/repo 是否正确，以及仓库是否公开并带有明确开源许可证。";
+      "请检查 owner/repo 是否正确以及仓库是否公开。";
   } else {
     const sortLabel = {
       stars: "Star 数",
       updated: "最近更新",
       forks: "Fork 数"
     }[criteria.sort];
-    resultHeading = "最近热门的开源项目";
+    resultHeading = "公开仓库搜索结果";
     resultDescription =
       `${output.repositories.length} 个结果 · 按${sortLabel}降序`;
     primaryCriteria = {
       label: "新建于",
-      value: `${criteria.createdAfter} 之后`
+      value: criteria.createdAfter ? `${criteria.createdAfter} 之后` : "不限时间"
     };
     emptySuggestion = "可以返回后扩大新建时间窗口或更换排序指标。";
   }
@@ -553,7 +554,7 @@ function GitHubRepositoryResults({
       </div>
       <section className="github-results-summary" aria-label="查询条件">
         <span>{primaryCriteria.label}<strong>{primaryCriteria.value}</strong></span>
-        <span>许可证<strong>明确开源许可</strong></span>
+        <span>许可证<strong>{criteria.licenseRequired ? "明确开源许可" : "逐项核对，未确认项保留"}</strong></span>
         <span>鉴权<strong>{output.authenticated ? "Token" : "公开访问"}</strong></span>
         <span>剩余额度<strong>{output.rateLimit.remaining ?? "未知"}</strong></span>
       </section>
@@ -615,6 +616,8 @@ function GitHubRepositoryResults({
                   <span><Star size={14} />{repository.stars.toLocaleString()}</span>
                   <span><GitFork size={14} />{repository.forks.toLocaleString()}</span>
                   {repository.language && <span>{repository.language}</span>}
+                  {repository.archived && <span>已归档</span>}
+                  {repository.fork && <span>Fork 仓库</span>}
                   <span>更新于 {formatRepositoryDate(repository.updatedAt)}</span>
                 </div>
                 {repository.topics.length > 0 && (
@@ -1282,6 +1285,7 @@ export function ClarificationView({
       return <TaskPlanConfirmationCard dispatch={dispatch} onNavigate={onNavigate} state={state} />;
     }
     if (state.phase === "result") {
+      if (state.routeDecision?.skillId === "web-research") return <WebResearchResults state={state} dispatch={dispatch} onNavigate={onNavigate} />;
       if (
         [
           "local-project-environment-compatibility",

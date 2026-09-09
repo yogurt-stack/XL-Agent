@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { WebResearchClient } from "./webResearchClient";
+import { webRepositoryCandidate, type WebResearchTools } from "../src/features/agent-core/webResearch";
 import {
   DefaultAgentPolicy,
   InMemoryAgentToolExecutor,
@@ -88,6 +90,7 @@ import { writeCurrentManifestSnapshot } from "./manifestSnapshots";
 import { WorkspaceInspectorAgent } from "./agentB";
 
 export type AgentRuntimeHostOptions = {
+  webResearchTools?: WebResearchTools;
   store: TaskStore;
   modelClient: RemoteModelClient;
   githubRepositorySearch: GitHubRepositorySearchRunner;
@@ -319,7 +322,8 @@ export class AgentRuntimeHost {
       }),
       localRepositoryTools,
       githubRepositoryTools,
-      candidateSelector
+      candidateSelector,
+      this.options.webResearchTools ?? new WebResearchClient()
     );
 
     this.runtime = new AgentRuntime({
@@ -507,10 +511,11 @@ export class AgentRuntimeHost {
           event.fullName.toLowerCase()
           ? state.githubRepository
           : undefined;
-      const selected = selectedFromSearch ?? selectedFromAnalysis;
+      const selected = selectedFromSearch ?? selectedFromAnalysis ?? webRepositoryCandidate(state, event.fullName);
       const prepareAllowed =
         state.phase === "result" &&
         (state.routeDecision?.skillId === "github-project-discovery" ||
+          state.routeDecision?.skillId === "web-research" ||
           analysisResultSkill) &&
         Boolean(selected);
       if (!prepareAllowed) {
@@ -533,8 +538,10 @@ export class AgentRuntimeHost {
         currentState.routeDecision?.skillId ?? "";
       const allowedCurrentSkill =
         currentSkill === "github-project-discovery" ||
+        currentSkill === "web-research" ||
         currentSkill === "github-project-environment-compatibility";
       const stillSelected =
+        Boolean(webRepositoryCandidate(currentState, selected.fullName)) ||
         currentState.githubRepository?.fullName.toLowerCase() ===
           selected.fullName.toLowerCase() ||
         (() => {
@@ -586,10 +593,10 @@ export class AgentRuntimeHost {
       const selected = output?.repositories.find(
         (repository) =>
           repository.fullName.toLowerCase() === event.fullName.toLowerCase()
-      );
+      ) ?? webRepositoryCandidate(state, event.fullName);
       if (
         state.phase !== "result" ||
-        state.routeDecision?.skillId !== "github-project-discovery" ||
+        !["github-project-discovery", "web-research"].includes(state.routeDecision?.skillId ?? "") ||
         !selected
       ) {
         throw new Error("只能分析当前 GitHub 查询结果中明确选择的仓库。");
@@ -609,14 +616,14 @@ export class AgentRuntimeHost {
         isGitHubRepositorySearchOutput(currentResult.output)
           ? currentResult.output
           : null;
-      const stillSelected = currentOutput?.repositories.some(
+      const stillSelected = Boolean(webRepositoryCandidate(currentState, selected.fullName)) || currentOutput?.repositories.some(
         (repository) =>
           repository.fullName.toLowerCase() === selected.fullName.toLowerCase()
       );
       if (
         currentState.taskId !== sourceTaskId ||
         currentState.phase !== "result" ||
-        currentState.routeDecision?.skillId !== "github-project-discovery" ||
+        !["github-project-discovery", "web-research"].includes(currentState.routeDecision?.skillId ?? "") ||
         !stillSelected
       ) {
         throw new Error("固定 GitHub commit 期间任务上下文已变化，请重新选择仓库。");
