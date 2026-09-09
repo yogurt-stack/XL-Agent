@@ -36,7 +36,7 @@ XL-Agent 关注的不是“帮用户找一个下载链接”，而是把一个�
 
   
 
-   项目内置了 7 个 Skill（createDefaultDomainSkillRegistry()）：
+   项目内置了 10 个 Skill（createDefaultDomainSkillRegistry()）：
 
    1. local-environment-compatibility-assessment（本地环境兼容性评估）
    2. local-project-environment-compatibility（本地项目兼容性分析）
@@ -45,6 +45,9 @@ XL-Agent 关注的不是“帮用户找一个下载链接”，而是把一个�
    5. github-project-discovery（GitHub 开源项目检索）
    6. research-data-environment（科研数据环境）
    7. ai-development-environment（AI 开发环境）
+   8. web-research（通用网页搜索与研究）
+   9. local-repository-structure-analysis（本地仓库结构分析）
+   10. github-repository-structure-analysis（GitHub 仓库结构分析）
 
 ## 主要功能
 
@@ -112,6 +115,32 @@ XL_AGENT_GITHUB_PUBLISH_TOKEN=your-write-token
 只读 Token 不会被用作发布凭证，密钥只保存在 Electron Main 进程中。
 
 ## Core Agent Loop
+
+### 通用网页搜索与研究
+
+输入“帮我找支持 Windows、离线运行和中文的开源知识库项目”，Agent 会进入网页研究：保留完整需求，搜索候选、读取官网或文档、按结果改写查询，再生成带引用的结论。直接提供 `owner/repo` 或 GitHub 仓库 URL 仍可进入原有仓库流程；输入“使用 GitHub API，查找 tau 项目”可以显式选择原有 API 检索。
+
+在 `.env` 中选择一个搜索服务，修改后重启应用：
+
+```dotenv
+XL_AGENT_SEARCH_PROVIDER=tavily
+XL_AGENT_TAVILY_API_KEY=your-search-key
+```
+
+Tavily 使用 Search 查找来源、Extract 提取正文。也可选择自部署 SearXNG：
+
+```dotenv
+XL_AGENT_SEARCH_PROVIDER=searxng
+XL_AGENT_SEARXNG_URL=http://127.0.0.1:8080
+```
+
+SearXNG 必须在自己的 `settings.yml` 中启用 `search.formats: [html, json]`。该模式由 Electron Main 抓取公开 HTML/纯文本，并使用 Readability 提取正文，不运行网页脚本。显式配置的 SearXNG 服务可以位于本机；网页读取拒绝本机、内网与非公网解析，并逐跳验证重定向、固定 DNS 解析结果。
+
+完整的查询改写和资料综合需要可用的远程模型（配置见上文）。规则降级模式只搜索并读取最多三页，不生成未经推理的推荐；结果明确标注“部分完成”。服务未配置或所有请求失败时展示“暂不可用”与原因。无搜索密钥时仍可使用 GitHub 精确仓库定位。
+
+每个研究任务最多五次搜索、十次正文读取、十八轮模型调用、四分钟执行时间；正文最多 24,000 字符，超限标明截断。网页报告区分搜索摘要与已读正文，拒绝引用未读网页作为已验证结论。页面内容始终作为不可信资料处理。登录页面、动态渲染页面、PDF 和反爬站点不保证可读。
+
+网页结果中识别出的 GitHub 仓库可以继续选择“分析仓库”或“准备到本地”。宿主重新核实仓库并固定 commit；下载继续需要独立审批。API 搜索保留未识别许可证、归档和 Fork 仓库作为候选，下载时仍执行原有许可证和来源校验。普通发现不再默认限制新建时间。
 
 XL-Agent 使用 Plan-and-Solve 与受控 ReAct 循环结合的运行方式：先确认计划，再在明确的能力边界内执行“模型 → 工具 → 观察结果 → 下一步”。
 

@@ -86,6 +86,7 @@ function commandForRunningStep(
   if (step.kind === "handoff") {
     const readOnlyResultTask =
       state.routeDecision?.skillId === "github-project-discovery" ||
+      state.routeDecision?.skillId === "web-research" ||
       [
         "local-development-environment-inspection",
         "local-environment-compatibility-assessment",

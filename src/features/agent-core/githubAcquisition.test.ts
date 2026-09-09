@@ -146,7 +146,7 @@ function npmResource(): PlannedResource {
 }
 
 describe("GitHub source and npm dependency revisions", () => {
-  it("opens a new TaskPlan revision when local preparation is added after search completion", () => {
+  it.each(["github-project-discovery", "web-research"])("opens a new approval revision when local preparation follows %s", (skillId) => {
     const validationContext = {
       tools: defaultTaskPlanToolPolicies,
       requireInitialConfirmation: true
@@ -196,11 +196,11 @@ describe("GitHub source and npm dependency revisions", () => {
       taskId: "github-search-task",
       task: "查找 openai/example",
       phase: "result" as const,
-      route: "github-project-discovery",
+      route: skillId,
       routeDecision: {
         status: "supported" as const,
         reason: "matched",
-        skillId: "github-project-discovery",
+        skillId,
         sourceProviderId: "github-api",
         userLinks: [],
         resourceIds: [],

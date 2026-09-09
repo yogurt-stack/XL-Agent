@@ -152,6 +152,8 @@ function cleanNameCandidate(value: string | undefined) {
 }
 
 function explicitRepositoryName(task: string) {
+  const multiword = task.match(/(?:下载|克隆|获取|搜索|寻找|查找|\b(?:search|find|download|clone)\b)\s*(?:github\s*(?:for\s+)?)?([A-Za-z0-9][A-Za-z0-9_.-]*(?:\s+[A-Za-z0-9][A-Za-z0-9_.-]*)+)/iu)?.[1];
+  if (multiword && multiword.split(/\s+/).filter((word) => !genericRepositoryNames.has(word.toLowerCase())).length > 1) return null;
   const patterns = [
     /(?:仓库名|项目名|名字|名称|名)\s*(?:是|为|叫做|叫)?\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_.-]{0,99})/iu,
     /(?:名叫|名为|叫做?|named|called)\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_.-]{0,99})/iu,
@@ -161,15 +163,14 @@ function explicitRepositoryName(task: string) {
     /(?:搜索|查找|寻找|检索|搜|找)\s*(?:一个|一下)?\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_.-]{0,99})\s*(?:的)?\s*(?:开源)?(?:项目|仓库|repo(?:sitory)?)/iu,
     /(?:搜索|查找|寻找|检索|搜|找)\s*(?:一个|一下)?\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_. -]{0,99})\s*[”"'」』]?\s*[。.!！?？]*$/iu,
     /\b(?:search|find|locate|download|clone|fetch)\s+github\s+(?:for\s+)?[“"']?([A-Za-z0-9][A-Za-z0-9_. -]{0,99})/iu,
-    // “下载/克隆 X”与“GitHub 上的 X”：X 可能是多词描述（如 deepseek harness），
-    // 取最后一个合法 token 作为仓库名。
+    // 多词描述留给发现/网页研究，不能丢弃前面的限定词。
     /(?:下载|克隆|拉取|获取|clone|fetch|get)\s*(?:github\s*(?:上|中|里|的)?)?\s*(?:的|for)?\s*(?:这个|那个)?\s*(?:项目|仓库|repo(?:sitory)?)?\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_. -]{0,99})/iu,
     /github\s*(?:上|中|里)?\s*(?:的)?\s*(?:这个|那个)?\s*[“"'「『]?([A-Za-z0-9][A-Za-z0-9_. -]{0,99})\s*$/iu
   ];
   for (const pattern of patterns) {
     const matched = task.match(pattern)?.[1];
     const candidate =
-      cleanNameCandidate(matched) ?? lastTokenCandidate(matched);
+      cleanNameCandidate(matched);
     if (candidate && !genericRepositoryNames.has(candidate.toLowerCase())) {
       return candidate;
     }
@@ -185,27 +186,8 @@ function explicitRepositoryName(task: string) {
   return null;
 }
 
-/**
- * 多词候选（如 “deepseek harness”）取最后一个合法 token 作为仓库名。
- */
-function lastTokenCandidate(raw: string | undefined) {
-  if (!raw) return null;
-  const tokens = raw.split(/\s+/).filter(Boolean);
-  for (let i = tokens.length - 1; i >= 0; i -= 1) {
-    const candidate = cleanNameCandidate(tokens[i]);
-    if (
-      candidate &&
-      !genericRepositoryNames.has(candidate.toLowerCase()) &&
-      !ambiguousBareTechnologyNames.has(candidate.toLowerCase())
-    ) {
-      return candidate;
-    }
-  }
-  return null;
-}
-
 function explicitFullName(task: string) {
-  const withoutUrls = task.replace(/https:\/\/[^\s<>"']+/giu, " ");
+  const withoutUrls = task.replace(/https?:\/\/[^\s<>"']+/giu, " ");
   const match = withoutUrls.match(
     /(?:github\s*(?:仓库|项目)?\s*)?[“"'「『]?([A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100})/iu
   );
@@ -292,7 +274,7 @@ export function githubSearchInputFromState(
         ? semanticSearch.query
         : buildDiscoveryQuery(state.task),
     createdWithinDays:
-      daysByAnswer[state.answers["github-created-window"] as string] ?? 30,
+      daysByAnswer[state.answers["github-created-window"] as string] ?? null,
     sort: sortByAnswer[state.answers["github-sort"] as string] ?? "stars",
     limit: 10
   };

@@ -307,6 +307,8 @@ export class TaskPlanOperationError extends Error {
 }
 
 export const defaultTaskPlanToolPolicies: readonly TaskPlanToolPolicy[] = [
+  { name: "search_web", allowedStepKinds: ["read_tool"], risk: "read_only", approvalRequired: false, agentLoopAllowed: true },
+  { name: "read_web_page", allowedStepKinds: ["read_tool"], risk: "read_only", approvalRequired: false, agentLoopAllowed: true },
   {
     name: "read_system_profile",
     allowedStepKinds: ["read_tool"],

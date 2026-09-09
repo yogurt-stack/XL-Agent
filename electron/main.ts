@@ -6,6 +6,7 @@ import path from "node:path";
 import { ZodError } from "zod";
 import type { AgentRuntimeSnapshot } from "../src/features/agent-core/runtimeBridge";
 import { AgentRuntimeHost } from "./agentRuntimeHost";
+import { publicWebUrl } from "../src/features/agent-core/webResearch";
 import {
   downloadTrustedResource,
   toControlledDownloadError,
@@ -350,18 +351,13 @@ function createMainWindow() {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     try {
       const candidate = new URL(url);
-      const pathSegments = candidate.pathname.split("/").filter(Boolean);
       if (
-        candidate.protocol === "https:" &&
-        candidate.hostname === "github.com" &&
-        !candidate.username &&
-        !candidate.password &&
-        pathSegments.length === 2
+        publicWebUrl(candidate.toString())
       ) {
         void shell.openExternal(candidate.toString());
       }
     } catch {
-      // Invalid or non-GitHub URLs remain blocked.
+      // Only public HTTP(S) source links may open in the user's browser.
     }
     return { action: "deny" };
   });

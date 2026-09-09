@@ -26,7 +26,7 @@ function stripTrailingPunctuation(value: string) {
 }
 
 export function extractHttpsLinks(text: string) {
-  return [...text.matchAll(/https:\/\/[^\s<>"']+/giu)]
+  return [...text.matchAll(/https?:\/\/[^\s<>"']+/giu)]
     .map((match) => stripTrailingPunctuation(match[0]))
     .filter((link, index, links) => links.indexOf(link) === index);
 }
@@ -79,7 +79,12 @@ export class ExtensibleAgentRouter implements AgentRouter {
         goal.text
       )
     };
-    const skill = this.skills.match(skillGoal, state);
+    let skill = this.skills.match(skillGoal, state);
+    if (skill?.id === "web-research" && goal.links.length &&
+      !/(搜索|检索|阅读|查阅|研究|search|research|read)/iu.test(skillGoal.text) &&
+      this.providers.list().some((provider) => provider.resolveUserLinks(goal.links).length === goal.links.length)) {
+      skill = null;
+    }
 
     if (skill) {
       return this.buildSkillDecision(skill, skillGoal, state);

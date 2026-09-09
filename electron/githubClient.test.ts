@@ -34,7 +34,17 @@ function repository(
 }
 
 describe("GitHubRepositorySearchClient", () => {
-  it("uses the fixed GitHub endpoint, sanitizes qualifiers and filters non-open-source repositories", async () => {
+  it("does not exclude established repositories when no creation window was requested", async () => {
+    let query = "";
+    const client = new GitHubRepositorySearchClient({}, async (input) => {
+      query = new URL(String(input)).searchParams.get("q") ?? "";
+      return new Response(JSON.stringify({ total_count: 1, incomplete_results: false, items: [repository({ archived: true })] }));
+    });
+    const result = await client.search({ mode: "discovery", keywords: "RAG", createdWithinDays: null, sort: "stars", limit: 5 });
+    expect(query).toBe("RAG is:public");
+    expect(result).toMatchObject({ ok: true, output: { criteria: { createdAfter: null }, repositories: [{ archived: true }] } });
+  });
+  it("uses the fixed GitHub endpoint and retains unlicensed and fork candidates with explicit metadata", async () => {
     let capturedInput: string | URL | Request | null = null;
     let capturedInit: RequestInit | undefined;
     const fetchRequest: GitHubFetch = async (input, init) => {
@@ -82,7 +92,9 @@ describe("GitHubRepositorySearchClient", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.output.repositories).toHaveLength(1);
+    expect(result.output.repositories).toHaveLength(3);
+    expect(result.output.repositories[1].license.spdxId).toBe("UNKNOWN");
+    expect(result.output.repositories[2].fork).toBe(true);
     expect(result.output.repositories[0]).toMatchObject({
       fullName: "openai/example",
       license: { spdxId: "MIT" }
@@ -100,7 +112,7 @@ describe("GitHubRepositorySearchClient", () => {
       "https://api.github.com/search/repositories"
     );
     expect(url.searchParams.get("q")).toContain(
-      "created:>=2026-06-30 is:public archived:false fork:false"
+      "created:>=2026-06-30 is:public"
     );
     expect(url.searchParams.get("q")).not.toContain("stars:>9999");
     expect(url.searchParams.get("per_page")).toBe("100");
@@ -174,7 +186,7 @@ describe("GitHubRepositorySearchClient", () => {
       query: "tau",
       match: "repository-name",
       order: "best-match",
-      licenseRequired: true
+      licenseRequired: false
     });
     expect(result.output.repositories.map((item) => item.fullName)).toEqual([
       "owner/tau",
@@ -182,7 +194,7 @@ describe("GitHubRepositorySearchClient", () => {
     ]);
     const url = new URL(String(capturedInput));
     expect(url.searchParams.get("q")).toBe(
-      "tau in:name is:public archived:false fork:false"
+      "tau in:name is:public"
     );
     expect(url.searchParams.has("sort")).toBe(false);
   });
@@ -217,7 +229,7 @@ describe("GitHubRepositorySearchClient", () => {
       match: "exact"
     });
     expect(new URL(String(capturedInput)).searchParams.get("q")).toBe(
-      "repo:openai/tau is:public archived:false fork:false"
+      "repo:openai/tau is:public"
     );
   });
 

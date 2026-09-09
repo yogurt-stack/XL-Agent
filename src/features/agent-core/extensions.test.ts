@@ -113,7 +113,7 @@ describe("extensible routing and registries", () => {
     });
   });
 
-  it("routes GitHub project discovery before the generic git development skill", () => {
+  it("routes general GitHub research to web search before the generic git development skill", () => {
     const router = new ExtensibleAgentRouter();
     const routed = router.route(
       submitted("帮我查找 GitHub 最新最热门的 10 个开源项目")
@@ -121,11 +121,11 @@ describe("extensible routing and registries", () => {
 
     expect(routed?.decision).toMatchObject({
       status: "supported",
-      skillId: "github-project-discovery",
-      sourceProviderId: "github-api"
+      skillId: "web-research",
+      sourceProviderId: "web-search"
     });
     expect(routed?.decision.clarifications.map((question) => question.id))
-      .toEqual(["github-created-window", "github-sort"]);
+      .toEqual([]);
   });
 
   it("keeps an imported fixed repository attached and routes project compatibility analysis", () => {
@@ -519,9 +519,9 @@ describe("extensible routing and registries", () => {
     ]);
   });
 
-  it("routes a named GitHub repository search without trending clarifications", async () => {
+  it("keeps an explicitly requested GitHub API name search without trending clarifications", async () => {
     const router = new ExtensibleAgentRouter();
-    const initial = submitted("帮我找一个 GitHub 上名叫 tau 的项目");
+    const initial = submitted("使用 GitHub API，帮我找一个 GitHub 上名叫 tau 的项目");
     const routed = router.route(initial);
 
     expect(routed?.decision).toMatchObject({
@@ -566,7 +566,7 @@ describe("extensible routing and registries", () => {
     });
 
     const conversational = submitted(
-      "帮我在 GitHub 上找一个 tau 的开源项目"
+      "使用 GitHub API，帮我在 GitHub 上找一个 tau 的开源项目"
     );
     const conversationalRoute = router.route(conversational);
     expect(conversationalRoute?.decision.clarifications).toEqual([]);
@@ -676,7 +676,7 @@ describe("extensible routing and registries", () => {
     runtime.start();
     runtime.dispatch({
       type: "SUBMIT_TASK",
-      task: "帮我在 GitHub 上找一个名叫 tau 的项目"
+      task: "使用 GitHub API，帮我在 GitHub 上找一个名叫 tau 的项目"
     });
     await jobs.shift()?.();
     await jobs.shift()?.();
@@ -699,7 +699,7 @@ describe("extensible routing and registries", () => {
 
   it("recovers a GitHub result from the durable TaskPlan step output", () => {
     const router = new ExtensibleAgentRouter();
-    const initial = submitted("帮我找一个 GitHub 上名叫 tau 的项目");
+    const initial = submitted("使用 GitHub API，帮我找一个 GitHub 上名叫 tau 的项目");
     const taskPlanning = transition(initial, router.route(initial)!);
     const proposed = confirmTaskPlanForTest(taskPlanning);
     const taskPlan = structuredClone(proposed.taskPlan!);
@@ -947,7 +947,7 @@ describe("extensible routing and registries", () => {
     runtime.start();
     runtime.dispatch({
       type: "SUBMIT_TASK",
-      task: "帮我查找 GitHub 最新最热门的 10 个开源项目"
+      task: "使用 GitHub API，帮我查找 GitHub 最新最热门的 10 个开源项目"
     });
     await jobs.shift()?.();
     await jobs.shift()?.();
@@ -1063,7 +1063,7 @@ describe("extensible routing and registries", () => {
     runtime.start();
     runtime.dispatch({
       type: "SUBMIT_TASK",
-      task: "帮我在 GitHub 上找一个 tau 的开源项目"
+      task: "使用 GitHub API，帮我在 GitHub 上找一个 tau 的开源项目"
     });
     await jobs.shift()?.();
     await jobs.shift()?.();

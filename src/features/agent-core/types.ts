@@ -693,6 +693,8 @@ export type AgentState = {
 };
 
 export type AgentToolName =
+  | "search_web"
+  | "read_web_page"
   | "read_system_profile"
   | "inspect_local_development_environment"
   | "list_local_repository_tree"
@@ -712,7 +714,7 @@ export type GitHubRepositorySort = "stars" | "updated" | "forks";
 export type GitHubRepositoryDiscoverySearchInput = {
   mode: "discovery";
   keywords: string;
-  createdWithinDays: 7 | 30 | 90;
+  createdWithinDays: 7 | 30 | 90 | null;
   sort: GitHubRepositorySort;
   limit: number;
 };
@@ -735,6 +737,8 @@ export type GitHubRepositorySearchInput =
   | GitHubRepositoryExactSearchInput;
 
 export type GitHubRepositorySummary = {
+  archived?: boolean;
+  fork?: boolean;
   id: number;
   fullName: string;
   url: string;
@@ -758,24 +762,24 @@ export type GitHubRepositorySearchOutput = {
     | {
         mode: "discovery";
         keywords: string;
-        createdWithinDays: 7 | 30 | 90;
-        createdAfter: string;
+        createdWithinDays: 7 | 30 | 90 | null;
+        createdAfter: string | null;
         sort: GitHubRepositorySort;
         order: "desc";
-        licenseRequired: true;
+        licenseRequired: boolean;
       }
     | {
         mode: "name";
         query: string;
         match: "repository-name";
         order: "best-match";
-        licenseRequired: true;
+        licenseRequired: boolean;
       }
     | {
         mode: "exact";
         fullName: string;
         match: "exact";
-        licenseRequired: true;
+        licenseRequired: boolean;
       };
   repositories: GitHubRepositorySummary[];
   totalCount: number;
@@ -1036,6 +1040,8 @@ export type AgentToolCall =
       name: "search_github_repositories";
       input: GitHubRepositorySearchInput;
     }
+  | { callId: string; name: "search_web"; input: import("./webResearch").WebSearchInput }
+  | { callId: string; name: "read_web_page"; input: import("./webResearch").WebPageInput }
   | {
       callId: string;
       name: "simulate_download";

@@ -18,6 +18,7 @@ const discoverySearchInputSchema = z.object({
   mode: z.literal("discovery"),
   keywords: z.string().trim().max(200),
   createdWithinDays: z.union([
+    z.null(),
     z.literal(7),
     z.literal(30),
     z.literal(90)
@@ -228,17 +229,14 @@ function toRepository(
   const spdxId = value.license?.spdx_id?.trim();
   if (
     value.private ||
-    value.fork ||
-    value.archived ||
-    !value.license ||
-    !spdxId ||
-    spdxId.toUpperCase() === "NOASSERTION" ||
     !validRepositoryUrl(value.html_url)
   ) {
     return null;
   }
   return {
     id: value.id,
+    archived: value.archived,
+    fork: value.fork,
     fullName: value.full_name,
     url: value.html_url,
     description: value.description,
@@ -248,8 +246,8 @@ function toRepository(
     language: value.language,
     topics: value.topics.slice(0, 12),
     license: {
-      spdxId,
-      name: value.license.name
+      spdxId: spdxId ?? "UNKNOWN",
+      name: value.license?.name ?? "许可证未确认"
     },
     createdAt: value.created_at,
     updatedAt: value.updated_at,
@@ -547,25 +545,25 @@ export class GitHubRepositorySearchClient {
       }
       url.searchParams.set(
         "q",
-        `${query} in:name is:public archived:false fork:false`
+        `${query} in:name is:public`
       );
       criteria = {
         mode: "name",
         query,
         match: "repository-name",
         order: "best-match",
-        licenseRequired: true
+        licenseRequired: false
       };
     } else if (mode === "exact" && parsedInput.data.mode === "exact") {
       url.searchParams.set(
         "q",
-        `repo:${parsedInput.data.fullName} is:public archived:false fork:false`
+        `repo:${parsedInput.data.fullName} is:public`
       );
       criteria = {
         mode: "exact",
         fullName: parsedInput.data.fullName,
         match: "exact",
-        licenseRequired: true
+        licenseRequired: false
       };
     } else {
       const discoveryInput = parsedInput.data;
@@ -577,7 +575,7 @@ export class GitHubRepositorySearchClient {
         );
       }
       const keywords = sanitizeKeywords(discoveryInput.keywords);
-      const createdAfter = dateDaysAgo(
+      const createdAfter = discoveryInput.createdWithinDays === null ? null : dateDaysAgo(
         this.now(),
         discoveryInput.createdWithinDays
       );
@@ -585,10 +583,8 @@ export class GitHubRepositorySearchClient {
         "q",
         [
           keywords,
-          `created:>=${createdAfter}`,
-          "is:public",
-          "archived:false",
-          "fork:false"
+          createdAfter ? `created:>=${createdAfter}` : "",
+          "is:public"
         ].filter(Boolean).join(" ")
       );
       url.searchParams.set("sort", discoveryInput.sort);
@@ -600,7 +596,7 @@ export class GitHubRepositorySearchClient {
         createdAfter,
         sort: discoveryInput.sort,
         order: "desc",
-        licenseRequired: true
+        licenseRequired: false
       };
     }
     url.searchParams.set("per_page", "100");

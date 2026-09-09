@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { webSearchInputSchema, webPageInputSchema } from "./webResearch";
 import { taskPlanProposalSchema } from "./taskPlan";
 import type {
   AgentAction,
@@ -33,6 +34,7 @@ const githubDiscoverySearchInputSchema = z.object({
   mode: z.literal("discovery"),
   keywords: z.string().trim().max(200),
   createdWithinDays: z.union([
+    z.null(),
     z.literal(7),
     z.literal(30),
     z.literal(90)
@@ -57,6 +59,8 @@ const githubSearchInputSchema = z.union([
 ]);
 
 export const agentToolCallSchema = z.discriminatedUnion("name", [
+  z.object({ callId: identifierSchema, name: z.literal("search_web"), input: webSearchInputSchema }).strict(),
+  z.object({ callId: identifierSchema, name: z.literal("read_web_page"), input: webPageInputSchema }).strict(),
   z.object({
     callId: identifierSchema,
     name: z.literal("read_system_profile"),

@@ -303,6 +303,8 @@ const agentLoopToolNames = new Set([
   "inspect_github_project_requirements",
   "search_trusted_catalog",
   "search_github_repositories",
+  "search_web",
+  "read_web_page",
   "simulate_download",
   "controlled_download",
   "export_workspace"

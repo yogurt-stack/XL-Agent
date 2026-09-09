@@ -212,7 +212,7 @@ describe("default agent policy", () => {
   it("contains GitHub discovery to one read-only search before finish", () => {
     let state = transition(createInitialAgentState(), {
       type: "SUBMIT_TASK",
-      task: "查找 GitHub 热门开源项目"
+      task: "使用 GitHub API，查找 GitHub 最近热门开源项目"
     });
     state = transition(state, new ExtensibleAgentRouter().route(state)!);
     state = confirmTaskPlanForTest(state);
@@ -273,7 +273,7 @@ describe("default agent policy", () => {
   it("allows the inferred repository-name query and rejects a trending substitution", () => {
     let state = transition(createInitialAgentState(), {
       type: "SUBMIT_TASK",
-      task: "帮我找一个 GitHub 上名叫 tau 的项目"
+      task: "使用 GitHub API，帮我找一个 GitHub 上名叫 tau 的项目"
     });
     state = transition(state, new ExtensibleAgentRouter().route(state)!);
     state = confirmTaskPlanForTest(state);
